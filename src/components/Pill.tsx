@@ -10,6 +10,8 @@ const DOT_COLOR: Record<string, string> = {
 
 function summarize(task: Task | null): { label: string; status: string } {
   if (!task) return { label: "Daimon", status: "idle" };
+  if (task.error) return { label: task.error, status: "error" };
+  if (task.result) return { label: task.result, status: "done" };
   const activeStep = task.steps.find((s) => s.status !== "done") ?? task.steps[task.steps.length - 1];
   return { label: activeStep?.label ?? task.instruction, status: activeStep?.status ?? "pending" };
 }

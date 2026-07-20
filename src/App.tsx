@@ -1,13 +1,18 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pill } from "./components/Pill";
 import { PipelinePanel } from "./components/PipelinePanel";
 import { useHotkeyToggle } from "./hooks/useHotkeyToggle";
 import { collapseToPill, expandToPanel } from "./lib/window";
-import type { Task } from "./types";
+import { onTaskStatus, startTask } from "./lib/api";
+import type { Task, TaskStep } from "./types";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 
 function App() {
   const [expanded, setExpanded] = useState(false);
   const [task, setTask] = useState<Task | null>(null);
+  const unlistenRef = useRef<UnlistenFn | null>(null);
+
+  useEffect(() => () => unlistenRef.current?.(), []);
 
   const expand = useCallback(() => {
     setExpanded(true);
@@ -30,11 +35,33 @@ function App() {
 
   useHotkeyToggle(toggle);
 
-  const submitInstruction = useCallback((instruction: string) => {
-    setTask({
-      id: crypto.randomUUID(),
-      instruction,
-      steps: [{ id: crypto.randomUUID(), label: "Waiting for background workspace", status: "pending" }],
+  const submitInstruction = useCallback(async (instruction: string) => {
+    unlistenRef.current?.();
+    unlistenRef.current = null;
+
+    const taskId = await startTask(instruction);
+    setTask({ id: taskId, instruction, steps: [] });
+
+    unlistenRef.current = await onTaskStatus(taskId, (event) => {
+      setTask((prev) => {
+        if (!prev || prev.id !== taskId) return prev;
+
+        if (event.type === "step") {
+          const steps = [...prev.steps];
+          const index = steps.findIndex((s) => s.id === event.id);
+          const step: TaskStep = { id: event.id, label: event.label, status: event.status };
+          if (index >= 0) steps[index] = step;
+          else steps.push(step);
+          return { ...prev, steps };
+        }
+        if (event.type === "done") return { ...prev, result: event.result };
+        return { ...prev, error: event.message };
+      });
+
+      if (event.type === "done" || event.type === "error") {
+        unlistenRef.current?.();
+        unlistenRef.current = null;
+      }
     });
   }, []);
 

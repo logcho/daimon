@@ -69,6 +69,8 @@ export function PipelinePanel({
                 </li>
               ))}
             </ul>
+            {task.result && <p className="text-sm text-emerald-400">{task.result}</p>}
+            {task.error && <p className="text-sm text-red-400">{task.error}</p>}
           </div>
         )}
       </div>

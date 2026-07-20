@@ -10,4 +10,6 @@ export interface Task {
   id: string;
   instruction: string;
   steps: TaskStep[];
+  result?: string;
+  error?: string;
 }
