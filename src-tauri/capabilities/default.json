@@ -11,6 +11,7 @@
     "core:window:allow-current-monitor",
     "core:window:allow-primary-monitor",
     "opener:default",
-    "global-shortcut:default"
+    "global-shortcut:default",
+    "allow-start-task"
   ]
 }
