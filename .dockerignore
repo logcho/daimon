@@ -1,0 +1,6 @@
+node_modules
+dist
+target
+.git
+src-tauri/target
+agents/node_modules
