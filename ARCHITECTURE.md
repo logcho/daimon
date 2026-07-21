@@ -96,6 +96,7 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 ├── memory/             # Persistent memory & skills store
 ├── gateway/             # Remote channel bridge (Telegram/Slack/etc.)
 ├── sandbox/            # Background workspace templates (headless browser + shell)
+├── website/            # Public landing page (Astro) — separate project, own package.json
 ├── ARCHITECTURE.md     # This file (Source of Truth)
 └── package.json        # Dependencies
 ```

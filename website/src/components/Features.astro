@@ -1,0 +1,35 @@
+---
+const features = [
+  {
+    title: "Ambient, not intrusive",
+    body: "A small floating widget, not a fullscreen app. Visible when you need it, out of the way when you don't.",
+  },
+  {
+    title: "Its own invisible workspace",
+    body: "Every task runs inside an isolated background environment — never your real cursor, never your real keyboard focus.",
+  },
+  {
+    title: "Persistent memory & skills",
+    body: "Task history and reusable skills are stored locally and carried into future planning, so it gets more useful over time.",
+  },
+  {
+    title: "Runs on your own machine",
+    body: "No mandatory cloud execution layer. Your work happens locally, under your control.",
+  },
+];
+---
+
+<section class="border-t border-white/5 px-6 py-24">
+  <div class="mx-auto max-w-5xl">
+    <div class="grid gap-6 sm:grid-cols-2">
+      {
+        features.map((f) => (
+          <div class="rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.04] to-transparent p-6">
+            <h3 class="text-base font-medium text-neutral-100">{f.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-neutral-400">{f.body}</p>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>

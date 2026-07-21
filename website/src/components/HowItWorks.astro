@@ -1,0 +1,37 @@
+---
+const steps = [
+  {
+    title: "Tell it what to do",
+    body: "Type an instruction into the pill — a small widget that lives quietly in the corner of your screen.",
+  },
+  {
+    title: "It works in the background",
+    body: "Daimon runs the task inside its own invisible workspace — browsing, filling forms, running commands — without touching your mouse, keyboard, or foreground apps.",
+  },
+  {
+    title: "You keep working",
+    body: "No context switch, no handing over your machine. Watch live status if you want to, or ignore it entirely until it's done.",
+  },
+  {
+    title: "It remembers",
+    body: "Completed tasks and learned skills persist, so the next similar request starts from what it already knows.",
+  },
+];
+---
+
+<section class="border-t border-white/5 px-6 py-24">
+  <div class="mx-auto max-w-5xl">
+    <h2 class="text-center text-sm font-medium tracking-widest text-[#4f8dff] uppercase">How it works</h2>
+    <div class="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+      {
+        steps.map((step, i) => (
+          <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-6">
+            <span class="text-sm font-medium text-neutral-600">{String(i + 1).padStart(2, "0")}</span>
+            <h3 class="mt-3 text-base font-medium text-neutral-100">{step.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-neutral-400">{step.body}</p>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>

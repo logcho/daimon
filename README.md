@@ -74,12 +74,18 @@ cd agents && npm run typecheck
 ├── src/         # React frontend: ambient pill UI + expanded pipeline view
 ├── agents/      # LangGraph agent server (runs inside the background workspace)
 ├── sandbox/     # Dockerfile for the background workspace image
+├── memory/      # Local SQLite task/skill memory (gitignored — see ARCHITECTURE.md)
 ├── assets/      # Brand source files (e.g. logo.png, used to regenerate src-tauri/icons)
+├── website/     # Public landing page (Astro) — self-contained, see website/README.md
 ├── ARCHITECTURE.md
 └── PROMPT.md
 ```
 
-`memory/` and `gateway/` (persistent memory/skills, remote chat access) are Phase 2/3 and don't exist yet — see `PROMPT.md`.
+`gateway/` (remote chat access) is Phase 3 and doesn't exist yet — see `PROMPT.md`.
+
+## Landing page
+
+The public landing page lives in `website/` and is a completely separate Astro project (its own `package.json`, not part of the desktop app's dependency tree). See `website/README.md` for dev/build/deploy instructions.
 
 ## Regenerating app icons
 
