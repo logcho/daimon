@@ -1,0 +1,48 @@
+---
+// An illustration of the real pill/chat panel UI (matches the actual React
+// components in src/, not a screenshot) — the task/steps below are a
+// hypothetical example, not a claim about a real run.
+---
+
+<div class="relative mx-auto mt-16 flex w-full max-w-sm flex-col items-center">
+  <div
+    class="mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-white/10 bg-neutral-950/85 shadow-[0_0_28px_-8px_rgba(79,141,255,0.5)] backdrop-blur-xl"
+  >
+    <img src="/logo.svg" alt="" class="h-7 w-7 opacity-90 invert" />
+  </div>
+
+  <div
+    class="w-full rounded-[24px] border border-white/10 bg-neutral-950/90 text-left shadow-[0_0_60px_-16px_rgba(79,141,255,0.35)] backdrop-blur-xl"
+  >
+    <div class="flex items-center gap-2 border-b border-white/10 px-4 py-3">
+      <img src="/logo.svg" alt="" class="h-4 w-4 invert" />
+      <span class="text-xs font-medium text-neutral-300">Daimon</span>
+    </div>
+
+    <div class="space-y-3 p-4">
+      <div class="flex justify-end">
+        <div
+          class="max-w-[85%] rounded-2xl rounded-br-sm border border-[#4f8dff]/20 bg-[#4f8dff]/15 px-3 py-2 text-xs text-neutral-100"
+        >
+          Research flights to Tokyo next month
+        </div>
+      </div>
+      <div class="flex justify-start">
+        <div class="max-w-[85%] space-y-1.5 rounded-2xl rounded-bl-sm border border-white/10 bg-white/5 px-3 py-2 text-xs">
+          <div class="flex items-center gap-2 text-neutral-400">
+            <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+            Opened flight search
+          </div>
+          <div class="flex items-center gap-2 text-neutral-400">
+            <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+            Compared fare options
+          </div>
+          <div class="flex items-center gap-2 text-[#4f8dff]">
+            <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-[#4f8dff]"></span>
+            Summarizing results…
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
