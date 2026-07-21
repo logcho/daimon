@@ -1,19 +1,20 @@
 import { useState } from "react";
 import type { Task, StepStatus } from "../types";
 
-const STATUS_LABEL: Record<StepStatus, string> = {
-  pending: "Queued",
-  running: "Running",
-  done: "Done",
-  error: "Error",
-};
-
-const STATUS_COLOR: Record<StepStatus, string> = {
-  pending: "text-neutral-500",
-  running: "text-amber-400",
-  done: "text-emerald-400",
-  error: "text-red-400",
-};
+function StepIcon({ status }: { status: StepStatus }) {
+  if (status === "done") {
+    return <span className="text-sm text-emerald-400">✓</span>;
+  }
+  if (status === "error") {
+    return <span className="text-sm text-red-400">✕</span>;
+  }
+  if (status === "running") {
+    return (
+      <span className="block h-3 w-3 animate-spin rounded-full border-2 border-[#4f8dff]/25 border-t-[#4f8dff]" />
+    );
+  }
+  return <span className="block h-2 w-2 rounded-full border border-neutral-600" />;
+}
 
 export function PipelinePanel({
   task,
@@ -35,12 +36,14 @@ export function PipelinePanel({
   }
 
   return (
-    <div className="flex h-full w-full flex-col rounded-2xl border border-white/10 bg-neutral-950/95 text-neutral-200 backdrop-blur-xl">
-      <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+    <div className="animate-daimon-in flex h-full w-full flex-col rounded-[28px] border border-white/10 bg-neutral-950/95 text-neutral-200 shadow-[0_0_40px_-12px_rgba(79,141,255,0.25)] backdrop-blur-2xl">
+      <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3">
+        <img src="/logo.svg" alt="" className="h-5 w-5" />
         <span className="text-sm font-medium text-neutral-100">Daimon</span>
+        <div className="flex-1" />
         <button
           onClick={onCollapse}
-          className="rounded-md px-2 py-1 text-xs text-neutral-500 hover:bg-white/5 hover:text-neutral-200"
+          className="rounded-md px-2 py-1 text-xs text-neutral-500 transition hover:bg-white/5 hover:text-neutral-200"
         >
           Collapse
         </button>
@@ -52,7 +55,7 @@ export function PipelinePanel({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Tell Daimon what to do..."
-          className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-white/20 focus:outline-none"
+          className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 transition focus:border-[#4f8dff]/60 focus:outline-none focus:ring-2 focus:ring-[#4f8dff]/20"
         />
       </form>
 
@@ -63,9 +66,11 @@ export function PipelinePanel({
             <p className="text-sm text-neutral-300">{task.instruction}</p>
             <ul className="space-y-2">
               {task.steps.map((step) => (
-                <li key={step.id} className="flex items-center justify-between text-sm">
+                <li key={step.id} className="flex items-center gap-2 text-sm">
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                    <StepIcon status={step.status} />
+                  </span>
                   <span className="text-neutral-300">{step.label}</span>
-                  <span className={STATUS_COLOR[step.status]}>{STATUS_LABEL[step.status]}</span>
                 </li>
               ))}
             </ul>
