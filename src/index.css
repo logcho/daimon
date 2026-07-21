@@ -50,7 +50,7 @@ textarea {
 
 .themed-scroll {
   scrollbar-width: thin;
-  scrollbar-color: rgba(79, 141, 255, 0.35) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
 .themed-scroll::-webkit-scrollbar {
@@ -62,10 +62,10 @@ textarea {
 }
 
 .themed-scroll::-webkit-scrollbar-thumb {
-  background-color: rgba(79, 141, 255, 0.35);
+  background-color: rgba(255, 255, 255, 0.18);
   border-radius: 9999px;
 }
 
 .themed-scroll::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(79, 141, 255, 0.55);
+  background-color: rgba(255, 255, 255, 0.3);
 }

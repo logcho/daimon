@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Task, StepStatus } from "../types";
 
 function StepIcon({ status }: { status: StepStatus }) {
@@ -26,6 +26,11 @@ export function PipelinePanel({
   onSubmit: (instruction: string) => void;
 }) {
   const [draft, setDraft] = useState("");
+  const historyRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: "smooth" });
+  }, [task?.steps.length, task?.result, task?.error]);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -50,7 +55,39 @@ export function PipelinePanel({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="border-b border-white/10 p-3">
+        <div ref={historyRef} className="themed-scroll flex-1 space-y-3 overflow-y-auto p-4">
+          {!task && (
+            <p className="text-sm text-neutral-500">No active task. Give Daimon something to do.</p>
+          )}
+          {task && (
+            <>
+              <div className="flex justify-end">
+                <div className="max-w-[85%] rounded-2xl rounded-br-sm border border-[#4f8dff]/20 bg-[#4f8dff]/15 px-3 py-2 text-sm text-neutral-100">
+                  {task.instruction}
+                </div>
+              </div>
+
+              <div className="flex justify-start">
+                <div className="max-w-[85%] space-y-2 rounded-2xl rounded-bl-sm border border-white/10 bg-white/5 px-3 py-2">
+                  <ul className="space-y-1.5">
+                    {task.steps.map((step) => (
+                      <li key={step.id} className="flex items-center gap-2 text-sm">
+                        <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                          <StepIcon status={step.status} />
+                        </span>
+                        <span className="text-neutral-300">{step.label}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {task.result && <p className="text-sm text-emerald-400">{task.result}</p>}
+                  {task.error && <p className="text-sm text-red-400">{task.error}</p>}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        <form onSubmit={handleSubmit} className="border-t border-white/10 p-3">
           <input
             autoFocus
             value={draft}
@@ -59,27 +96,6 @@ export function PipelinePanel({
             className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 transition focus:border-[#4f8dff]/60 focus:outline-none focus:ring-2 focus:ring-[#4f8dff]/20"
           />
         </form>
-
-        <div className="themed-scroll flex-1 overflow-y-auto p-3">
-          {!task && <p className="text-sm text-neutral-500">No active task. Give Daimon something to do.</p>}
-          {task && (
-            <div className="space-y-3">
-              <p className="text-sm text-neutral-300">{task.instruction}</p>
-              <ul className="space-y-2">
-                {task.steps.map((step) => (
-                  <li key={step.id} className="flex items-center gap-2 text-sm">
-                    <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                      <StepIcon status={step.status} />
-                    </span>
-                    <span className="text-neutral-300">{step.label}</span>
-                  </li>
-                ))}
-              </ul>
-              {task.result && <p className="text-sm text-emerald-400">{task.result}</p>}
-              {task.error && <p className="text-sm text-red-400">{task.error}</p>}
-            </div>
-          )}
-        </div>
       </div>
     </div>
   );
