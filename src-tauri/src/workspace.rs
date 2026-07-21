@@ -79,8 +79,22 @@ async fn ensure_container() -> Result<(), String> {
             Ok(())
         }
         None => {
+            let memory_dir = project_root().join("memory");
+            std::fs::create_dir_all(&memory_dir)
+                .map_err(|e| format!("failed to create memory directory: {e}"))?;
+            let memory_mount = format!("{}:/workspace/memory", memory_dir.display());
+
             let port_mapping = format!("127.0.0.1:{PORT}:{PORT}");
-            let mut args = vec!["run", "-d", "--name", CONTAINER_NAME, "-p", &port_mapping];
+            let mut args = vec![
+                "run",
+                "-d",
+                "--name",
+                CONTAINER_NAME,
+                "-p",
+                &port_mapping,
+                "-v",
+                &memory_mount,
+            ];
 
             let api_key_env;
             if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {

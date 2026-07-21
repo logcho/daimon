@@ -15,6 +15,10 @@ dist-ssr
 # Secrets — see .env.example
 .env
 
+# Local persistent memory/skills DB — bind-mounted into the workspace
+# container, not source (see workspace.rs)
+/memory/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

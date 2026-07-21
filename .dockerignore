@@ -4,3 +4,4 @@ target
 .git
 src-tauri/target
 agents/node_modules
+memory
