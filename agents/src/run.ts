@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
 import { buildAgent } from "./graph.js";
 import { runDemoTask } from "./demo.js";
+import { formatMemoryContext, recordTask, searchSkills, searchTasks } from "./memory.js";
 import type { TaskEvent } from "./events.js";
 
 export async function runTask(instruction: string, emit: (event: TaskEvent) => void): Promise<void> {
@@ -14,7 +15,8 @@ export async function runTask(instruction: string, emit: (event: TaskEvent) => v
   emit({ type: "step", id: thinkingId, label: "Thinking", status: "running" });
 
   try {
-    const agent = buildAgent();
+    const memoryContext = formatMemoryContext(searchTasks(instruction, 3), searchSkills(instruction, 3));
+    const agent = buildAgent(memoryContext);
     const stream = await agent.stream(
       { messages: [new HumanMessage(instruction)] },
       { streamMode: "updates" },
@@ -48,8 +50,12 @@ export async function runTask(instruction: string, emit: (event: TaskEvent) => v
     }
 
     emit({ type: "step", id: thinkingId, label: "Thinking", status: "done" });
-    emit({ type: "done", result: finalResult || "Task complete." });
+    const result = finalResult || "Task complete.";
+    emit({ type: "done", result });
+    recordTask(instruction, result, "done");
   } catch (err) {
-    emit({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    const message = err instanceof Error ? err.message : String(err);
+    emit({ type: "error", message });
+    recordTask(instruction, message, "error");
   }
 }

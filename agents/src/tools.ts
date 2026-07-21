@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { tool } from "@langchain/core/tools";
 import * as browser from "./browser.js";
+import { saveSkill } from "./memory.js";
 
 export const daimonTools = [
   tool(
@@ -45,6 +46,23 @@ export const daimonTools = [
       name: "read_page",
       description: "Read the visible text content of the current page, to decide what to do next.",
       schema: z.object({}),
+    },
+  ),
+  tool(
+    async ({ name, description }: { name: string; description: string }) => {
+      saveSkill(name, description);
+      return `Saved skill "${name}" for future reuse.`;
+    },
+    {
+      name: "save_skill",
+      description:
+        "Save a reusable, generalized description of a task pattern you just completed, so a " +
+        "similar future request can be handled faster. Only for genuinely reusable procedures, " +
+        "not one-off tasks.",
+      schema: z.object({
+        name: z.string().describe("Short identifier, e.g. 'submit-job-application'"),
+        description: z.string().describe("A generalized, parameterized description of the procedure"),
+      }),
     },
   ),
 ];
