@@ -1,61 +1,70 @@
 ---
 const features = [
   {
+    kicker: "Present",
     title: "Ambient, not intrusive",
     body: "A small floating widget, not a fullscreen app. Visible when you need it, out of the way when you don't.",
     icon: "M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
-    span: "lg:col-span-2",
   },
   {
+    kicker: "Isolate",
     title: "Its own invisible workspace",
     body: "Every task runs inside an isolated background environment — never your real cursor, never your real keyboard focus.",
     icon: "M21 8 12 3 3 8l9 5 9-5Z M3 8v8l9 5 9-5V8 M12 13v8",
-    span: "lg:col-span-1",
   },
   {
+    kicker: "Remember",
     title: "Persistent memory & skills",
     body: "Task history and reusable skills are stored locally and carried into future planning, so it gets more useful over time.",
     icon: "M4 6a8 3 0 0 0 16 0 M4 6a8 3 0 0 1 16 0v12a8 3 0 0 1-16 0V6 M4 12a8 3 0 0 0 16 0",
-    span: "lg:col-span-1",
   },
   {
+    kicker: "Local",
     title: "Runs on your own machine",
     body: "No mandatory cloud execution layer. Your work happens locally, under your control.",
     icon: "M3 5h18v11H3z M8 20h8 M12 16v4",
-    span: "lg:col-span-2",
   },
 ];
 ---
 
-<section id="features" class="bg-white/[0.015] px-6 py-28">
+<section id="features" class="flex min-h-screen flex-col justify-center bg-white/[0.015] px-6 py-28">
   <div data-reveal class="mx-auto max-w-5xl">
     <div class="text-center">
-      <span class="text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">Why it's different</span>
-      <h2 class="mt-4 text-3xl font-semibold tracking-tight text-neutral-50 sm:text-4xl">
+      <span class="font-mono text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">Why it's different</span>
+      <h2 class="font-display mt-4 text-3xl font-medium tracking-tight text-neutral-50 sm:text-4xl">
         Built to stay out of your way.
       </h2>
     </div>
-    <div class="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+
+    <div class="mt-14 border-t border-white/10">
       {
-        features.map((f) => (
-          <div
-            class={`rounded-2xl border border-white/10 bg-gradient-to-br from-white/[0.05] to-transparent p-6 transition duration-300 hover:-translate-y-1 hover:border-[#4f8dff]/30 ${f.span}`}
-          >
-            <div class="mb-4 flex h-10 w-10 items-center justify-center rounded-lg border border-[#4f8dff]/20 bg-[#4f8dff]/10">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="#4f8dff"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                class="h-5 w-5"
-              >
-                <path d={f.icon} />
-              </svg>
+        features.map((f, i) => (
+          <div class="group relative border-b border-white/10 py-10 transition hover:bg-white/[0.02] sm:py-12">
+            <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-10">
+              <div class="flex items-baseline gap-3 sm:w-44 sm:shrink-0">
+                <span class="font-mono text-sm text-[#4f8dff]">0{i + 1}</span>
+                <span class="font-mono text-[11px] tracking-[0.2em] text-neutral-500 uppercase">{f.kicker}</span>
+              </div>
+
+              <div class="flex-1">
+                <h3 class="font-display text-2xl font-medium text-neutral-50 sm:text-3xl">{f.title}</h3>
+                <p class="mt-2 max-w-xl text-sm leading-relaxed text-neutral-400 sm:text-base">{f.body}</p>
+              </div>
+
+              <div class="relative hidden h-16 w-16 shrink-0 items-center justify-center sm:flex">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="#4f8dff"
+                  stroke-width="1"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="h-14 w-14 text-[#4f8dff] opacity-20 transition duration-300 group-hover:opacity-40"
+                >
+                  <path d={f.icon} />
+                </svg>
+              </div>
             </div>
-            <h3 class="text-lg font-medium text-neutral-100">{f.title}</h3>
-            <p class="mt-2 text-sm leading-relaxed text-neutral-400">{f.body}</p>
           </div>
         ))
       }

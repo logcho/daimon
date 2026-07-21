@@ -1,0 +1,44 @@
+---
+// A build-time-generated halftone dot burst — dot size falls off from the
+// center outward, echoing an engraving-style radial texture without using
+// any external art. Pure SVG, no runtime cost.
+interface Props {
+  class?: string;
+  dotColor?: string;
+}
+
+const { class: className = "", dotColor = "#4f8dff" } = Astro.props;
+
+const COLS = 44;
+const ROWS = 24;
+const CELL = 14;
+
+function buildDots() {
+  const dots: { x: number; y: number; r: number }[] = [];
+  const cx = COLS / 2;
+  const cy = ROWS / 2;
+  const maxDist = Math.hypot(cx, cy);
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      const dist = Math.hypot(col - cx, row - cy) / maxDist;
+      const falloff = Math.max(0, 1 - dist);
+      const r = falloff * 2.1 * (0.55 + Math.random() * 0.45);
+      if (r > 0.15) dots.push({ x: col, y: row, r });
+    }
+  }
+  return dots;
+}
+
+const dots = buildDots();
+const width = COLS * CELL;
+const height = ROWS * CELL;
+---
+
+<svg
+  aria-hidden="true"
+  viewBox={`0 0 ${width} ${height}`}
+  preserveAspectRatio="xMidYMid slice"
+  class={`pointer-events-none absolute inset-0 -z-10 h-full w-full select-none [mask-image:radial-gradient(ellipse_60%_60%_at_50%_50%,black,transparent)] ${className}`}
+>
+  {dots.map((d) => <circle cx={d.x * CELL + CELL / 2} cy={d.y * CELL + CELL / 2} r={d.r} fill={dotColor} opacity="0.4" />)}
+</svg>

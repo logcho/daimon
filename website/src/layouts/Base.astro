@@ -7,7 +7,7 @@ interface Props {
 }
 
 const {
-  title = "Daimon — an agent that runs in the background, not your way",
+  title = "Daimon — an agent that runs in the background, not in your way",
   description = "Every computer runs daemons quietly in the background — Daimon is one that works for you. Runs real tasks on your own machine while you keep working on something else.",
 } = Astro.props;
 ---
@@ -19,6 +19,13 @@ const {
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <meta name="generator" content={Astro.generator} />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,400..500&display=swap"
+      rel="stylesheet"
+    />
 
     <title>{title}</title>
     <meta name="description" content={description} />

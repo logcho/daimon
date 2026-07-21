@@ -1,12 +1,14 @@
 ---
 import { Image } from "astro:assets";
-import mascot from "../assets/mascot.png";
+import logo from "../assets/logo.svg";
 import HeroMockup from "./HeroMockup.astro";
 import AsciiField from "./AsciiField.astro";
+import RayBurst from "./RayBurst.astro";
 ---
 
-<section class="relative overflow-hidden px-6 pt-20 pb-24 sm:pt-28 sm:pb-32">
+<section id="hero" class="relative isolate flex min-h-screen flex-col justify-center overflow-hidden px-6 py-24">
   <AsciiField />
+  <RayBurst />
   <div
     class="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_60%_55%_at_50%_5%,rgba(79,141,255,0.2),transparent)]"
   >
@@ -18,17 +20,17 @@ import AsciiField from "./AsciiField.astro";
         class="pointer-events-none absolute inset-0 -z-10 scale-150 rounded-full bg-[#4f8dff]/20 blur-3xl"
       >
       </div>
-      <Image src={mascot} alt="Daimon" width={220} height={220} class="h-40 w-40 sm:h-52 sm:w-52" />
+      <Image src={logo} alt="Daimon" width={220} height={220} class="h-40 w-40 invert sm:h-52 sm:w-52" />
     </div>
 
-    <span class="mb-5 text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">
+    <span class="mb-5 font-mono text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">
       Ambient · Local-First · In Active Development
     </span>
 
     <h1
-      class="text-glow text-5xl leading-[1.05] font-semibold tracking-tight text-neutral-50 sm:text-6xl lg:text-7xl"
+      class="font-display text-glow text-5xl leading-[1.05] font-medium tracking-tight text-neutral-50 sm:text-6xl lg:text-7xl"
     >
-      An agent that runs<br /> in the background, <span class="text-[#4f8dff]">not your way</span>.
+      An agent that runs<br /> in the background, <span class="text-[#4f8dff] italic">not in your way</span>.
     </h1>
 
     <p class="mt-6 max-w-xl text-lg text-neutral-400">

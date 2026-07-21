@@ -1,0 +1,50 @@
+---
+// A build-time-generated radial line burst behind the hero mascot — thin
+// rays fanning out from a center point at irregular length/opacity for an
+// engraved feel, echoing the site's halftone motif without new art assets.
+interface Props {
+  class?: string;
+  color?: string;
+}
+
+const { class: className = "", color = "#4f8dff" } = Astro.props;
+
+const COUNT = 100;
+const SIZE = 900;
+const CENTER = SIZE / 2;
+const INNER = 70;
+const OUTER = SIZE / 2;
+
+function buildRays() {
+  const rays: { x1: number; y1: number; x2: number; y2: number; opacity: number; width: number }[] = [];
+  for (let i = 0; i < COUNT; i++) {
+    const angle = (i / COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.03;
+    const r1 = INNER * (0.75 + Math.random() * 0.5);
+    const r2 = OUTER * (0.55 + Math.random() * 0.45);
+    rays.push({
+      x1: CENTER + Math.cos(angle) * r1,
+      y1: CENTER + Math.sin(angle) * r1,
+      x2: CENTER + Math.cos(angle) * r2,
+      y2: CENTER + Math.sin(angle) * r2,
+      opacity: 0.12 + Math.random() * 0.2,
+      width: Math.random() < 0.12 ? 2.2 : 1,
+    });
+  }
+  return rays;
+}
+
+const rays = buildRays();
+---
+
+<svg
+  aria-hidden="true"
+  viewBox={`0 0 ${SIZE} ${SIZE}`}
+  preserveAspectRatio="xMidYMid slice"
+  class={`pointer-events-none absolute top-[19%] left-1/2 -z-10 h-[560px] w-[560px] max-w-none -translate-x-1/2 -translate-y-1/2 select-none sm:h-[680px] sm:w-[680px] [mask-image:radial-gradient(circle,black,transparent_72%)] ${className}`}
+>
+  {
+    rays.map((r) => (
+      <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={color} stroke-width={r.width} opacity={r.opacity} stroke-linecap="round" />
+    ))
+  }
+</svg>

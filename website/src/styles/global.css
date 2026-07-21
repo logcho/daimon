@@ -10,6 +10,11 @@ body {
     -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
 }
 
+.font-display {
+  font-family: "Fraunces", ui-serif, Georgia, serif;
+  font-optical-sizing: auto;
+}
+
 ::selection {
   background: rgba(79, 141, 255, 0.35);
 }

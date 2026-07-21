@@ -19,11 +19,11 @@ const steps = [
 ];
 ---
 
-<section id="how-it-works" class="px-6 py-28">
+<section id="how-it-works" class="flex min-h-screen flex-col justify-center px-6 py-28">
   <div data-reveal class="mx-auto max-w-5xl">
     <div class="text-center">
-      <span class="text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">Process</span>
-      <h2 class="mt-4 text-3xl font-semibold tracking-tight text-neutral-50 sm:text-4xl">
+      <span class="font-mono text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">Process</span>
+      <h2 class="font-display mt-4 text-3xl font-medium tracking-tight text-neutral-50 sm:text-4xl">
         Give it a task. Keep working.
       </h2>
     </div>
@@ -37,10 +37,10 @@ const steps = [
       {
         steps.map((step, i) => (
           <div class="relative flex flex-col items-start">
-            <span class="relative z-10 mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-[#4f8dff]/30 bg-[#0a0a0a] text-base font-medium text-[#4f8dff]">
+            <span class="relative z-10 mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-[#4f8dff]/30 bg-[#0a0a0a] font-mono text-base font-medium text-[#4f8dff]">
               {i + 1}
             </span>
-            <h3 class="text-lg font-medium text-neutral-100">{step.title}</h3>
+            <h3 class="font-display text-lg font-medium text-neutral-100">{step.title}</h3>
             <p class="mt-2 text-sm leading-relaxed text-neutral-400">{step.body}</p>
           </div>
         ))
