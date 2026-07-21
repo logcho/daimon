@@ -1,4 +1,4 @@
-<header id="site-nav" class="fixed inset-x-0 top-0 z-30 transition-colors duration-300">
+<header id="site-nav" class="fixed inset-x-0 top-0 z-30">
   <div class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
     <a href="/" class="flex items-center gap-2">
       <img src="/logo.svg" alt="Daimon" class="h-6 w-6 invert" />
@@ -21,16 +21,19 @@
 
 <script>
   const nav = document.getElementById("site-nav");
-  const scrolledClasses = ["border-b", "border-white/5", "bg-[#050505]/80", "backdrop-blur-xl"];
+  const hero = document.getElementById("hero");
+  const solidClasses = ["border-b", "border-white/5", "bg-[#050505]"];
 
-  const syncNav = () => {
-    if (!nav) return;
-    nav.classList.toggle(scrolledClasses[0], window.scrollY > 40);
-    nav.classList.toggle(scrolledClasses[1], window.scrollY > 40);
-    nav.classList.toggle(scrolledClasses[2], window.scrollY > 40);
-    nav.classList.toggle(scrolledClasses[3], window.scrollY > 40);
-  };
-
-  syncNav();
-  window.addEventListener("scroll", syncNav, { passive: true });
+  if (nav && hero) {
+    const navHeight = nav.offsetHeight;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        for (const cls of solidClasses) {
+          nav.classList.toggle(cls, !entry.isIntersecting);
+        }
+      },
+      { rootMargin: `-${navHeight}px 0px 0px 0px`, threshold: 0 },
+    );
+    observer.observe(hero);
+  }
 </script>

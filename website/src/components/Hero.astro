@@ -1,12 +1,11 @@
 ---
 import { Image } from "astro:assets";
 import logo from "../assets/logo.svg";
-import HeroMockup from "./HeroMockup.astro";
 import AsciiField from "./AsciiField.astro";
 import RayBurst from "./RayBurst.astro";
 ---
 
-<section id="hero" class="relative isolate flex min-h-screen flex-col justify-center overflow-hidden px-6 py-24">
+<section id="hero" class="relative isolate flex h-screen flex-col justify-center overflow-hidden px-6 py-10">
   <AsciiField />
   <RayBurst />
   <div
@@ -15,30 +14,30 @@ import RayBurst from "./RayBurst.astro";
   </div>
 
   <div class="mx-auto flex max-w-3xl flex-col items-center text-center">
-    <div class="relative mb-6">
+    <div class="relative mb-5">
       <div
         class="pointer-events-none absolute inset-0 -z-10 scale-150 rounded-full bg-[#4f8dff]/20 blur-3xl"
       >
       </div>
-      <Image src={logo} alt="Daimon" width={220} height={220} class="h-40 w-40 invert sm:h-52 sm:w-52" />
+      <Image src={logo} alt="Daimon" width={260} height={260} class="h-48 w-48 invert sm:h-64 sm:w-64" />
     </div>
 
-    <span class="mb-5 font-mono text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">
+    <span class="mb-4 font-mono text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">
       Ambient · Local-First · In Active Development
     </span>
 
     <h1
-      class="font-display text-glow text-5xl leading-[1.05] font-medium tracking-tight text-neutral-50 sm:text-6xl lg:text-7xl"
+      class="font-display text-glow text-4xl leading-[1.05] font-medium tracking-tight text-neutral-50 sm:text-5xl lg:text-6xl"
     >
       An agent that runs<br /> in the background, <span class="text-[#4f8dff] italic">not in your way</span>.
     </h1>
 
-    <p class="mt-6 max-w-xl text-lg text-neutral-400">
+    <p class="mt-5 max-w-xl text-base text-neutral-400 sm:text-lg">
       Every computer runs daemons quietly in the background — Daimon is one that works for you.
       No separate desktop, no takeover, just an extra set of hands while you keep working.
     </p>
 
-    <div class="mt-10 flex flex-wrap items-center justify-center gap-3">
+    <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
       <a
         href="https://github.com/logcho/daimon"
         target="_blank"
@@ -53,10 +52,6 @@ import RayBurst from "./RayBurst.astro";
       >
         See how it works ↓
       </a>
-    </div>
-
-    <div class="mt-16 w-full max-w-sm">
-      <HeroMockup />
     </div>
   </div>
 </section>
