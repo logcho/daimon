@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-This repository currently contains only planning documents — no code has been written yet, and there are no commits on `main`. There is no `package.json`, `src/`, or `src-tauri/` directory yet, and consequently no build/lint/test tooling exists to reference. Before assuming any command or file path works, check whether it has actually been created — the structure below is the *target* layout, not the current one.
+Phase 1 (ambient shell + one background task) and Phase 2 (memory & skills) are both built and verified — see `PROMPT.md` for what that covers concretely and what's still ahead (Phase 3: remote gateway, Phase 4: voice/multi-task/subagents). The landing page (`website/`) also exists as a separate Astro project. Don't treat this file's "target" framing as literal for those areas — check what's actually on disk before assuming a path doesn't exist yet.
 
 ## Source of truth
 
@@ -56,14 +56,22 @@ These constraints come from `ARCHITECTURE.md` §5 and should hold for any code t
 
 ```text
 /daimon
-├── src-tauri/          # Rust backend: IPC handlers, workspace/container manager, gateway supervisor
-├── src/                # React frontend: ambient pill UI + expanded pipeline view
-├── agents/             # LangGraph definitions, tool schemas, skill library
-├── memory/             # Persistent memory & skills store
-├── gateway/             # Remote channel bridge (Telegram/Slack/etc.)
-├── sandbox/            # Background workspace templates (headless browser + shell)
+├── src-tauri/          # Rust backend: IPC handlers, workspace/container manager (built)
+├── src/                # React frontend: ambient pill UI + expanded pipeline view (built)
+├── agents/             # LangGraph agent server + SQLite memory/skill store (built)
+├── memory/             # Local SQLite DB, gitignored — bind-mounted into the workspace container
+├── sandbox/            # Dockerfile for the background workspace image (built)
+├── website/            # Public landing page, Astro — separate project, own package.json (built)
+├── gateway/             # Remote channel bridge (Telegram/Slack/etc.) — Phase 3, not built yet
 ├── ARCHITECTURE.md      # Source of truth
 └── package.json
 ```
 
-None of these paths exist yet except `ARCHITECTURE.md`, `PROMPT.md`, and this file. When scaffolding the project, follow this layout and the phase order in `PROMPT.md` rather than inventing an alternative sequence.
+Follow the phase order in `PROMPT.md` for anything not built yet rather than inventing an alternative sequence.
+
+## Project-specific Claude Code skills
+
+Two skills live in `.claude/skills/` for this repo specifically:
+
+- **`daimon-design-system`** — the established colors/typography/spacing/motion conventions across both frontends (app + website), including a real glow-clipping bug worth knowing before adding a `box-shadow` to anything. Load before touching UI code.
+- **`daimon-web-verify`** — the correct typecheck/build commands for whichever of the two independent frontend projects (`src/`+`src-tauri/` vs `website/`) you touched, and how to clean up dev servers/containers spun up for verification. Load after changing frontend code, before calling it done.
