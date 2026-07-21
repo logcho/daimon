@@ -23,12 +23,13 @@ const features = [
 ];
 ---
 
-<section id="features" class="border-t border-white/5 px-6 py-24">
-  <div class="mx-auto max-w-5xl">
-    <div class="grid gap-6 sm:grid-cols-2">
+<section id="features" class="bg-white/[0.015] px-6 py-28">
+  <div data-reveal class="mx-auto max-w-5xl">
+    <h2 class="text-center text-sm font-medium tracking-widest text-[#4f8dff] uppercase">What makes it different</h2>
+    <div class="mt-10 grid gap-6 sm:grid-cols-2">
       {
         features.map((f) => (
-          <div class="rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.04] to-transparent p-6">
+          <div class="rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.04] to-transparent p-6 transition duration-300 hover:-translate-y-1 hover:border-[#4f8dff]/30">
             <div class="mb-4 flex h-9 w-9 items-center justify-center rounded-lg border border-[#4f8dff]/20 bg-[#4f8dff]/10">
               <svg
                 viewBox="0 0 24 24"

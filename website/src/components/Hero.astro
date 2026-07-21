@@ -1,17 +1,17 @@
 ---
-import { Image } from "astro:assets";
-import logo from "../assets/logo.png";
 import HeroMockup from "./HeroMockup.astro";
+import AsciiField from "./AsciiField.astro";
 ---
 
 <section class="relative overflow-hidden px-6 pt-28 pb-24 sm:pt-36 sm:pb-32">
+  <AsciiField />
   <div
     class="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_60%_50%_at_50%_0%,rgba(79,141,255,0.18),transparent)]"
   >
   </div>
 
   <div class="mx-auto flex max-w-3xl flex-col items-center text-center">
-    <Image src={logo} alt="Daimon" width={96} height={96} class="mb-8 opacity-95" />
+    <img src="/logo.svg" alt="Daimon" width="96" height="96" class="mb-8 h-24 w-24 opacity-95 invert" />
 
     <span
       class="mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-neutral-400"

@@ -32,5 +32,19 @@ const {
   </head>
   <body class="bg-[#050505] text-neutral-200 antialiased">
     <slot />
+    <script>
+      const observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              entry.target.classList.add("is-visible");
+              observer.unobserve(entry.target);
+            }
+          }
+        },
+        { threshold: 0.15 },
+      );
+      document.querySelectorAll("[data-reveal]").forEach((el) => observer.observe(el));
+    </script>
   </body>
 </html>

@@ -1,0 +1,27 @@
+---
+// A static, build-time-generated field of faint monospace glyphs behind the
+// hero — an original ambient texture (not any specific illustration),
+// masked so it fades out toward the edges and never competes with text.
+const COLS = 64;
+const ROWS = 20;
+const CHARS = ["·", "+", "×", "✦", "∙", " ", " ", " ", " ", " ", " "];
+
+function buildGrid() {
+  let out = "";
+  for (let row = 0; row < ROWS; row++) {
+    let line = "";
+    for (let col = 0; col < COLS; col++) {
+      line += CHARS[Math.floor(Math.random() * CHARS.length)];
+    }
+    out += line + "\n";
+  }
+  return out;
+}
+
+const grid = buildGrid();
+---
+
+<pre
+  aria-hidden="true"
+  class="pointer-events-none absolute inset-0 -z-20 overflow-hidden text-center font-mono text-[11px] leading-[16px] text-[#4f8dff]/[0.16] select-none [mask-image:radial-gradient(ellipse_55%_65%_at_50%_15%,black,transparent)]"
+>{grid}</pre>
