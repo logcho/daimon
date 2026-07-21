@@ -1,6 +1,28 @@
 mod task;
 mod workspace;
 
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+
+fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+    let quit = MenuItem::with_id(app, "quit", "Quit Daimon", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit])?;
+
+    let mut tray = TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(true);
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    tray.on_menu_event(|app, event| {
+        if event.id() == "quit" {
+            app.exit(0);
+        }
+    })
+    .build(app)?;
+
+    Ok(())
+}
+
 /// Shared app construction so tests can exercise the exact same command
 /// wiring as the real app, without invoking `tauri::generate_context!()`
 /// (which may only appear once per crate) a second time.
@@ -25,5 +47,14 @@ pub fn run() {
         std::env::var("ANTHROPIC_API_KEY").is_ok()
     );
 
-    build_app(tauri::Builder::default()).run(|_app, _event| {});
+    #[allow(unused_mut)]
+    let mut app = build_app(tauri::Builder::default());
+
+    setup_tray(app.handle()).expect("failed to set up the tray icon");
+
+    // Ambient widget, not a regular app: no Dock icon, no Cmd+Tab entry.
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+    app.run(|_app, _event| {});
 }
