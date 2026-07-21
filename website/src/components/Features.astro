@@ -29,14 +29,19 @@ const features = [
 
 <section id="features" class="bg-white/[0.015] px-6 py-28">
   <div data-reveal class="mx-auto max-w-5xl">
-    <h2 class="text-center text-sm font-medium tracking-widest text-[#4f8dff] uppercase">What makes it different</h2>
-    <div class="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+    <div class="text-center">
+      <span class="text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">Why it's different</span>
+      <h2 class="mt-4 text-3xl font-semibold tracking-tight text-neutral-50 sm:text-4xl">
+        Built to stay out of your way.
+      </h2>
+    </div>
+    <div class="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
       {
         features.map((f) => (
           <div
             class={`rounded-2xl border border-white/10 bg-gradient-to-br from-white/[0.05] to-transparent p-6 transition duration-300 hover:-translate-y-1 hover:border-[#4f8dff]/30 ${f.span}`}
           >
-            <div class="mb-4 flex h-9 w-9 items-center justify-center rounded-lg border border-[#4f8dff]/20 bg-[#4f8dff]/10">
+            <div class="mb-4 flex h-10 w-10 items-center justify-center rounded-lg border border-[#4f8dff]/20 bg-[#4f8dff]/10">
               <svg
                 viewBox="0 0 24 24"
                 fill="none"
@@ -44,12 +49,12 @@ const features = [
                 stroke-width="1.5"
                 stroke-linecap="round"
                 stroke-linejoin="round"
-                class="h-4.5 w-4.5"
+                class="h-5 w-5"
               >
                 <path d={f.icon} />
               </svg>
             </div>
-            <h3 class="text-base font-medium text-neutral-100">{f.title}</h3>
+            <h3 class="text-lg font-medium text-neutral-100">{f.title}</h3>
             <p class="mt-2 text-sm leading-relaxed text-neutral-400">{f.body}</p>
           </div>
         ))

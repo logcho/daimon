@@ -21,21 +21,26 @@ const steps = [
 
 <section id="how-it-works" class="px-6 py-28">
   <div data-reveal class="mx-auto max-w-5xl">
-    <h2 class="text-center text-sm font-medium tracking-widest text-[#4f8dff] uppercase">How it works</h2>
+    <div class="text-center">
+      <span class="text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">Process</span>
+      <h2 class="mt-4 text-3xl font-semibold tracking-tight text-neutral-50 sm:text-4xl">
+        Give it a task. Keep working.
+      </h2>
+    </div>
 
-    <div class="relative mt-14 grid gap-10 sm:grid-cols-2 lg:grid-cols-4 lg:gap-6">
+    <div class="relative mt-16 grid gap-10 sm:grid-cols-2 lg:grid-cols-4 lg:gap-6">
       <div
-        class="pointer-events-none absolute top-5 right-[12%] left-[12%] hidden h-px bg-gradient-to-r from-transparent via-white/15 to-transparent lg:block"
+        class="pointer-events-none absolute top-6 right-[12%] left-[12%] hidden h-px bg-gradient-to-r from-transparent via-white/15 to-transparent lg:block"
       >
       </div>
 
       {
         steps.map((step, i) => (
           <div class="relative flex flex-col items-start">
-            <span class="relative z-10 mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-[#4f8dff]/30 bg-[#0a0a0a] text-sm font-medium text-[#4f8dff]">
+            <span class="relative z-10 mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-[#4f8dff]/30 bg-[#0a0a0a] text-base font-medium text-[#4f8dff]">
               {i + 1}
             </span>
-            <h3 class="text-base font-medium text-neutral-100">{step.title}</h3>
+            <h3 class="text-lg font-medium text-neutral-100">{step.title}</h3>
             <p class="mt-2 text-sm leading-relaxed text-neutral-400">{step.body}</p>
           </div>
         ))
