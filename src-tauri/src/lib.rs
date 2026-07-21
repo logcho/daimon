@@ -1,3 +1,4 @@
+mod settings;
 mod task;
 mod workspace;
 
@@ -26,11 +27,20 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
 /// Shared app construction so tests can exercise the exact same command
 /// wiring as the real app, without invoking `tauri::generate_context!()`
 /// (which may only appear once per crate) a second time.
+///
+/// The global-shortcut plugin is deliberately *not* registered here (unlike
+/// in a typical setup) — it grabs an OS-level singleton hotkey manager that
+/// can only be initialized once per process, and every test that calls this
+/// function would otherwise panic on the second `App` built in the same
+/// `cargo test` run. It's applied to the builder separately, only in `run()`.
 pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::App<R> {
     builder
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![task::start_task])
+        .invoke_handler(tauri::generate_handler![
+            task::start_task,
+            settings::get_api_key_status,
+            settings::set_api_key
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
 }
@@ -47,8 +57,10 @@ pub fn run() {
         std::env::var("ANTHROPIC_API_KEY").is_ok()
     );
 
+    let builder = tauri::Builder::default().plugin(tauri_plugin_global_shortcut::Builder::new().build());
+
     #[allow(unused_mut)]
-    let mut app = build_app(tauri::Builder::default());
+    let mut app = build_app(builder);
 
     setup_tray(app.handle()).expect("failed to set up the tray icon");
 

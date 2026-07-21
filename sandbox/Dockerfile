@@ -7,11 +7,12 @@ WORKDIR /workspace
 
 COPY agents/package.json agents/package-lock.json ./
 RUN npm ci
+RUN npx playwright install --with-deps chromium
 
+# Source changes are far more frequent than dependency changes — copy it
+# last so editing agents/src doesn't invalidate the (slow) install layers.
 COPY agents/tsconfig.json ./
 COPY agents/src ./src
-
-RUN npx playwright install --with-deps chromium
 
 ENV PORT=4711
 EXPOSE 4711

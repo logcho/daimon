@@ -21,3 +21,11 @@ export function onTaskStatus(taskId: string, handler: (event: WorkspaceEvent) =>
     if (e.payload.task_id === taskId) handler(e.payload.event);
   });
 }
+
+export function getApiKeyStatus(): Promise<boolean> {
+  return invoke<boolean>("get_api_key_status");
+}
+
+export function setApiKey(key: string): Promise<void> {
+  return invoke<void>("set_api_key", { key });
+}

@@ -12,6 +12,8 @@
     "core:window:allow-primary-monitor",
     "opener:default",
     "global-shortcut:default",
-    "allow-start-task"
+    "allow-start-task",
+    "allow-get-api-key-status",
+    "allow-set-api-key"
   ]
 }

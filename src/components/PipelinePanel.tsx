@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { Task, TaskStep } from "../types";
 import { ThinkingIndicator } from "./ThinkingIndicator";
+import { Settings } from "./Settings";
+
+type View = "chat" | "settings";
 
 function StepLine({ step }: { step: TaskStep }) {
   if (step.label === "Thinking" && step.status === "running") {
@@ -41,6 +44,19 @@ function StepLine({ step }: { step: TaskStep }) {
   );
 }
 
+function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-full px-2.5 py-1 font-mono text-xs transition ${
+        active ? "bg-[#4f8dff]/15 text-[#4f8dff]" : "text-neutral-500 hover:text-neutral-200"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function PipelinePanel({
   task,
   onCollapse,
@@ -50,6 +66,7 @@ export function PipelinePanel({
   onCollapse: () => void;
   onSubmit: (instruction: string) => void;
 }) {
+  const [view, setView] = useState<View>("chat");
   const [draft, setDraft] = useState("");
   const historyRef = useRef<HTMLDivElement>(null);
 
@@ -73,6 +90,12 @@ export function PipelinePanel({
           <span className="font-mono text-sm font-medium text-neutral-100">daimon</span>
           <span className="h-3.5 w-1.5 animate-pulse bg-[#4f8dff]/70" />
           <div className="flex-1" />
+          <TabButton active={view === "chat"} onClick={() => setView("chat")}>
+            chat
+          </TabButton>
+          <TabButton active={view === "settings"} onClick={() => setView("settings")}>
+            settings
+          </TabButton>
           <button
             onClick={onCollapse}
             className="rounded-md px-2 py-1 font-mono text-xs text-neutral-500 transition hover:bg-white/5 hover:text-neutral-200 active:scale-90"
@@ -81,45 +104,51 @@ export function PipelinePanel({
           </button>
         </div>
 
-        <div ref={historyRef} className="themed-scroll flex-1 space-y-3 overflow-y-auto p-4">
-          {!task && (
-            <p className="font-mono text-sm text-neutral-500">no active task — give daimon something to do.</p>
-          )}
-          {task && (
-            <>
-              <div className="flex justify-end">
-                <div className="max-w-[85%] rounded-2xl rounded-br-sm border border-[#4f8dff]/20 bg-[#4f8dff]/15 px-3 py-2 font-mono text-sm text-neutral-100">
-                  <span className="text-[#4f8dff]">{">"}</span> {task.instruction}
+        {view === "settings" ? (
+          <Settings />
+        ) : (
+          <div ref={historyRef} className="themed-scroll flex-1 space-y-3 overflow-y-auto p-4">
+            {!task && (
+              <p className="font-mono text-sm text-neutral-500">no active task — give daimon something to do.</p>
+            )}
+            {task && (
+              <>
+                <div className="flex justify-end">
+                  <div className="max-w-[85%] rounded-2xl rounded-br-sm border border-[#4f8dff]/20 bg-[#4f8dff]/15 px-3 py-2 font-mono text-sm text-neutral-100">
+                    <span className="text-[#4f8dff]">{">"}</span> {task.instruction}
+                  </div>
                 </div>
-              </div>
 
-              <div className="flex justify-start">
-                <div className="max-w-[85%] space-y-2 rounded-2xl rounded-bl-sm border border-white/10 bg-white/5 px-3 py-2">
-                  <ul className="space-y-1.5">
-                    {task.steps.map((step) => (
-                      <li key={step.id}>
-                        <StepLine step={step} />
-                      </li>
-                    ))}
-                  </ul>
-                  {task.result && <p className="font-mono text-sm text-emerald-400">{task.result}</p>}
-                  {task.error && <p className="font-mono text-sm text-red-400">{task.error}</p>}
+                <div className="flex justify-start">
+                  <div className="max-w-[85%] space-y-2 rounded-2xl rounded-bl-sm border border-white/10 bg-white/5 px-3 py-2">
+                    <ul className="space-y-1.5">
+                      {task.steps.map((step) => (
+                        <li key={step.id}>
+                          <StepLine step={step} />
+                        </li>
+                      ))}
+                    </ul>
+                    {task.result && <p className="font-mono text-sm text-emerald-400">{task.result}</p>}
+                    {task.error && <p className="font-mono text-sm text-red-400">{task.error}</p>}
+                  </div>
                 </div>
-              </div>
-            </>
-          )}
-        </div>
+              </>
+            )}
+          </div>
+        )}
 
-        <form onSubmit={handleSubmit} className="flex items-center gap-2 border-t border-white/10 p-3">
-          <span className="pl-1 font-mono text-sm text-[#4f8dff]">{">"}</span>
-          <input
-            autoFocus
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="tell daimon what to do..."
-            className="w-full bg-transparent font-mono text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none"
-          />
-        </form>
+        {view === "chat" && (
+          <form onSubmit={handleSubmit} className="flex items-center gap-2 border-t border-white/10 p-3">
+            <span className="pl-1 font-mono text-sm text-[#4f8dff]">{">"}</span>
+            <input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="tell daimon what to do..."
+              className="w-full bg-transparent font-mono text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none"
+            />
+          </form>
+        )}
       </div>
     </div>
   );
