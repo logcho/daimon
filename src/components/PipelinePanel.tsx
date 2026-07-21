@@ -38,7 +38,7 @@ export function PipelinePanel({
   return (
     <div className="animate-daimon-in flex h-full w-full flex-col rounded-[28px] border border-white/10 bg-neutral-950/95 text-neutral-200 shadow-[0_0_40px_-12px_rgba(79,141,255,0.25)] backdrop-blur-2xl">
       <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3">
-        <img src="/logo.svg" alt="" className="h-5 w-5" />
+        <img src="/logo.svg" alt="" className="h-5 w-5 invert" />
         <span className="text-sm font-medium text-neutral-100">Daimon</span>
         <div className="flex-1" />
         <button
