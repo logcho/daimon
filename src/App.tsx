@@ -12,7 +12,10 @@ function App() {
   const [task, setTask] = useState<Task | null>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
 
-  useEffect(() => () => unlistenRef.current?.(), []);
+  useEffect(() => {
+    collapseToPill();
+    return () => unlistenRef.current?.();
+  }, []);
 
   const expand = useCallback(() => {
     setExpanded(true);
