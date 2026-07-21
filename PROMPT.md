@@ -12,7 +12,7 @@ Daimon must let a user hand off a real task ("apply to these 10 jobs", "research
 
 ---
 
-## 2. PHASE 1 — MVP: Ambient Shell + One Background Task
+## 2. PHASE 1 — MVP: Ambient Shell + One Background Task ✅ DONE
 
 Scope tightly. Do not build memory, skills, or the remote gateway yet.
 
@@ -41,13 +41,18 @@ Scope tightly. Do not build memory, skills, or the remote gateway yet.
 
 ---
 
-## 3. PHASE 2 — Memory & Skills
+## 3. PHASE 2 — Memory & Skills ✅ DONE
 
 - Local memory store (SQLite + FTS/embeddings) recording task history and user context.
 - Agent retrieves relevant memory when planning a new task.
 - Skill library: after a novel task succeeds, persist it as a reusable, parameterized skill.
 
-## 4. PHASE 3 — Remote Gateway
+Shipped as: `agents/src/memory.ts` (SQLite + FTS5, bind-mounted host-side so it
+survives container recreation, not just restarts), retrieval wired into the
+system prompt in `agents/src/run.ts`, and a `save_skill` tool the agent calls
+at its own judgment for genuinely reusable patterns.
+
+## 4. PHASE 3 — Remote Gateway (next up)
 
 - Bridge service connecting the same agent/session to one chat platform (start with Telegram).
 - Status mirrors to the channel; new instructions can be issued from it.
@@ -58,6 +63,12 @@ Scope tightly. Do not build memory, skills, or the remote gateway yet.
 - Wire up real-time voice transcription (Deepgram/Whisper) into the widget.
 - Multi-task tracking in the pill (switch between concurrently running tasks).
 - Subagent delegation for independent parallel sub-steps.
+
+Note: a chunk of the "polish" half of this phase landed early, out of order,
+in response to direct feedback rather than waiting for Phase 4 — the pill is
+now an icon-only corner widget with animated expand/collapse, a chat-style
+panel layout, and a themed scrollbar. What's still outstanding here is voice
+input, multi-task tracking, and subagent delegation specifically.
 
 ---
 
