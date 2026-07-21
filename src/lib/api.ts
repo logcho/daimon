@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { StepStatus } from "../types";
 
 export type WorkspaceEvent =
-  | { type: "step"; id: string; label: string; status: StepStatus }
+  | { type: "step"; id: string; label: string; status: StepStatus; tool?: string }
   | { type: "done"; result: string }
   | { type: "error"; message: string };
 

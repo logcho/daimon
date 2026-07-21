@@ -4,9 +4,9 @@ import type { TaskEvent } from "./events.js";
 
 export async function runDemoTask(instruction: string, emit: (event: TaskEvent) => void): Promise<void> {
   const steps = [
-    { id: randomUUID(), label: "Opening https://example.com" },
-    { id: randomUUID(), label: "Reading page content" },
-    { id: randomUUID(), label: "Capturing screenshot" },
+    { id: randomUUID(), label: "Opening https://example.com", tool: "open_url" },
+    { id: randomUUID(), label: "Reading page content", tool: "read_page" },
+    { id: randomUUID(), label: "Capturing screenshot", tool: "screenshot" },
   ];
 
   try {

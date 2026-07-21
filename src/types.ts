@@ -4,6 +4,7 @@ export interface TaskStep {
   id: string;
   label: string;
   status: StepStatus;
+  tool?: string;
 }
 
 export interface Task {

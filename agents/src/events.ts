@@ -5,6 +5,8 @@ export interface StepEvent {
   id: string;
   label: string;
   status: StepStatus;
+  /** Tool name (e.g. "open_url"), when this step represents a real tool call. */
+  tool?: string;
 }
 
 export interface DoneEvent {

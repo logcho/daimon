@@ -29,7 +29,13 @@ export async function runTask(instruction: string, emit: (event: TaskEvent) => v
       if (agentUpdate?.messages) {
         for (const message of agentUpdate.messages as AIMessage[]) {
           for (const call of message.tool_calls ?? []) {
-            emit({ type: "step", id: call.id ?? randomUUID(), label: `Running ${call.name}`, status: "running" });
+            emit({
+              type: "step",
+              id: call.id ?? randomUUID(),
+              label: call.name,
+              status: "running",
+              tool: call.name,
+            });
           }
           if (typeof message.content === "string" && message.content) {
             finalResult = message.content;
@@ -43,8 +49,9 @@ export async function runTask(instruction: string, emit: (event: TaskEvent) => v
           emit({
             type: "step",
             id: message.tool_call_id ?? randomUUID(),
-            label: `Completed ${message.name ?? "tool"}`,
+            label: message.name ?? "tool",
             status: "done",
+            tool: message.name,
           });
         }
       }

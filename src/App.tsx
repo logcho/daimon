@@ -52,7 +52,7 @@ function App() {
         if (event.type === "step") {
           const steps = [...prev.steps];
           const index = steps.findIndex((s) => s.id === event.id);
-          const step: TaskStep = { id: event.id, label: event.label, status: event.status };
+          const step: TaskStep = { id: event.id, label: event.label, status: event.status, tool: event.tool };
           if (index >= 0) steps[index] = step;
           else steps.push(step);
           return { ...prev, steps };
