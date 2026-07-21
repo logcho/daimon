@@ -4,21 +4,25 @@ const features = [
     title: "Ambient, not intrusive",
     body: "A small floating widget, not a fullscreen app. Visible when you need it, out of the way when you don't.",
     icon: "M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+    span: "lg:col-span-2",
   },
   {
     title: "Its own invisible workspace",
     body: "Every task runs inside an isolated background environment — never your real cursor, never your real keyboard focus.",
     icon: "M21 8 12 3 3 8l9 5 9-5Z M3 8v8l9 5 9-5V8 M12 13v8",
+    span: "lg:col-span-1",
   },
   {
     title: "Persistent memory & skills",
     body: "Task history and reusable skills are stored locally and carried into future planning, so it gets more useful over time.",
     icon: "M4 6a8 3 0 0 0 16 0 M4 6a8 3 0 0 1 16 0v12a8 3 0 0 1-16 0V6 M4 12a8 3 0 0 0 16 0",
+    span: "lg:col-span-1",
   },
   {
     title: "Runs on your own machine",
     body: "No mandatory cloud execution layer. Your work happens locally, under your control.",
     icon: "M3 5h18v11H3z M8 20h8 M12 16v4",
+    span: "lg:col-span-2",
   },
 ];
 ---
@@ -26,10 +30,12 @@ const features = [
 <section id="features" class="bg-white/[0.015] px-6 py-28">
   <div data-reveal class="mx-auto max-w-5xl">
     <h2 class="text-center text-sm font-medium tracking-widest text-[#4f8dff] uppercase">What makes it different</h2>
-    <div class="mt-10 grid gap-6 sm:grid-cols-2">
+    <div class="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
       {
         features.map((f) => (
-          <div class="rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.04] to-transparent p-6 transition duration-300 hover:-translate-y-1 hover:border-[#4f8dff]/30">
+          <div
+            class={`rounded-2xl border border-white/10 bg-gradient-to-br from-white/[0.05] to-transparent p-6 transition duration-300 hover:-translate-y-1 hover:border-[#4f8dff]/30 ${f.span}`}
+          >
             <div class="mb-4 flex h-9 w-9 items-center justify-center rounded-lg border border-[#4f8dff]/20 bg-[#4f8dff]/10">
               <svg
                 viewBox="0 0 24 24"

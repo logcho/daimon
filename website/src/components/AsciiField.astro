@@ -1,10 +1,11 @@
 ---
-// A static, build-time-generated field of faint monospace glyphs behind the
-// hero — an original ambient texture (not any specific illustration),
-// masked so it fades out toward the edges and never competes with text.
-const COLS = 64;
-const ROWS = 20;
-const CHARS = ["·", "+", "×", "✦", "∙", " ", " ", " ", " ", " ", " "];
+// A static, build-time-generated field of monospace glyphs behind the hero
+// — an original ambient texture (not any specific illustration). Faded
+// only top/bottom so it's actually visible across the full width, not
+// concentrated behind the centered text column where it'd be hidden.
+const COLS = 90;
+const ROWS = 26;
+const CHARS = ["·", "+", "×", "✦", "∙", "░", " ", " ", " ", " "];
 
 function buildGrid() {
   let out = "";
@@ -23,5 +24,5 @@ const grid = buildGrid();
 
 <pre
   aria-hidden="true"
-  class="pointer-events-none absolute inset-0 -z-20 overflow-hidden text-center font-mono text-[11px] leading-[16px] text-[#4f8dff]/[0.16] select-none [mask-image:radial-gradient(ellipse_55%_65%_at_50%_15%,black,transparent)]"
+  class="pointer-events-none absolute inset-0 -z-20 overflow-hidden whitespace-pre text-center font-mono text-[12px] leading-[17px] text-[#4f8dff]/35 select-none [mask-image:linear-gradient(to_bottom,transparent,black_15%,black_85%,transparent)]"
 >{grid}</pre>

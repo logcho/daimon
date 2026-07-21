@@ -3,31 +3,33 @@ import HeroMockup from "./HeroMockup.astro";
 import AsciiField from "./AsciiField.astro";
 ---
 
-<section class="relative overflow-hidden px-6 pt-28 pb-24 sm:pt-36 sm:pb-32">
+<section class="relative overflow-hidden px-6 pt-24 pb-24 sm:pt-32 sm:pb-32">
   <AsciiField />
   <div
-    class="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_60%_50%_at_50%_0%,rgba(79,141,255,0.18),transparent)]"
+    class="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_50%_50%_at_20%_10%,rgba(79,141,255,0.16),transparent)]"
   >
   </div>
 
-  <div class="mx-auto flex max-w-3xl flex-col items-center text-center">
-    <img src="/logo.svg" alt="Daimon" width="96" height="96" class="mb-8 h-24 w-24 opacity-95 invert" />
+  <div class="mx-auto grid max-w-5xl items-center gap-16 lg:grid-cols-[1.1fr_0.9fr] lg:gap-10">
+    <div class="flex flex-col items-center text-center lg:items-start lg:text-left">
+      <img src="/logo.svg" alt="Daimon" width="72" height="72" class="mb-8 h-16 w-16 opacity-95 invert" />
 
-    <span
-      class="mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-neutral-400"
-    >
-      <span class="h-1.5 w-1.5 rounded-full bg-[#4f8dff]"></span>
-      In active development
-    </span>
+      <span
+        class="mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-neutral-400"
+      >
+        <span class="h-1.5 w-1.5 rounded-full bg-[#4f8dff]"></span>
+        In active development
+      </span>
 
-    <h1 class="text-glow text-4xl font-semibold tracking-tight text-neutral-50 sm:text-6xl">
-      An extra set of hands,<br class="hidden sm:block" /> not a replacement.
-    </h1>
+      <h1 class="text-glow text-4xl font-semibold tracking-tight text-neutral-50 sm:text-5xl lg:text-6xl">
+        An extra set of hands.<br /> Not a replacement.
+      </h1>
 
-    <p class="mt-6 max-w-xl text-lg text-neutral-400">
-      Daimon is an ambient AI co-worker that runs real tasks in the background on your own machine —
-      no separate desktop, no takeover — while you keep working on something else.
-    </p>
+      <p class="mt-6 max-w-lg text-lg text-neutral-400">
+        Daimon is an ambient AI co-worker that runs real tasks in the background on your own machine —
+        no separate desktop, no takeover — while you keep working on something else.
+      </p>
+    </div>
 
     <HeroMockup />
   </div>
