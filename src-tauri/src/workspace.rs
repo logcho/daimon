@@ -8,7 +8,7 @@ pub const PORT: u16 = 4711;
 
 static IMAGE_READY: OnceCell<Result<(), String>> = OnceCell::const_new();
 
-fn project_root() -> PathBuf {
+pub(crate) fn project_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("src-tauri has a parent directory")

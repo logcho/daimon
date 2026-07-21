@@ -28,23 +28,27 @@ Without an API key (see below), tasks run a scripted demo instead of a real agen
 
 ## Giving Daimon a real brain: `ANTHROPIC_API_KEY`
 
-The agent (`agents/src/graph.ts`) uses Claude via `@langchain/anthropic`. Without an API key in the environment, it falls back to a fixed demo task instead of actually reasoning about your instruction.
+The agent (`agents/src/graph.ts`) uses Claude via `@langchain/anthropic`. Without an API key, it falls back to a fixed demo task instead of actually reasoning about your instruction.
+
+**Recommended: a `.env` file.** This is read directly by the app at startup, so it works no matter how you launch Daimon — no dependency on which terminal tab you happened to run a shell export in.
 
 1. Get a key from the [Anthropic Console](https://console.anthropic.com/settings/keys).
-2. Export it in the terminal you'll run the app from:
+2. In the project root:
    ```sh
-   export ANTHROPIC_API_KEY="sk-ant-..."
+   cp .env.example .env
    ```
-   To persist it across terminal sessions, add that line to `~/.zshrc` and open a new terminal (or `source ~/.zshrc`).
-3. Run `npm run tauri dev` from that same terminal.
+3. Open `.env` in an editor and fill in `ANTHROPIC_API_KEY=`. This file is gitignored — it never gets committed.
+4. Run `npm run tauri dev`. On startup, the terminal will print `[daimon] ANTHROPIC_API_KEY present: true` (or `false`) so you can confirm it loaded before doing anything else.
 
-**Important:** the key is only passed into the background workspace's Docker container when the container is first created. If you already ran Daimon before setting the key, remove the existing container so it gets recreated with the key present:
+An already-exported shell environment variable always takes priority over `.env`, if you'd rather set it that way instead.
+
+**Either way, this only matters at container creation time.** If you already ran Daimon before the key was in place, there's a stale container without it — remove it so the next task recreates it with the key present:
 
 ```sh
 docker rm -f daimon-workspace-default
 ```
 
-The key never touches disk — it's passed as a runtime environment variable straight into the container, per the non-disruption/secrets guidelines in `ARCHITECTURE.md`.
+The key isn't baked into the Docker image or committed anywhere — it lives only in your local, gitignored `.env` and is passed into the container as a runtime environment variable, per the non-disruption/secrets guidelines in `ARCHITECTURE.md`.
 
 ## Verifying things manually
 

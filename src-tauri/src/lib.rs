@@ -15,5 +15,15 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load ANTHROPIC_API_KEY (and any other secrets) from a .env file at the
+    // project root, so configuring them doesn't depend on the exact shell
+    // session that happens to launch the app — a real env var still wins if
+    // one is already set.
+    let _ = dotenvy::from_path(workspace::project_root().join(".env"));
+    println!(
+        "[daimon] ANTHROPIC_API_KEY present: {}",
+        std::env::var("ANTHROPIC_API_KEY").is_ok()
+    );
+
     build_app(tauri::Builder::default()).run(|_app, _event| {});
 }
