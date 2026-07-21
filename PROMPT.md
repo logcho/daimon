@@ -52,27 +52,80 @@ survives container recreation, not just restarts), retrieval wired into the
 system prompt in `agents/src/run.ts`, and a `save_skill` tool the agent calls
 at its own judgment for genuinely reusable patterns.
 
-## 4. PHASE 3 — Remote Gateway (next up)
+## 4. PHASE 3 — Concurrent Multi-Task Execution (next up)
+
+Right now there is exactly one background workspace (`daimon-workspace-default`,
+one fixed container, one fixed port, one shared Playwright browser page).
+`ARCHITECTURE.md` §5 already states the target design — "each active
+task/project gets its own background workspace" — Phase 1 just simplified
+that down to a single shared one to get one task working end-to-end first.
+This phase finishes what was already the stated architecture, so that
+multiple instructions can genuinely run at once instead of one blocking
+the next.
+
+**Backend:**
+- Generalize `workspace.rs` from one fixed-name container to a pool of
+  per-task containers (e.g. `daimon-workspace-<task-id>`), each with a
+  dynamically allocated host port instead of the current fixed
+  `127.0.0.1:4711` binding, so N containers can run concurrently without
+  colliding.
+- Per-task containers isolate the Playwright browser as a side effect
+  (today's single shared container means two concurrent tasks would fight
+  over one browser page — separate containers each get their own).
+- Memory stays shared across all of them: every container still bind-mounts
+  the same host `memory/` directory (SQLite's WAL mode is built for this —
+  concurrent readers plus one writer at a time is fine at our write
+  frequency).
+- Decide and implement a teardown/pool policy — idle containers cost real
+  CPU/memory (each is a full Chromium instance), so "keep every container
+  forever" isn't viable. Tear down shortly after a task completes, or cap
+  the number of concurrent containers with a queue past that cap — pick one
+  and document the choice here once decided.
+- `start_task` already returns a per-task UUID and tags every event with
+  it, so the event-routing side of this was accidentally already built for
+  concurrency in Phase 1 — the gap is entirely in workspace.rs's
+  one-container assumption.
+
+**Frontend:**
+- Replace the single `task: Task | null` state in `App.tsx` with a
+  collection of concurrently tracked tasks.
+- Pill: reflect that more than one task may be running (e.g. a count, or
+  cycling status) instead of assuming exactly zero or one.
+- Panel: a session list/switcher so the user can start a new task without
+  losing visibility into ones already running, and flip between their live
+  logs.
+
+**Done when:** a user can fire off two unrelated instructions back-to-back
+without waiting for the first to finish, watch both progress independently
+with no cross-task interference, and switch between their live status in
+the UI.
+
+## 5. PHASE 4 — Remote Gateway
 
 - Bridge service connecting the same agent/session to one chat platform (start with Telegram).
 - Status mirrors to the channel; new instructions can be issued from it.
 - Explicit per-channel scoping: read-only status vs. full control — never full control by default.
 
-## 5. PHASE 4 — Voice & Polish
+Worth having Phase 3 land first: a gateway that can only run one task at a
+time (because the backend can only run one task at a time) is a much
+weaker feature than one built on top of real concurrency from the start.
+
+## 6. PHASE 5 — Voice & Polish
 
 - Wire up real-time voice transcription (Deepgram/Whisper) into the widget.
-- Multi-task tracking in the pill (switch between concurrently running tasks).
 - Subagent delegation for independent parallel sub-steps.
 
 Note: a chunk of the "polish" half of this phase landed early, out of order,
-in response to direct feedback rather than waiting for Phase 4 — the pill is
+in response to direct feedback rather than waiting for its turn — the pill is
 now an icon-only corner widget with animated expand/collapse, a chat-style
-panel layout, and a themed scrollbar. What's still outstanding here is voice
-input, multi-task tracking, and subagent delegation specifically.
+panel layout, a themed scrollbar, a terminal-esque visual language, and a
+Settings view. Multi-task tracking (originally listed here) moved to Phase 3
+since it's really the frontend half of a backend problem, not a polish item.
+What's still outstanding here is voice input and subagent delegation.
 
 ---
 
-## 6. OPERATIONAL DIRECTIVES & AUTONOMY GUIDELINES
+## 7. OPERATIONAL DIRECTIVES & AUTONOMY GUIDELINES
 
 - **Full Execution Authority:** Create files, install dependencies (`npm`, `cargo`, etc.), initialize git repositories, run build commands (`cargo check`, `tauri dev`, `npm run build`), read compiler/runtime errors, and fix them self-correctively.
 - **Incremental Commits:** Commit at every functional milestone with clear, semantic messages (e.g. `feat(tauri): floating pill widget + hotkey toggle`, `feat(workspace): headless browser task execution in Docker`).
@@ -82,7 +135,7 @@ input, multi-task tracking, and subagent delegation specifically.
 
 ---
 
-## 7. IMMEDIATE EXECUTION STEPS (Phase 1)
+## 8. IMMEDIATE EXECUTION STEPS (Phase 1)
 
 1. Confirm `ARCHITECTURE.md` reflects current understanding; flag and resolve any conflicts before writing code.
 2. Scaffold the project (Tauri v2 + Rust + React + TypeScript + Tailwind).
