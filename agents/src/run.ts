@@ -16,6 +16,7 @@ export async function runTask(instruction: string, emit: (event: TaskEvent) => v
 
   try {
     const memoryContext = formatMemoryContext(searchTasks(instruction, 3), searchSkills(instruction, 3));
+    if (memoryContext) console.error(`[daimon-agent] memory context:\n${memoryContext}`);
     const agent = buildAgent(memoryContext);
     const stream = await agent.stream(
       { messages: [new HumanMessage(instruction)] },
