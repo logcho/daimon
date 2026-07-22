@@ -28,6 +28,14 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 dotenvy = "0.15"
+keyring = { version = "3", features = ["apple-native"] }
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+tauri-plugin-log = "2"
+log = "0.4"
+cron = "0.17"
+chrono = { version = "0.4", features = ["clock"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

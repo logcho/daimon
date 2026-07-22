@@ -19,6 +19,16 @@ dist-ssr
 # container, not source (see workspace.rs)
 /memory/
 
+# Daimon-managed default notes vault (falls back to this when no Obsidian
+# vault path is configured) — bind-mounted into the workspace container,
+# not source (see vault.rs)
+/vault/
+
+# Cron automations store + pending-request mount (bind-mounted into the
+# workspace container, not source — see automation.rs)
+/automations.json
+/automations/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

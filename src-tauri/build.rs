@@ -6,9 +6,24 @@ fn main() {
 
     let attributes = tauri_build::Attributes::new()
         .app_manifest(tauri_build::AppManifest::new().commands(&[
-            "start_task",
+            "start_session",
+            "send_message",
+            "end_session",
             "get_api_key_status",
             "set_api_key",
+            "get_google_client_id_status",
+            "set_google_client_id",
+            "connect_gmail_account",
+            "get_gmail_account",
+            "disconnect_gmail_account",
+            "get_vault_path_status",
+            "set_vault_path",
+            "list_vault_files",
+            "read_vault_file",
+            "list_automations",
+            "create_automation",
+            "set_automation_enabled",
+            "delete_automation",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }
