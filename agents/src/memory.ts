@@ -26,6 +26,13 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(id UNINDEXED, name, description);
+
+  CREATE TABLE IF NOT EXISTS notes (
+    filename TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(filename UNINDEXED, content);
 `);
 
 export interface TaskMemory {
@@ -124,7 +131,47 @@ export function searchSkills(query: string, limit = 5): SkillMemory[] {
   return rows.map((r) => ({ id: r.id, name: r.name, description: r.description, createdAt: r.created_at }));
 }
 
-export function formatMemoryContext(tasks: TaskMemory[], skills: SkillMemory[]): string {
+export interface NoteMemory {
+  filename: string;
+  content: string;
+  updatedAt: number;
+}
+
+/**
+ * Notes are upserted by filename (a note can be rewritten), unlike the
+ * append-only `tasks`/`skills` tables — FTS5 virtual tables don't support
+ * `ON CONFLICT`, so the correct upsert is delete-then-insert into both
+ * tables here.
+ */
+export function indexNote(filename: string, content: string): void {
+  const updatedAt = Date.now();
+  db.prepare(
+    "INSERT INTO notes (filename, content, updated_at) VALUES (?, ?, ?) " +
+      "ON CONFLICT(filename) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+  ).run(filename, content, updatedAt);
+  db.prepare("DELETE FROM notes_fts WHERE filename = ?").run(filename);
+  db.prepare("INSERT INTO notes_fts (filename, content) VALUES (?, ?)").run(filename, content);
+}
+
+export function searchNotes(query: string, limit = 5): NoteMemory[] {
+  const matches = db
+    .prepare("SELECT filename FROM notes_fts WHERE notes_fts MATCH ? ORDER BY rank LIMIT ?")
+    .all(ftsQuery(query), limit) as { filename: string }[];
+  if (matches.length === 0) return [];
+
+  const placeholders = matches.map(() => "?").join(",");
+  const rows = db
+    .prepare(`SELECT * FROM notes WHERE filename IN (${placeholders}) ORDER BY updated_at DESC`)
+    .all(...matches.map((m) => m.filename)) as Array<{
+    filename: string;
+    content: string;
+    updated_at: number;
+  }>;
+
+  return rows.map((r) => ({ filename: r.filename, content: r.content, updatedAt: r.updated_at }));
+}
+
+export function formatMemoryContext(tasks: TaskMemory[], skills: SkillMemory[], notes: NoteMemory[]): string {
   const parts: string[] = [];
   if (tasks.length > 0) {
     parts.push(
@@ -135,6 +182,11 @@ export function formatMemoryContext(tasks: TaskMemory[], skills: SkillMemory[]):
   if (skills.length > 0) {
     parts.push(
       "Known reusable skills:\n" + skills.map((s) => `- ${s.name}: ${s.description}`).join("\n"),
+    );
+  }
+  if (notes.length > 0) {
+    parts.push(
+      "Vault notes:\n" + notes.map((n) => `- ${n.filename}: ${n.content.slice(0, 200)}`).join("\n"),
     );
   }
   return parts.join("\n\n");
