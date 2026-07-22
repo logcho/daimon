@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Phase 1 (ambient shell + one background task) and Phase 2 (memory & skills) are both built and verified — see `PROMPT.md` for what that covers concretely and what's still ahead (Phase 3: remote gateway, Phase 4: voice/multi-task/subagents). The landing page (`website/`) also exists as a separate Astro project. Don't treat this file's "target" framing as literal for those areas — check what's actually on disk before assuming a path doesn't exist yet.
+Phase 1 (ambient shell + one background task), Phase 2 (memory & skills), Phase 3 (concurrent multi-task execution), Phase 8 (continuable chat sessions), and Phase 9 (vaults/Obsidian integration) — the last two built out of order, see below — are all built and verified. See `PROMPT.md` for what that covers concretely and what's still ahead (Phase 4: remote gateway, Phase 5: voice/subagents, Phase 6: OAuth2 integrations/MCP/onboarding rework, Phase 7: CLI companion — all planned-but-not-started). The landing page (`website/`) also exists as a separate Astro project. Don't treat this file's "target" framing as literal for those areas — check what's actually on disk before assuming a path doesn't exist yet.
+
+**Sessions, not tasks:** the one-shot "task" model (`start_task`/`task-status`) no longer exists — it was replaced end to end by Phase 8's session model (`start_session`/`send_message`/`end_session`, event channel `session-status`). A session's background workspace stays alive across every message in it (Phase 3's "tear down immediately" policy now applies only when a session actually ends), and the frontend's `Task` type is gone, replaced by `Session { id, turns: Turn[] }`. If you see a reference to "task" in older context, check whether it actually means "session" now.
 
 ## Source of truth
 
@@ -38,8 +40,14 @@ Four-part model — keep this separation when adding code:
 Build phases (see `PROMPT.md` for the authoritative, detailed breakdown — do not skip ahead to a later phase before the current one's "done when" criterion is verified):
 - **Phase 1:** ambient pill + hotkey + a single background workspace running one task end-to-end, with live status streamed to the widget. No memory, skills, or gateway yet.
 - **Phase 2:** persistent memory + skill library.
-- **Phase 3:** remote gateway (starting with Telegram), scoped per channel to read-only status vs. full control.
-- **Phase 4:** real voice input, multi-task tracking in the pill, subagent delegation.
+- **Phase 3:** concurrent multi-task execution (per-task workspaces instead of one shared container).
+- **Phase 4:** remote gateway (starting with Telegram), scoped per channel to read-only status vs. full control.
+- **Phase 5:** real voice input, subagent delegation (multi-task tracking moved into Phase 3).
+- **Phase 6:** OAuth2 connected accounts (Gmail/Outlook), MCP tool servers, onboarding rework.
+- **Phase 7:** terminal CLI companion (Hermes/OpenClaw-style), sharing the same daemon/orchestrator session.
+- **Phase 8 (done, out of order):** continuable chat sessions instead of one-shot tasks — a session's workspace stays alive between messages (see `PROMPT.md`).
+- **Phase 9 (done, out of order):** vaults/Obsidian integration — a file/notes vault (real Obsidian vault path or a Daimon-native folder fallback), browsable in-app (`VaultPanel.tsx`), with notes indexed into Phase 2's memory/skill retrieval as a third searchable category.
+- **Phase 10 (done, out of order):** cron jobs/automations — recurring instructions (cron-scheduled) that fire unattended, creatable either from the `automations` tab UI or by the agent itself mid-conversation via a `create_automation` tool. Triggered runs auto-teardown their container (unlike interactive sessions) since they don't need continuation.
 
 Task loop (full, end-state — see `ARCHITECTURE.md` §4 for detail): input (voice/text, from the widget or a remote channel) → LangGraph plan, informed by memory/skills → daemon creates/resumes a background workspace → agent executes steps invisibly inside it → status streams live to the pill (and any connected channel) → progress checkpoints continuously → on completion, result surfaces and new skills/facts are written to memory.
 
@@ -60,9 +68,11 @@ These constraints come from `ARCHITECTURE.md` §5 and should hold for any code t
 ├── src/                # React frontend: ambient pill UI + expanded pipeline view (built)
 ├── agents/             # LangGraph agent server + SQLite memory/skill store (built)
 ├── memory/             # Local SQLite DB, gitignored — bind-mounted into the workspace container
+├── vault/               # Notes vault, gitignored — bind-mounted alongside memory/ (built, Phase 9)
 ├── sandbox/            # Dockerfile for the background workspace image (built)
 ├── website/            # Public landing page, Astro — separate project, own package.json (built)
-├── gateway/             # Remote channel bridge (Telegram/Slack/etc.) — Phase 3, not built yet
+├── gateway/             # Remote channel bridge (Telegram/Slack/etc.) — Phase 4, not built yet
+├── cli/                 # Terminal companion sharing the daemon/orchestrator session — Phase 7, not built yet
 ├── ARCHITECTURE.md      # Source of truth
 └── package.json
 ```

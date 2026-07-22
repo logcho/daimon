@@ -26,6 +26,7 @@
 | **Communication** | IPC (Tauri Commands) | Secure bridge between UI frontend and Rust daemon. |
 | **Voice/Input** | Deepgram / Whisper | Real-time audio transcription streaming into the widget's input. |
 | **Cloud Backend** | Modal / Fly.io | Optional hosting for long-running or hibernating background workspaces. |
+| **Integrations** | OAuth2 (Gmail, Outlook/Microsoft Graph) + MCP client | Connected-account linking so tasks can act on the user's real email/calendar, plus a standard protocol for pulling in third-party tool servers as additional agent tools. Planned — see `PROMPT.md` Phase 6. |
 
 ---
 
@@ -44,6 +45,7 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 * **Workspace Lifecycle Manager:** Owns the background workspaces (Docker containers running a headless browser + shell) — one per active task or project, created on demand and resumable, not always torn down after a single run.
 * **IPC Handler:** Bridges frontend requests to the orchestrator and to workspace state.
 * **Gateway Supervisor:** Manages the optional remote-access bridge process.
+* **Automation Scheduler (Phase 10, implemented):** a background loop (30s poll) that fires recurring instructions (cron-scheduled, e.g. a daily brief) on their own, with no user interaction — each firing reuses the Phase 8 session machinery but auto-tears-down its container once the run completes, since an unattended recurring job doesn't need the "stay open until closed" continuation an interactive chat does. Also picks up automation-creation requests the agent itself submits from inside a session (see (C) below) — the container has no reverse channel to call back into the daemon, so this goes through a bind-mounted directory the same way vault notes do, not a new network listener.
 
 ### C. The Orchestrator (LangGraph Engine)
 
@@ -52,16 +54,25 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 * **Subagents:** Independent sub-steps (e.g. checking several job boards at once) can be delegated to parallel subagents.
 * **Skill Library:** After successfully handling a novel task, the agent can persist a reusable, parameterized "skill" for future reuse.
 * **State:** Persistent `Checkpoint` storage so long-running tasks (a multi-hour job-application run) survive app or machine restarts.
+* **Open question, not yet decided:** whether Claude Code / the Claude Agent SDK could serve as (or alongside) this LangGraph engine for planning and tool orchestration. Noted here so the idea isn't lost; evaluate deliberately against LangGraph rather than swapping the stack row above without a real comparison.
+* **Sessions, not one-shot tasks (Phase 8, implemented):** a session's background workspace stays alive between messages, so a follow-up genuinely continues (same browser/page state) rather than starting fresh — the "tear down immediately" policy from Phase 3 now applies only to teardown-on-session-end (explicit, or app exit), not after every message. See `PROMPT.md` Phase 8.
+* **Agent-created automations (Phase 10, implemented):** a `create_automation` tool lets the agent register a recurring instruction mid-conversation, not only through a settings form — it writes a pending request into a bind-mounted `automations/` directory (same shape as a vault note) for the daemon's scheduler to validate and promote.
 
 ### D. Memory & Skills
 
 * Durable, queryable record of past tasks, user context (e.g. resume, preferences), and learned skills.
 * Retrieval via FTS/embeddings; periodic LLM summarization keeps it from growing unbounded.
+* **Vault notes (Phase 9, implemented)** are a third indexed category alongside task history and skills — a file/notes vault (a real Obsidian vault the user points Daimon at, or a Daimon-native folder if unconfigured) bind-mounts into each session's container next to the existing memory mount, with dedicated `write_note`/`read_note`/`list_notes` tools; note content is indexed into the same FTS store and pulled into planning context like any other memory. Browsing (listing/reading files) happens directly against the host filesystem, no container needed. See `PROMPT.md` Phase 9.
 
 ### E. The Gateway (Remote Access)
 
 * Optional bridge exposing the same agent/session to external chat platforms so the user can check progress or give new instructions while away from the machine.
 * Opt-in per workflow, and can be scoped to read-only status vs. full control.
+
+### F. Integrations (Connected Accounts & MCP) — planned, Phase 6
+
+* **Connected accounts:** OAuth2 linking (Gmail, Outlook/Microsoft Graph to start) so a task can act on the user's real inbox/calendar, not just browse the open web. Authorization-code + PKCE via the system browser, not an embedded webview.
+* **MCP client:** the tool library in (C) becomes extensible — in addition to the built-in tools, the orchestrator can load tools exposed by external MCP servers the user configures. Additive to the skill library, not a replacement: skills are learned/parameterized task patterns; MCP servers are raw tool sources.
 
 ---
 
@@ -83,6 +94,7 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 * **Workspace isolation:** Each active task/project gets its own background workspace; workspaces don't share state with each other except through the explicit memory store.
 * **Secrets:** Credentials needed for a task are injected into the relevant workspace at runtime only — never written to disk in plaintext, never forwarded to a remote gateway channel.
 * **Remote channel scoping:** Each connected chat channel is explicitly granted read-only status or full control — never full control by default.
+* **Connected-account tokens:** OAuth2 access/refresh tokens follow the same rule as task secrets — stored in the OS keychain (never plaintext on disk), scoped to the minimum the task needs, and disconnectable per-account from Settings at any time.
 
 ---
 
@@ -94,7 +106,11 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 ├── src/                # React frontend: ambient pill UI + expanded pipeline view
 ├── agents/             # LangGraph definitions, tool schemas, skill library
 ├── memory/             # Persistent memory & skills store
+├── vault/               # Daimon-native notes vault (fallback when no Obsidian vault path is configured) — Phase 9, built
+├── automations/         # Pending agent-created automation requests (bind-mounted, gitignored) — Phase 10, built
+│                        # (automations.json — the real store — lives at the project root, also gitignored)
 ├── gateway/             # Remote channel bridge (Telegram/Slack/etc.)
+├── cli/                 # Terminal companion sharing the daemon/orchestrator session — Phase 7, not built yet
 ├── sandbox/            # Background workspace templates (headless browser + shell)
 ├── website/            # Public landing page (Astro) — separate project, own package.json
 ├── ARCHITECTURE.md     # This file (Source of Truth)
