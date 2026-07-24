@@ -111,12 +111,12 @@ export function Pill({
           getCurrentWindow().startDragging();
         }}
         title={dictationLabel ?? label}
-        className={`animate-daimon-in group relative flex h-full w-full items-center justify-center rounded-full backdrop-blur-2xl transition hover:scale-105 active:scale-95 ${
+        className={`animate-daimon-in liquid-glass group relative flex h-full w-full items-center justify-center rounded-full transition duration-300 hover:scale-105 active:scale-95 ${
           dictationState === "error"
-            ? "border border-red-400/40 bg-neutral-950/70 opacity-100 shadow-[0_0_24px_-8px_rgba(248,113,113,0.45)]"
+            ? "opacity-100 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.28),0_10px_36px_-10px_rgba(0,0,0,0.65),0_0_32px_-8px_rgba(248,113,113,0.5)] [border-color:rgba(248,113,113,0.45)]"
             : dictationActive
-            ? "border border-[#4f8dff]/50 bg-neutral-900/90 opacity-100 shadow-[0_0_28px_-6px_rgba(79,141,255,0.55)]"
-            : "border border-white/[0.06] bg-neutral-950/70 opacity-70 shadow-[0_0_24px_-8px_rgba(79,141,255,0.35)] hover:border-white/20 hover:bg-neutral-900/90 hover:opacity-100"
+            ? "opacity-100 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.32),0_10px_36px_-10px_rgba(0,0,0,0.65),0_0_36px_-6px_rgba(79,141,255,0.6)] [border-color:rgba(79,141,255,0.5)]"
+            : "opacity-80 hover:opacity-100 hover:[border-color:rgba(255,255,255,0.22)]"
         }`}
       >
         {dictationState === "recording" ? (
@@ -149,7 +149,7 @@ export function Pill({
         )}
         {multiple ? (
           <span
-            className={`absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-neutral-950 px-1 font-mono text-[9px] font-medium text-neutral-950 ${
+            className={`absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-neutral-950 px-1 text-[9px] font-semibold text-neutral-950 ${
               DOT_COLOR[aggregateStatus(sessions)] ?? DOT_COLOR.idle
             } ${aggregateStatus(sessions) === "running" ? "animate-daimon-pulse" : ""}`}
           >

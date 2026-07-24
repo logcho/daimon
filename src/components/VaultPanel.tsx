@@ -76,19 +76,19 @@ export function VaultPanel() {
         <button
           type="button"
           onClick={handleBack}
-          className="font-mono text-xs text-neutral-500 transition hover:text-neutral-200"
+          className="text-xs text-neutral-500 transition hover:text-neutral-200"
         >
           ← back to vault
         </button>
-        <h3 className="mt-3 font-mono text-sm text-neutral-100">{selectedFile}</h3>
+        <h3 className="mt-3 text-sm font-semibold tracking-tight text-neutral-100">{selectedFile}</h3>
         {detailState === "loading" && (
-          <p className="mt-3 font-mono text-xs text-neutral-500">loading…</p>
+          <p className="mt-3 text-xs text-neutral-500">loading…</p>
         )}
         {detailState === "error" && (
-          <p className="mt-3 font-mono text-xs text-red-400">{detailErrorMessage}</p>
+          <p className="mt-3 text-xs text-red-400">{detailErrorMessage}</p>
         )}
         {detailState === "ready" && (
-          <pre className="mt-3 whitespace-pre-wrap rounded-lg border border-white/10 bg-white/5 p-3 font-mono text-xs leading-relaxed text-neutral-300">
+          <pre className="mt-3 whitespace-pre-wrap rounded-xl border border-white/10 bg-black/20 p-3 font-mono text-xs leading-relaxed text-neutral-300">
             {content}
           </pre>
         )}
@@ -98,16 +98,16 @@ export function VaultPanel() {
 
   return (
     <div className="themed-scroll flex-1 overflow-y-auto p-4">
-      <h3 className="font-mono text-sm text-neutral-100">vault_files</h3>
+      <h3 className="text-sm font-semibold tracking-tight text-neutral-100">vault_files</h3>
 
       {listState === "loading" && (
-        <p className="mt-3 font-mono text-xs text-neutral-500">loading…</p>
+        <p className="mt-3 text-xs text-neutral-500">loading…</p>
       )}
       {listState === "error" && (
-        <p className="mt-3 font-mono text-xs text-red-400">{listErrorMessage}</p>
+        <p className="mt-3 text-xs text-red-400">{listErrorMessage}</p>
       )}
       {listState === "ready" && files.length === 0 && (
-        <p className="mt-3 font-mono text-xs text-neutral-500">
+        <p className="mt-3 text-xs text-neutral-500">
           ○ vault is empty — the agent will save notes here as it works
         </p>
       )}
@@ -118,10 +118,10 @@ export function VaultPanel() {
               <button
                 type="button"
                 onClick={() => handleOpenFile(file.name)}
-                className="flex w-full items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left transition hover:border-white/25 hover:bg-white/10 active:scale-[0.99]"
+                className="liquid-glass-subtle flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition duration-200 hover:[border-color:rgba(255,255,255,0.25)] active:scale-[0.99]"
               >
-                <span className="truncate font-mono text-sm text-neutral-100">{file.name}</span>
-                <span className="ml-3 shrink-0 font-mono text-xs text-neutral-500">
+                <span className="truncate text-sm font-medium text-neutral-100">{file.name}</span>
+                <span className="ml-3 shrink-0 text-xs text-neutral-500">
                   {formatBytes(file.sizeBytes)} · {formatModifiedAt(file.modifiedAt)}
                 </span>
               </button>

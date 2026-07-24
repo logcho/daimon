@@ -17,8 +17,11 @@ export function ThinkingIndicator() {
   }, []);
 
   return (
-    <span className="inline-flex items-center gap-2 font-mono text-sm text-[#4f8dff]">
-      <span className="inline-block w-3 text-center">{FRAMES[frame]}</span>
+    <span className="inline-flex items-center gap-2 text-sm text-[#4f8dff]">
+      {/* Keep the braille spinner glyph itself monospaced so its cell width
+          stays fixed as frames cycle; the verb beside it is prose, so it
+          rides the app's sans stack like the rest of the chat text. */}
+      <span className="inline-block w-3 text-center font-mono">{FRAMES[frame]}</span>
       <span>{VERBS[verbIndex]}…</span>
     </span>
   );

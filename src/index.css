@@ -1,5 +1,23 @@
 @import "tailwindcss";
 
+/* Hybrid typography (see PROMPT.md's UI-restyle notes): a modern sans stack
+   for all UI chrome — chat prose, labels, buttons, headings — while the
+   monospace stack is kept for genuinely machine-flavored surfaces (the
+   terminal tab, agent tool-step lines, the chat input's `>` command
+   prompt), reached via the `font-mono` utility. Overriding these two theme
+   tokens repoints Tailwind's own `font-sans`/`font-mono` utilities at them,
+   so nothing else needs a bespoke font declaration. Kept to a native system
+   stack rather than a bundled webfont — the app ships offline-first and a
+   FOUT/network dependency on a floating always-on-top widget isn't worth
+   it; SF Pro / Segoe / Inter already read as "modern" on their platforms. */
+@theme {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter",
+    "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
 html,
 body,
 #root {
@@ -9,8 +27,13 @@ body,
   height: 100%;
   background: transparent;
   overflow: hidden;
-  font-family:
-    ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-sans);
+  /* Modern sans stacks look noticeably better with the browser's optical/
+     kerning niceties turned on — cheap, and it's what native macOS/Windows
+     UI does by default. */
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern", "liga", "calt";
   user-select: none;
 }
 
@@ -83,4 +106,57 @@ textarea {
 
 .themed-scroll::-webkit-scrollbar-thumb:hover {
   background-color: rgba(255, 255, 255, 0.3);
+}
+
+/* --- Liquid glass -------------------------------------------------------
+   Bold-but-legible take on Apple's Liquid Glass language, factored into
+   reusable classes because the same treatment recurs across the pill, the
+   panel shell, and the floating chips/cards. Two layers do the work:
+
+   1. `backdrop-filter: blur() saturate()` — the saturate() is what makes it
+      read as *liquid* glass rather than frosted plastic: it pulls color out
+      of whatever's behind the window (the user's real desktop, since this is
+      a transparent always-on-top widget) and lets it bleed through tinted,
+      instead of washing everything to flat grey.
+   2. A specular top-edge highlight via `inset 0 1px` in the box-shadow — the
+      bright hairline along the upper rim that sells "this is a curved pane
+      of glass catching light from above," the single most recognizable cue
+      of the whole style. Paired with a very faint inset bottom line for a
+      subtle "thickness."
+
+   The background is a two-stop gradient over a dark translucent base, not a
+   flat fill, so the pane itself has a top-lit sheen independent of whatever's
+   behind it. Outer shadow = depth (dark, tight) + accent glow (blue, wide).
+
+   Glow-clipping caveat (see the design-system skill): the wide accent glow
+   in the outer box-shadow gets hard-clipped square if this class is put on
+   an element that fills its window edge-to-edge. Every current use sits
+   inside a padded wrapper (Pill's p-5, PipelinePanel's p-6) that's smaller
+   than the transparent window, so the glow has room to fade — keep that
+   invariant when adding new uses. */
+.liquid-glass {
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02) 55%, rgba(255, 255, 255, 0.05)),
+    rgba(9, 9, 13, 0.55);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 0 rgba(255, 255, 255, 0.05),
+    0 10px 36px -10px rgba(0, 0, 0, 0.65),
+    0 0 44px -14px rgba(79, 141, 255, 0.28);
+}
+
+/* A lighter-weight variant for smaller floating elements (chips, inline
+   controls) that want the same glassy character without the full panel's
+   heavy shadow stack — less blur, subtler specular line, no accent glow. */
+.liquid-glass-subtle {
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.16);
 }

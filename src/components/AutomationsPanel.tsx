@@ -29,13 +29,13 @@ function LastRunLine({ automation }: { automation: Automation }) {
   const when = formatRelativeTime(automation.lastRunAt);
   if (automation.lastRunStatus === "error") {
     return (
-      <p className="mt-1 font-mono text-xs text-red-400">
+      <p className="mt-1 text-xs text-red-400">
         last ran {when} — error{automation.lastRunResult ? `: ${truncate(automation.lastRunResult, 80)}` : ""}
       </p>
     );
   }
   return (
-    <p className="mt-1 font-mono text-xs text-emerald-400">
+    <p className="mt-1 text-xs text-emerald-400">
       last ran {when} — done
     </p>
   );
@@ -79,14 +79,14 @@ function AutomationRow({
   }
 
   return (
-    <li className="rounded-lg border border-white/10 bg-white/5 px-3 py-2.5">
+    <li className="liquid-glass-subtle rounded-xl px-3 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${automation.enabled ? "bg-[#4f8dff]" : "bg-neutral-600"}`}
             />
-            <span className="truncate font-mono text-sm text-neutral-100">{automation.name}</span>
+            <span className="truncate text-sm font-medium text-neutral-100">{automation.name}</span>
           </div>
           <p className="mt-1 truncate font-mono text-xs text-neutral-500">{automation.schedule}</p>
           <LastRunLine automation={automation} />
@@ -97,7 +97,7 @@ function AutomationRow({
             onClick={handleToggle}
             disabled={busy}
             title={automation.enabled ? "disable" : "enable"}
-            className={`rounded-full border px-3 py-1 font-mono text-xs transition active:scale-95 disabled:opacity-40 ${
+            className={`rounded-full border px-3 py-1 text-xs transition active:scale-95 disabled:opacity-40 ${
               automation.enabled
                 ? "border-[#4f8dff]/40 bg-[#4f8dff]/15 text-[#4f8dff] hover:border-[#4f8dff]/60"
                 : "border-white/15 bg-white/5 text-neutral-500 hover:border-white/25 hover:text-neutral-200"
@@ -110,13 +110,13 @@ function AutomationRow({
             onClick={handleDelete}
             disabled={busy}
             title="delete automation"
-            className="rounded-full border border-white/15 bg-white/5 px-2.5 py-1 font-mono text-xs text-neutral-500 transition hover:border-red-400/40 hover:text-red-400 active:scale-95 disabled:opacity-40"
+            className="liquid-glass-subtle rounded-full px-2.5 py-1 text-xs text-neutral-400 transition duration-200 hover:text-red-400 hover:[border-color:rgba(248,113,113,0.4)] active:scale-95 disabled:opacity-40"
           >
             delete
           </button>
         </div>
       </div>
-      {rowError && <p className="mt-2 font-mono text-xs text-red-400">{rowError}</p>}
+      {rowError && <p className="mt-2 text-xs text-red-400">{rowError}</p>}
     </li>
   );
 }
@@ -181,16 +181,16 @@ export function AutomationsPanel() {
 
   return (
     <div className="themed-scroll flex-1 overflow-y-auto p-4">
-      <h3 className="font-mono text-sm text-neutral-100">automations</h3>
+      <h3 className="text-sm font-semibold tracking-tight text-neutral-100">automations</h3>
 
       {listState === "loading" && (
-        <p className="mt-3 font-mono text-xs text-neutral-500">loading…</p>
+        <p className="mt-3 text-xs text-neutral-500">loading…</p>
       )}
       {listState === "error" && (
-        <p className="mt-3 font-mono text-xs text-red-400">{listErrorMessage}</p>
+        <p className="mt-3 text-xs text-red-400">{listErrorMessage}</p>
       )}
       {listState === "ready" && automations.length === 0 && (
-        <p className="mt-3 font-mono text-xs text-neutral-500">
+        <p className="mt-3 text-xs text-neutral-500">
           ○ no automations yet — ask daimon to schedule something recurring, or add one below.
         </p>
       )}
@@ -208,21 +208,21 @@ export function AutomationsPanel() {
       )}
 
       <div className="mt-8 border-t border-white/5 pt-6">
-        <h3 className="font-mono text-sm text-neutral-100">new_automation</h3>
+        <h3 className="text-sm font-semibold tracking-tight text-neutral-100">new_automation</h3>
         <form onSubmit={handleCreate} className="mt-4 space-y-2">
           <input
             type="text"
             value={nameDraft}
             onChange={(e) => setNameDraft(e.target.value)}
             placeholder="daily brief"
-            className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 font-mono text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-[#4f8dff]/60 focus:outline-none focus:ring-2 focus:ring-[#4f8dff]/20"
+            className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-[#4f8dff]/60 focus:outline-none focus:ring-2 focus:ring-[#4f8dff]/20"
           />
           <textarea
             value={instructionDraft}
             onChange={(e) => setInstructionDraft(e.target.value)}
             placeholder="summarize my unread email and calendar for today"
             rows={2}
-            className="w-full resize-none rounded-lg border border-white/10 bg-white/5 px-3 py-2 font-mono text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-[#4f8dff]/60 focus:outline-none focus:ring-2 focus:ring-[#4f8dff]/20"
+            className="w-full resize-none rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-[#4f8dff]/60 focus:outline-none focus:ring-2 focus:ring-[#4f8dff]/20"
           />
           <input
             type="text"
@@ -231,8 +231,8 @@ export function AutomationsPanel() {
             placeholder="0 8 * * *"
             className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 font-mono text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-[#4f8dff]/60 focus:outline-none focus:ring-2 focus:ring-[#4f8dff]/20"
           />
-          <p className="font-mono text-xs leading-relaxed text-neutral-600">
-            cron format — minute hour day month weekday, e.g. <span className="text-neutral-500">0 8 * * *</span> for
+          <p className="text-xs leading-relaxed text-neutral-600">
+            cron format — minute hour day month weekday, e.g. <span className="font-mono text-neutral-500">0 8 * * *</span> for
             daily at 8am.
           </p>
           <div className="flex items-center gap-3">
@@ -241,12 +241,12 @@ export function AutomationsPanel() {
               disabled={
                 !nameDraft.trim() || !instructionDraft.trim() || !scheduleDraft.trim() || createState === "saving"
               }
-              className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95 disabled:opacity-40"
+              className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
             >
               {createState === "saving" ? "creating…" : "create"}
             </button>
             {createState === "error" && (
-              <span className="font-mono text-xs text-red-400">{createErrorMessage}</span>
+              <span className="text-xs text-red-400">{createErrorMessage}</span>
             )}
           </div>
         </form>
