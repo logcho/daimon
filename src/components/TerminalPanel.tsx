@@ -16,16 +16,16 @@ import type { PendingInput } from "../types";
 // xterm's default black-on-white — this is a real shell prompt embedded in
 // Daimon's own panel, not a separate widget with its own visual identity.
 //
-// `background` is a *translucent* dark, not opaque, so the panel's liquid
-// glass (and the desktop bleeding through it) shows behind the terminal text
-// — the terminal reads as another glass surface rather than an opaque slab
-// pasted over the glass. Requires `allowTransparency: true` on the Terminal
-// (set below); without that flag xterm forces the background fully opaque
-// regardless of the alpha here. A little alpha is kept (not fully clear) so
-// terminal text stays legible over a busy blurred desktop instead of
-// fighting it.
+// `background` is fully transparent, so the panel's native vibrancy glass
+// (and the live desktop blurred behind it) shows straight through behind the
+// terminal text — the terminal reads as the same glass surface as the rest
+// of the panel, not a tinted slab over it. Requires `allowTransparency: true`
+// on the Terminal (set below); without that flag xterm forces the background
+// fully opaque regardless of the alpha here. If shell text ever proves hard
+// to read against a busy desktop, the tradeoff dial is this alpha — nudge it
+// up toward an opaque dark to reintroduce a legibility backing.
 const TERMINAL_THEME = {
-  background: "rgba(9, 9, 13, 0.35)",
+  background: "rgba(0, 0, 0, 0)",
   foreground: "#e5e5e5",
   cursor: "#4f8dff",
   cursorAccent: "#0a0a0a",
