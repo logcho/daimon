@@ -34,6 +34,7 @@ fn main() {
             "get_claude_cli_status",
             "get_accessibility_trust_status",
             "activate_and_focus_window",
+            "set_window_vibrancy",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }

@@ -94,7 +94,10 @@ export function Pill({
       : null;
 
   return (
-    <div className="flex h-full w-full items-center justify-center p-5">
+    // No padding wrapper any more — the button fills the window so the visible
+    // circle aligns exactly with the native vibrancy material behind it (which
+    // fills the whole window). See vibrancy.rs and window.ts's PILL_SIZE note.
+    <div className="flex h-full w-full items-center justify-center">
       <button
         onClick={(e) => {
           const start = mouseDownAt.current;
@@ -111,12 +114,17 @@ export function Pill({
           getCurrentWindow().startDragging();
         }}
         title={dictationLabel ?? label}
-        className={`animate-daimon-in liquid-glass group relative flex h-full w-full items-center justify-center rounded-full transition duration-300 hover:scale-105 active:scale-95 ${
+        // No grow-on-hover (hover:scale-105) any more — the button now fills
+        // the window edge-to-edge, so scaling up would clip against the window
+        // bounds. active:scale-95 (a shrink) is fine and stays. Outer-glow
+        // shadows are gone too (no transparent margin left to fade into); the
+        // dictation states are signaled by border color + opacity instead.
+        className={`animate-daimon-in liquid-glass group relative flex h-full w-full items-center justify-center rounded-full transition duration-300 active:scale-95 ${
           dictationState === "error"
-            ? "opacity-100 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.28),0_10px_36px_-10px_rgba(0,0,0,0.65),0_0_32px_-8px_rgba(248,113,113,0.5)] [border-color:rgba(248,113,113,0.45)]"
+            ? "opacity-100 [border-color:rgba(248,113,113,0.55)]"
             : dictationActive
-            ? "opacity-100 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.32),0_10px_36px_-10px_rgba(0,0,0,0.65),0_0_36px_-6px_rgba(79,141,255,0.6)] [border-color:rgba(79,141,255,0.5)]"
-            : "opacity-80 hover:opacity-100 hover:[border-color:rgba(255,255,255,0.22)]"
+            ? "opacity-100 [border-color:rgba(79,141,255,0.6)]"
+            : "opacity-90 hover:opacity-100 hover:[border-color:rgba(255,255,255,0.22)]"
         }`}
       >
         {dictationState === "recording" ? (

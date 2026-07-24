@@ -2,10 +2,17 @@ import { currentMonitor, getCurrentWindow, primaryMonitor } from "@tauri-apps/ap
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { activateAndFocusWindow } from "./api";
 
-// Each of these is larger than its visible content (see the matching p-* in
-// Pill.tsx / PipelinePanel.tsx) so glow effects have transparent room to
-// fade out before hitting the window's hard rectangular edge.
-export const PILL_SIZE = { width: 96, height: 96 };
+// The pill/panel now fill the window edge-to-edge (no inset padding wrapper)
+// so the visible shape aligns exactly with the native vibrancy material,
+// which fills the whole window — see vibrancy.rs and the removed p-5/p-6
+// wrappers in Pill.tsx / PipelinePanel.tsx. That's why PILL_SIZE dropped from
+// 96 to 56: the window used to be 96px with a 20px transparent glow margin on
+// each side (visible circle ≈ 56px), and now the window *is* the visible
+// circle. A 56px square with the shared 28px vibrancy radius is a perfect
+// circle (28 = 56/2). The soft outer glow those margins existed for is gone,
+// traded for the dynamic native glass (an accepted tradeoff — see the
+// UI-restyle notes in PROMPT.md).
+export const PILL_SIZE = { width: 56, height: 56 };
 // Deliberately above MIN_PANEL_SIZE, not equal to it — opening straight into
 // a panel that's already pinned to its own floor left the 5-tab header (see
 // below) reading as cramped even before the user touched a resize handle.

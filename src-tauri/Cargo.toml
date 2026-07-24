@@ -55,4 +55,9 @@ objc2 = "0.6.4"
 # actually used here.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSHapticFeedback", "NSApplication", "NSResponder", "block2"] }
 objc2-foundation = "0.3.2"
+# Native NSVisualEffectView "liquid glass" behind the transparent pill/panel
+# webview — the real, OS-composited desktop blur that updates live as the
+# window moves (unlike CSS backdrop-filter, which freezes its captured
+# backdrop on a moving transparent window). See `vibrancy.rs`.
+window-vibrancy = "0.6"
 

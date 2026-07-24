@@ -109,43 +109,34 @@ textarea {
 }
 
 /* --- Liquid glass -------------------------------------------------------
-   Bold-but-legible take on Apple's Liquid Glass language, factored into
-   reusable classes because the same treatment recurs across the pill, the
-   panel shell, and the floating chips/cards. Two layers do the work:
+   The actual desktop blur is now done by a native macOS NSVisualEffectView
+   *behind* this webview (see src-tauri/src/vibrancy.rs) — that's what makes
+   the glass dynamic, tracking the live desktop as the window moves, which a
+   CSS `backdrop-filter` on a transparent window can't do (it freezes its
+   captured backdrop when the window is dragged). So `.liquid-glass` no longer
+   blurs anything itself; it's the *tint + finish* layered on top of that
+   native material:
 
-   1. `backdrop-filter: blur() saturate()` — the saturate() is what makes it
-      read as *liquid* glass rather than frosted plastic: it pulls color out
-      of whatever's behind the window (the user's real desktop, since this is
-      a transparent always-on-top widget) and lets it bleed through tinted,
-      instead of washing everything to flat grey.
-   2. A specular top-edge highlight via `inset 0 1px` in the box-shadow — the
-      bright hairline along the upper rim that sells "this is a curved pane
-      of glass catching light from above," the single most recognizable cue
-      of the whole style. Paired with a very faint inset bottom line for a
-      subtle "thickness."
+   - A dark translucent fill (kept fairly light so the native blur shows
+     through it), as a two-stop gradient so the pane has a top-lit sheen of
+     its own rather than a flat wash.
+   - A hairline border, and a specular top-edge highlight via `inset 0 1px`
+     in the box-shadow — the bright rim that reads as "a curved pane of glass
+     catching light from above," the most recognizable cue of the style.
 
-   The background is a two-stop gradient over a dark translucent base, not a
-   flat fill, so the pane itself has a top-lit sheen independent of whatever's
-   behind it. Outer shadow = depth (dark, tight) + accent glow (blue, wide).
-
-   Glow-clipping caveat (see the design-system skill): the wide accent glow
-   in the outer box-shadow gets hard-clipped square if this class is put on
-   an element that fills its window edge-to-edge. Every current use sits
-   inside a padded wrapper (Pill's p-5, PipelinePanel's p-6) that's smaller
-   than the transparent window, so the glow has room to fade — keep that
-   invariant when adding new uses. */
+   No outer glow/shadow: this element now fills the window edge-to-edge (the
+   old p-5/p-6 margins are gone), so any outer box-shadow would just clip at
+   the window bounds. The native material rounds itself (its own layer corner
+   radius, set to 28px in vibrancy.rs) to match this element's CSS
+   `rounded-[28px]`/`rounded-full`, so tint and blur share one silhouette. */
 .liquid-glass {
   background:
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02) 55%, rgba(255, 255, 255, 0.05)),
-    rgba(9, 9, 13, 0.55);
-  backdrop-filter: blur(30px) saturate(180%);
-  -webkit-backdrop-filter: blur(30px) saturate(180%);
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.015) 55%, rgba(255, 255, 255, 0.04)),
+    rgba(9, 9, 13, 0.32);
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.28),
-    inset 0 -1px 0 0 rgba(255, 255, 255, 0.05),
-    0 10px 36px -10px rgba(0, 0, 0, 0.65),
-    0 0 44px -14px rgba(79, 141, 255, 0.28);
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.26),
+    inset 0 -1px 0 0 rgba(255, 255, 255, 0.05);
 }
 
 /* A lighter-weight variant for smaller floating elements (chips, inline

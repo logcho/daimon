@@ -39,15 +39,22 @@ type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | 
 // ourselves means the actual resize behavior only depends on `setSize`/
 // `setPosition`, which are already used elsewhere in this app and known to
 // work correctly.
+// The panel now fills the window edge-to-edge (no p-6 margin — that margin
+// existed for a soft outer glow that's since been replaced by native
+// vibrancy, see vibrancy.rs). So the grab targets sit right at the window
+// edges rather than in a margin straddling an inset panel edge. Edges are
+// thin strips; corners are small squares. The corner squares overlap the
+// transparent rounded-corner region of the window, which still captures
+// pointer events on a transparent Tauri window, so they remain grabbable.
 const RESIZE_HANDLES: { direction: ResizeDirection; className: string }[] = [
-  { direction: "North", className: "inset-x-9 top-4 h-4 cursor-ns-resize" },
-  { direction: "South", className: "inset-x-9 bottom-4 h-4 cursor-ns-resize" },
-  { direction: "West", className: "inset-y-9 left-4 w-4 cursor-ew-resize" },
-  { direction: "East", className: "inset-y-9 right-4 w-4 cursor-ew-resize" },
-  { direction: "NorthWest", className: "left-3 top-3 h-6 w-6 cursor-nwse-resize" },
-  { direction: "NorthEast", className: "right-3 top-3 h-6 w-6 cursor-nesw-resize" },
-  { direction: "SouthWest", className: "left-3 bottom-3 h-6 w-6 cursor-nesw-resize" },
-  { direction: "SouthEast", className: "right-3 bottom-3 h-6 w-6 cursor-nwse-resize" },
+  { direction: "North", className: "inset-x-5 top-0 h-1.5 cursor-ns-resize" },
+  { direction: "South", className: "inset-x-5 bottom-0 h-1.5 cursor-ns-resize" },
+  { direction: "West", className: "inset-y-5 left-0 w-1.5 cursor-ew-resize" },
+  { direction: "East", className: "inset-y-5 right-0 w-1.5 cursor-ew-resize" },
+  { direction: "NorthWest", className: "left-0 top-0 h-4 w-4 cursor-nwse-resize" },
+  { direction: "NorthEast", className: "right-0 top-0 h-4 w-4 cursor-nesw-resize" },
+  { direction: "SouthWest", className: "left-0 bottom-0 h-4 w-4 cursor-nesw-resize" },
+  { direction: "SouthEast", className: "right-0 bottom-0 h-4 w-4 cursor-nwse-resize" },
 ];
 
 function clamp(value: number, min: number, max: number) {
@@ -581,7 +588,11 @@ export function PipelinePanel({
   const showChipRow = view === "chat" && sessions.length > 0;
 
   return (
-    <div className="relative flex h-full w-full items-center justify-center p-6">
+    // No p-6 margin — the panel fills the window edge-to-edge so its visible
+    // rounded rectangle aligns exactly with the native vibrancy material (see
+    // vibrancy.rs). The soft outer glow that margin used to provide is gone,
+    // traded for the dynamic native glass.
+    <div className="relative flex h-full w-full items-center justify-center">
       <ResizeHandles />
       <div className="animate-daimon-in liquid-glass flex h-full w-full flex-col overflow-hidden rounded-[28px] text-white">
         <div

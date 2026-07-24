@@ -5,6 +5,7 @@ mod session;
 mod settings;
 mod terminal;
 mod vault;
+mod vibrancy;
 mod voice;
 mod window_focus;
 mod workspace;
@@ -57,6 +58,15 @@ async fn activate_and_focus_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) 
     window_focus::activate_and_focus(&app).await
 }
 
+/// Applies (or re-applies) the native macOS vibrancy material behind the
+/// pill/panel window with the given corner radius — see `vibrancy.rs`. Called
+/// once from the frontend on mount rather than at Rust startup, so the window
+/// is guaranteed to exist and be shown by the time it runs.
+#[tauri::command]
+async fn set_window_vibrancy<R: tauri::Runtime>(app: tauri::AppHandle<R>, radius: f64) -> Result<(), String> {
+    vibrancy::apply(&app, radius).await
+}
+
 /// Shared app construction so tests can exercise the exact same command
 /// wiring as the real app, without invoking `tauri::generate_context!()`
 /// (which may only appear once per crate) a second time.
@@ -104,7 +114,8 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             terminal::close_terminal,
             terminal::get_claude_cli_status,
             get_accessibility_trust_status,
-            activate_and_focus_window
+            activate_and_focus_window,
+            set_window_vibrancy
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

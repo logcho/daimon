@@ -47,6 +47,7 @@
     "allow-close-terminal",
     "allow-get-claude-cli-status",
     "allow-get-accessibility-trust-status",
-    "allow-activate-and-focus-window"
+    "allow-activate-and-focus-window",
+    "allow-set-window-vibrancy"
   ]
 }
