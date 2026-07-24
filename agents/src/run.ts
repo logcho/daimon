@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { AIMessage, BaseMessage, HumanMessage, ToolMessage } from "@langchain/core/messages";
+import { AIMessage, BaseMessage, HumanMessage, MessageContent, ToolMessage } from "@langchain/core/messages";
 import { GraphRecursionError } from "@langchain/langgraph";
 import { buildAgent } from "./graph.js";
 import { runDemoTask } from "./demo.js";
@@ -30,6 +30,35 @@ const RECURSION_LIMIT = 40;
 // across every call to `runTurn` made against this process.
 let conversation: BaseMessage[] = [];
 
+// `AIMessage.content` isn't always a plain string — LangChain's own type for
+// it is `string | Array<ContentBlock>`, and `@langchain/anthropic` only
+// collapses a response down to a plain string when it's a *single* text
+// block. Any assistant turn that mixes a text block with something else in
+// the same response (a tool call the model narrates before making, which
+// Claude does fairly often — "Let me check that page." alongside the
+// `tool_use` block) comes back as an array instead. The old version of this
+// function only ever checked `typeof message.content === "string"`, so any
+// such turn's text was silently discarded rather than captured as
+// `finalResult` — invisible in the common case where a *later* message in
+// the same turn was a plain string and overwrote it, but a real, reproduced
+// "the agent never sends anything back" bug whenever the model's actual
+// final, tool-call-free closing message happened to come back as one of
+// these arrays instead of collapsing to a string.
+function extractText(content: MessageContent): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (block): block is { type: "text"; text: string } =>
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string",
+    )
+    .map((block) => block.text)
+    .join("");
+}
+
 export async function runTurn(instruction: string, emit: (event: TaskEvent) => void): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error("[daimon-agent] no ANTHROPIC_API_KEY set, running demo task");
@@ -56,7 +85,7 @@ export async function runTurn(instruction: string, emit: (event: TaskEvent) => v
       searchNotes(instruction, 3),
     );
     if (memoryContext) console.error(`[daimon-agent] memory context:\n${memoryContext}`);
-    const agent = buildAgent(memoryContext);
+    const agent = buildAgent(memoryContext, emit);
     console.error(`[daimon-agent] agent built, starting stream for instruction: ${instruction}`);
     const stream = await agent.stream(
       { messages: conversation },
@@ -101,9 +130,10 @@ export async function runTurn(instruction: string, emit: (event: TaskEvent) => v
               tool: call.name,
             });
           }
-          if (typeof message.content === "string" && message.content) {
+          const text = extractText(message.content);
+          if (text) {
             console.error("[daimon-agent] final message chunk received");
-            finalResult = message.content;
+            finalResult = text;
           }
           // Pushed in encounter order, same order this loop already
           // processes updates in — a tool-calling AIMessage lands here
@@ -131,7 +161,13 @@ export async function runTurn(instruction: string, emit: (event: TaskEvent) => v
     }
 
     emit({ type: "step", id: thinkingId, label: "Thinking", status: "done" });
-    const result = finalResult || "Task complete.";
+    // `.trim()` here, not just a truthiness check on the raw string — a
+    // whitespace-only `finalResult` (e.g. a closing message that's just a
+    // stray newline) is truthy in JS, so without this it would sail past
+    // the "Task complete." fallback and get sent as a real `done` result —
+    // rendering as a turn that looks completely blank in the UI, which is
+    // indistinguishable from the agent never responding at all.
+    const result = finalResult.trim() || "Task complete.";
     console.error(`[daimon-agent] task done: ${result}`);
     emit({ type: "done", result });
     recordTask(instruction, result, "done");

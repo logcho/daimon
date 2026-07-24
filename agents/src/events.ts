@@ -19,4 +19,17 @@ export interface ErrorEvent {
   message: string;
 }
 
-export type TaskEvent = StepEvent | DoneEvent | ErrorEvent;
+// Emitted by the open_terminal_with_command tool (tools.ts) as a pure UI
+// side-effect alongside its normal string return to the LLM — it carries no
+// "done"/"error" status of its own because staging text into a terminal tab
+// can't itself fail or complete, it's fire-and-forget for the frontend to
+// react to. Deliberately "stage, don't execute": the daemon/agent never
+// presses Enter on the user's behalf, matching the same principle already
+// applied to voice-dictated text landing in an input without auto-submitting.
+export interface UiActionEvent {
+  type: "ui_action";
+  action: "open_terminal_with_command";
+  command: string;
+}
+
+export type TaskEvent = StepEvent | DoneEvent | ErrorEvent | UiActionEvent;

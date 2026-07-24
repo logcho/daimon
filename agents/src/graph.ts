@@ -1,6 +1,7 @@
 import { ChatAnthropic } from "@langchain/anthropic";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
-import { daimonTools } from "./tools.js";
+import { buildDaimonTools } from "./tools.js";
+import type { TaskEvent } from "./events.js";
 
 const SYSTEM_PROMPT =
   "You are Daimon, an on-device agent completing a task inside an isolated " +
@@ -15,17 +16,36 @@ const SYSTEM_PROMPT =
   "without clear progress toward the goal, stop and report what you've " +
   "found or tried so far rather than continuing to retry the same " +
   "approach — a partial, honest result beats silently exhausting your step " +
-  "budget.\n\n" +
+  "budget. If a tool tells you you've already tried the exact same thing (or " +
+  "something too similar to count as new), believe it and change approach — " +
+  "web_search/open_url/read_page share a hard, enforced limit on how many " +
+  "times they can be used in a single turn, so treat each one as worth " +
+  "using deliberately, not for open-ended exploring.\n\n" +
+  "Your final result is shown in a small chat bubble in a floating panel, " +
+  "not a document — write it like a short text message summarizing what " +
+  "you did, not a report. Plain text only: no markdown ('#' headers, " +
+  "'**bold**', numbered/bulleted list syntax) since nothing renders it — " +
+  "it'll show up as literal symbols, not formatting. If you need to list a " +
+  "few things, put each on its own line as a plain sentence or a line " +
+  "starting with '-'. Don't restate the instruction back, don't pad a " +
+  "simple answer with unneeded structure, and don't narrate your own tool " +
+  "use ('I searched for X, then opened Y...') unless the user actually " +
+  "asked how you did something — just give the answer.\n\n" +
   "If you complete something genuinely reusable — a multi-step procedure " +
   "likely to come up again in a similar form, not a one-off — call " +
-  "save_skill with a generalized, parameterized description of it.";
+  "save_skill with a generalized, parameterized description of it.\n\n" +
+  "open_terminal_with_command only stages a command into a new terminal tab " +
+  "for the user to review — it never executes anything on their machine on " +
+  "its own, so it's always safe to use, but combine a multi-step request " +
+  "into one && -joined command line rather than calling it more than once.";
 
-export function buildAgent(memoryContext: string) {
+export function buildAgent(memoryContext: string, emit: (event: TaskEvent) => void) {
   const llm = new ChatAnthropic({
     model: process.env.DAIMON_MODEL ?? "claude-sonnet-5",
     apiKey: process.env.ANTHROPIC_API_KEY,
   });
 
+  const tools = buildDaimonTools(emit);
   const prompt = memoryContext ? `${SYSTEM_PROMPT}\n\n${memoryContext}` : SYSTEM_PROMPT;
-  return createReactAgent({ llm, tools: daimonTools, prompt });
+  return createReactAgent({ llm, tools, prompt });
 }

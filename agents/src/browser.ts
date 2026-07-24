@@ -1,7 +1,8 @@
 import { chromium, type Browser, type Page } from "playwright";
 
 let browserPromise: Promise<Browser> | null = null;
-let pagePromise: Promise<Page> | null = null;
+let contentPagePromise: Promise<Page> | null = null;
+let searchPagePromise: Promise<Page> | null = null;
 
 function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
@@ -10,43 +11,61 @@ function getBrowser(): Promise<Browser> {
   return browserPromise;
 }
 
-function getPage(): Promise<Page> {
-  if (!pagePromise) {
-    pagePromise = getBrowser().then((browser) => browser.newPage());
+// The page the agent actually browses/reads/fills — kept on a separate tab
+// from `search()`'s page below. These used to share a single page, which
+// meant every `web_search` call silently navigated away from whatever page
+// `open_url` had just loaded. If the model then called `read_page` (an easy
+// ordering mistake — it takes no argument, so nothing about the call itself
+// signals "read *which* page"), it got DuckDuckGo's own results page back
+// instead of the page it actually meant to read, which reads as "nothing
+// changed" and reliably drives exactly the web_search -> read_page ->
+// open_url loop this was reported causing. Splitting the two means
+// `web_search` can run any number of times without ever disturbing what
+// `read_page`/`click`/`fill` are currently looking at.
+function getContentPage(): Promise<Page> {
+  if (!contentPagePromise) {
+    contentPagePromise = getBrowser().then((browser) => browser.newPage());
   }
-  return pagePromise;
+  return contentPagePromise;
+}
+
+function getSearchPage(): Promise<Page> {
+  if (!searchPagePromise) {
+    searchPagePromise = getBrowser().then((browser) => browser.newPage());
+  }
+  return searchPagePromise;
 }
 
 export async function openUrl(url: string): Promise<string> {
-  const page = await getPage();
+  const page = await getContentPage();
   await page.goto(url, { waitUntil: "domcontentloaded" });
   return page.title();
 }
 
 export async function getPageText(): Promise<string> {
-  const page = await getPage();
+  const page = await getContentPage();
   const text = await page.innerText("body");
   return text.slice(0, 4000);
 }
 
 export async function click(selector: string): Promise<void> {
-  const page = await getPage();
+  const page = await getContentPage();
   await page.click(selector, { timeout: 5000 });
 }
 
 export async function fill(selector: string, value: string): Promise<void> {
-  const page = await getPage();
+  const page = await getContentPage();
   await page.fill(selector, value, { timeout: 5000 });
 }
 
 export async function screenshotBase64(): Promise<string> {
-  const page = await getPage();
+  const page = await getContentPage();
   const buffer = await page.screenshot({ type: "png" });
   return buffer.toString("base64");
 }
 
 export async function currentUrl(): Promise<string> {
-  const page = await getPage();
+  const page = await getContentPage();
   return page.url();
 }
 
@@ -72,7 +91,7 @@ function resolveResultUrl(href: string): string {
 }
 
 export async function search(query: string): Promise<SearchResult[]> {
-  const page = await getPage();
+  const page = await getSearchPage();
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
   await page.goto(url, { waitUntil: "domcontentloaded" });
 
