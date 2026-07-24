@@ -24,7 +24,7 @@
 | **Memory & Skills** | Local store (SQLite + FTS/embeddings) | Cross-session memory of user context and task history; a growing library of reusable learned skills. |
 | **Gateway (remote access)** | Lightweight bridge service (Telegram/Slack/Discord to start) | Lets the user check status or send new instructions from a chat app when away from the desktop. Secondary to the native widget, not a replacement for it. |
 | **Communication** | IPC (Tauri Commands) | Secure bridge between UI frontend and Rust daemon. |
-| **Voice/Input** | Deepgram / Whisper | Real-time audio transcription streaming into the widget's input. |
+| **Voice/Input** | whisper.cpp (`whisper-rs`) + `cpal`, plus a macOS `objc2`/`NSEvent` Fn-key hook | On-device, open-source speech-to-text — either a standard hotkey (`CommandOrControl+Shift+D`) or the bare Fn key toggles recording, transcribes locally, fills the widget's chat input. No cloud API/account. See `PROMPT.md` Phase 5. |
 | **Cloud Backend** | Modal / Fly.io | Optional hosting for long-running or hibernating background workspaces. |
 | **Integrations** | OAuth2 (Gmail, Outlook/Microsoft Graph) + MCP client | Connected-account linking so tasks can act on the user's real email/calendar, plus a standard protocol for pulling in third-party tool servers as additional agent tools. Planned — see `PROMPT.md` Phase 6. |
 
@@ -54,7 +54,7 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 * **Subagents:** Independent sub-steps (e.g. checking several job boards at once) can be delegated to parallel subagents.
 * **Skill Library:** After successfully handling a novel task, the agent can persist a reusable, parameterized "skill" for future reuse.
 * **State:** Persistent `Checkpoint` storage so long-running tasks (a multi-hour job-application run) survive app or machine restarts.
-* **Open question, not yet decided:** whether Claude Code / the Claude Agent SDK could serve as (or alongside) this LangGraph engine for planning and tool orchestration. Noted here so the idea isn't lost; evaluate deliberately against LangGraph rather than swapping the stack row above without a real comparison.
+* **Open question, not yet decided:** whether Claude Code / the Claude Agent SDK could serve as (or alongside) this LangGraph engine for planning and tool orchestration. Noted here so the idea isn't lost; evaluate deliberately against LangGraph rather than swapping the stack row above without a real comparison. A narrower, additive idea in the same neighborhood — an embedded terminal running the real `claude` CLI directly, voice-dictation-integrated, not a change to this orchestrator — is planned separately as `PROMPT.md` Phase 11; the two don't need to be resolved together.
 * **Sessions, not one-shot tasks (Phase 8, implemented):** a session's background workspace stays alive between messages, so a follow-up genuinely continues (same browser/page state) rather than starting fresh — the "tear down immediately" policy from Phase 3 now applies only to teardown-on-session-end (explicit, or app exit), not after every message. See `PROMPT.md` Phase 8.
 * **Agent-created automations (Phase 10, implemented):** a `create_automation` tool lets the agent register a recurring instruction mid-conversation, not only through a settings form — it writes a pending request into a bind-mounted `automations/` directory (same shape as a vault note) for the daemon's scheduler to validate and promote.
 

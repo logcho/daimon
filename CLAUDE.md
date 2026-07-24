@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Phase 1 (ambient shell + one background task), Phase 2 (memory & skills), Phase 3 (concurrent multi-task execution), Phase 8 (continuable chat sessions), and Phase 9 (vaults/Obsidian integration) — the last two built out of order, see below — are all built and verified. See `PROMPT.md` for what that covers concretely and what's still ahead (Phase 4: remote gateway, Phase 5: voice/subagents, Phase 6: OAuth2 integrations/MCP/onboarding rework, Phase 7: CLI companion — all planned-but-not-started). The landing page (`website/`) also exists as a separate Astro project. Don't treat this file's "target" framing as literal for those areas — check what's actually on disk before assuming a path doesn't exist yet.
+Phase 1 (ambient shell + one background task), Phase 2 (memory & skills), Phase 3 (concurrent multi-task execution), Phase 8 (continuable chat sessions), and Phase 9 (vaults/Obsidian integration) — the last two built out of order, see below — are all built and verified. Phase 5 is partially done: voice input (local whisper.cpp dictation, hotkey-triggered) landed out of order, but subagent delegation has not. See `PROMPT.md` for what that covers concretely and what's still ahead (Phase 4: remote gateway, Phase 6: OAuth2 integrations/MCP/onboarding rework, Phase 7: CLI companion — all planned-but-not-started). The landing page (`website/`) also exists as a separate Astro project. Don't treat this file's "target" framing as literal for those areas — check what's actually on disk before assuming a path doesn't exist yet.
 
 **Sessions, not tasks:** the one-shot "task" model (`start_task`/`task-status`) no longer exists — it was replaced end to end by Phase 8's session model (`start_session`/`send_message`/`end_session`, event channel `session-status`). A session's background workspace stays alive across every message in it (Phase 3's "tear down immediately" policy now applies only when a session actually ends), and the frontend's `Task` type is gone, replaced by `Session { id, turns: Turn[] }`. If you see a reference to "task" in older context, check whether it actually means "session" now.
 
@@ -42,7 +42,7 @@ Build phases (see `PROMPT.md` for the authoritative, detailed breakdown — do n
 - **Phase 2:** persistent memory + skill library.
 - **Phase 3:** concurrent multi-task execution (per-task workspaces instead of one shared container).
 - **Phase 4:** remote gateway (starting with Telegram), scoped per channel to read-only status vs. full control.
-- **Phase 5:** real voice input, subagent delegation (multi-task tracking moved into Phase 3).
+- **Phase 5 (voice done, out of order; subagent delegation still open):** local whisper.cpp dictation, triggered by either `CommandOrControl+Shift+D` or the real bare Fn key (`src-tauri/src/fn_key.rs`, macOS-only native `NSEvent` hook, needs Accessibility permission), filling Daimon's own chat input. Multi-task tracking moved into Phase 3.
 - **Phase 6:** OAuth2 connected accounts (Gmail/Outlook), MCP tool servers, onboarding rework.
 - **Phase 7:** terminal CLI companion (Hermes/OpenClaw-style), sharing the same daemon/orchestrator session.
 - **Phase 8 (done, out of order):** continuable chat sessions instead of one-shot tasks — a session's workspace stays alive between messages (see `PROMPT.md`).
