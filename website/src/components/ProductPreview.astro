@@ -1,18 +1,31 @@
 ---
-import HeroMockup from "./HeroMockup.astro";
+import LiveDemo from "./LiveDemo.astro";
+
+const stats = ["Runs on your machine", "Never touches your cursor", "Remembers across sessions"];
 ---
 
 <section class="flex h-screen flex-col items-center justify-center px-6 py-10">
   <div data-reveal class="mx-auto flex max-w-3xl flex-col items-center text-center">
     <span class="mb-4 font-mono text-xs font-medium tracking-[0.25em] text-[#4f8dff] uppercase">Live status</span>
-    <h2 class="font-display text-3xl font-medium tracking-tight text-neutral-50 sm:text-4xl">
+    <h2 class="font-display text-4xl font-medium tracking-tight text-neutral-50 sm:text-5xl">
       Watch it work, if you want to.
     </h2>
-    <p class="mt-4 max-w-lg text-neutral-400">
+    <p class="mt-4 max-w-lg text-neutral-300">
       Every step streams to the pill in real time — or ignore it entirely until it's done.
     </p>
-    <div class="mt-10 w-full max-w-sm">
-      <HeroMockup />
+
+    <div class="mt-12 w-full">
+      <LiveDemo />
+    </div>
+
+    <div class="mt-10 flex flex-wrap items-center justify-center gap-3">
+      {
+        stats.map((s) => (
+          <span class="rounded-full border border-white/15 bg-white/[0.05] px-4 py-1.5 font-mono text-[11px] tracking-[0.1em] text-neutral-400 uppercase">
+            {s}
+          </span>
+        ))
+      }
     </div>
   </div>
 </section>

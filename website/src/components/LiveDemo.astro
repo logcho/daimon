@@ -1,0 +1,136 @@
+---
+// A simulated run of the pill/chat panel UI (matches the actual React
+// components in src/, not a screenshot). Cycles through a few hypothetical
+// tasks with a sequential step reveal — illustrative, not a claim about a
+// real run or real timing.
+---
+
+<div class="relative mx-auto w-full max-w-lg">
+  <div
+    class="pointer-events-none absolute inset-0 -z-10 scale-110 rounded-[32px] bg-[#4f8dff]/10 blur-3xl"
+  >
+  </div>
+
+  <div class="mb-4 flex justify-center">
+    <div
+      class="flex h-14 w-14 items-center justify-center rounded-full border border-white/15 bg-neutral-900/85 shadow-[0_0_28px_-8px_rgba(79,141,255,0.5)] backdrop-blur-xl"
+    >
+      <img src="/logo.svg" alt="" class="h-7 w-7 opacity-90 invert" />
+    </div>
+  </div>
+
+  <div
+    id="demo-card"
+    class="w-full rounded-[24px] border border-white/15 bg-neutral-900/90 text-left shadow-[0_0_60px_-16px_rgba(79,141,255,0.35)] backdrop-blur-xl transition-opacity duration-300"
+  >
+    <div class="flex items-center gap-3 border-b border-white/15 px-5 py-3.5">
+      <div class="flex gap-1.5">
+        <span class="h-2.5 w-2.5 rounded-full bg-white/15"></span>
+        <span class="h-2.5 w-2.5 rounded-full bg-white/15"></span>
+        <span class="h-2.5 w-2.5 rounded-full bg-white/15"></span>
+      </div>
+      <span class="text-xs font-medium text-neutral-300">Daimon</span>
+      <span class="ml-auto flex items-center gap-1.5 font-mono text-[10px] tracking-widest text-emerald-400 uppercase">
+        <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"></span>
+        Active
+      </span>
+    </div>
+
+    <div class="space-y-4 p-5">
+      <div class="flex justify-end">
+        <div
+          id="demo-prompt"
+          class="max-w-[85%] rounded-2xl rounded-br-sm border border-[#4f8dff]/20 bg-[#4f8dff]/15 px-4 py-2.5 text-sm text-neutral-100"
+        >
+          Research flights to Tokyo next month
+        </div>
+      </div>
+      <div class="flex justify-start">
+        <div
+          id="demo-steps"
+          class="min-h-[104px] w-[85%] space-y-2.5 rounded-2xl rounded-bl-sm border border-white/15 bg-white/[0.08] px-4 py-3 text-sm"
+        >
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const scenarios = [
+    {
+      prompt: "Research flights to Tokyo next month",
+      steps: ["Opened flight search", "Compared fare options", "Booked the best itinerary"],
+    },
+    {
+      prompt: "Summarize today's inbox",
+      steps: ["Scanned 42 new emails", "Flagged 3 needing a reply", "Drafted a summary"],
+    },
+    {
+      prompt: "Apply to the 5 saved job listings",
+      steps: ["Filled out application 1 of 5", "Filled out application 3 of 5", "Submitted all 5 applications"],
+    },
+  ];
+
+  const card = document.getElementById("demo-card");
+  const promptEl = document.getElementById("demo-prompt");
+  const stepsEl = document.getElementById("demo-steps");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function appendStep(label: string) {
+    if (!stepsEl) return;
+    const row = document.createElement("div");
+    row.className = "flex items-center gap-2";
+    row.innerHTML = `<span class="h-1.5 w-1.5 shrink-0 rounded-full bg-[#4f8dff] animate-pulse transition-colors duration-300"></span><span class="text-[#4f8dff] transition-colors duration-300">${label}</span>`;
+    stepsEl.appendChild(row);
+    return row;
+  }
+
+  function settleStep(row: HTMLElement | undefined) {
+    if (!row) return;
+    const dot = row.querySelector("span:first-child");
+    const text = row.querySelector("span:last-child");
+    dot?.setAttribute("class", "h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 transition-colors duration-300");
+    text?.setAttribute("class", "text-neutral-300 transition-colors duration-300");
+  }
+
+  async function runScenario(index: number) {
+    if (!promptEl || !stepsEl || !card) return;
+    const scenario = scenarios[index % scenarios.length];
+
+    card.classList.add("opacity-0");
+    await wait(300);
+    promptEl.textContent = scenario.prompt;
+    stepsEl.innerHTML = "";
+    card.classList.remove("opacity-0");
+
+    for (const label of scenario.steps) {
+      const row = appendStep(label);
+      await wait(750);
+      settleStep(row);
+    }
+
+    await wait(2400);
+    runScenario(index + 1);
+  }
+
+  if (stepsEl) {
+    if (reduceMotion) {
+      const first = scenarios[0];
+      for (const label of first.steps) settleStep(appendStep(label));
+    } else {
+      const observer = new IntersectionObserver(
+        ([entry]) => {
+          if (entry.isIntersecting) {
+            runScenario(0);
+            observer.disconnect();
+          }
+        },
+        { threshold: 0.4 },
+      );
+      observer.observe(stepsEl);
+    }
+  }
+</script>

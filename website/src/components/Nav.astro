@@ -1,39 +1,33 @@
 <header id="site-nav" class="fixed inset-x-0 top-0 z-30">
-  <div class="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+  <div
+    id="site-nav-bg"
+    class="pointer-events-none absolute inset-0 -z-10 border-b border-white/10 bg-[#0b0b0f] transition-[clip-path] duration-500 ease-out [clip-path:inset(0_0_100%_0)]"
+  >
+  </div>
+  <div class="relative mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
     <a href="/" class="flex items-center gap-2">
       <img src="/logo.svg" alt="Daimon" class="h-6 w-6 invert" />
       <span class="font-display text-base font-medium tracking-tight text-neutral-100">Daimon</span>
     </a>
     <nav class="font-display flex items-center gap-6 text-[15px] text-neutral-300">
-      <a href="#how-it-works" class="hidden transition hover:text-neutral-100 sm:inline">How it works</a>
-      <a href="#features" class="hidden transition hover:text-neutral-100 sm:inline">Features</a>
-      <a
-        href="https://github.com/logcho/daimon"
-        target="_blank"
-        rel="noreferrer"
-        class="flex items-center gap-1.5 rounded-full border border-white/15 bg-white/5 px-3.5 py-1.5 text-sm transition hover:border-white/25 hover:text-neutral-100"
-      >
-        GitHub
-      </a>
+      <a href="#how-it-works" class="transition hover:text-neutral-100">How it works</a>
+      <a href="#features" class="transition hover:text-neutral-100">Features</a>
     </nav>
   </div>
 </header>
 
 <script>
-  const nav = document.getElementById("site-nav");
-  const hero = document.getElementById("hero");
-  const solidClasses = ["border-b", "border-white/5", "bg-[#050505]"];
+  const navBg = document.getElementById("site-nav-bg");
+  const HIDDEN = "[clip-path:inset(0_0_100%_0)]";
+  const VISIBLE = "[clip-path:inset(0_0_0%_0)]";
 
-  if (nav && hero) {
-    const navHeight = nav.offsetHeight;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        for (const cls of solidClasses) {
-          nav.classList.toggle(cls, !entry.isIntersecting);
-        }
-      },
-      { rootMargin: `-${navHeight}px 0px 0px 0px`, threshold: 0 },
-    );
-    observer.observe(hero);
+  if (navBg) {
+    const syncNav = () => {
+      const scrolled = window.scrollY > 40;
+      navBg.classList.toggle(HIDDEN, !scrolled);
+      navBg.classList.toggle(VISIBLE, scrolled);
+    };
+    syncNav();
+    window.addEventListener("scroll", syncNav, { passive: true });
   }
 </script>
