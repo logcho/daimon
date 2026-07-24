@@ -139,6 +139,21 @@ textarea {
     inset 0 -1px 0 0 rgba(255, 255, 255, 0.05);
 }
 
+/* xterm.js's bundled stylesheet hard-codes `background-color: #000` on
+   `.xterm-viewport` (its own comment: "required in order for the scroll bar
+   to appear fully opaque" on macOS). That opaque black wins over
+   `allowTransparency: true` + a transparent theme background, leaving the
+   terminal a solid black slab that clashes with the panel's glass. Override
+   it to transparent so the native vibrancy (and the desktop blurred behind
+   it) shows through behind the shell text, matching every other surface —
+   see TerminalPanel.tsx's TERMINAL_THEME. `!important` because this is
+   overriding a third-party stylesheet whose load order relative to this file
+   isn't guaranteed. */
+.xterm,
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
 /* A lighter-weight variant for smaller floating elements (chips, inline
    controls) that want the same glassy character without the full panel's
    heavy shadow stack — less blur, subtler specular line, no accent glow. */
