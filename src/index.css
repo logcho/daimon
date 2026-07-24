@@ -48,6 +48,21 @@ textarea {
   animation: daimon-pulse-ring 1.6s ease-in-out infinite;
 }
 
+@keyframes daimon-sound-wave {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.animate-daimon-sound-wave {
+  animation: daimon-sound-wave 0.9s ease-in-out infinite;
+  transform-origin: center;
+}
+
 .themed-scroll {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;

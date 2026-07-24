@@ -11,7 +11,8 @@ function applyToTurn(turn: Turn, event: WorkspaceEvent): Turn {
     return { ...turn, steps };
   }
   if (event.type === "done") return { ...turn, result: event.result };
-  return { ...turn, error: event.message };
+  if (event.type === "error") return { ...turn, error: event.message };
+  return turn; // "ui_action" — handled as a side effect in App.tsx, not turn/chat content
 }
 
 /// Applies an event to the session's most recently started turn — i.e. the

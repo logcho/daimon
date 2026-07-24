@@ -3,18 +3,23 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   connectGmailAccount,
   disconnectGmailAccount,
+  downloadVoiceModel,
+  getAccessibilityTrustStatus,
   getApiKeyStatus,
+  getClaudeCliStatus,
   getGmailAccount,
   getGoogleClientIdStatus,
   getVaultPathStatus,
+  getVoiceModelStatus,
   setApiKey,
   setGoogleClientId,
   setVaultPath,
 } from "../lib/api";
-import type { ConnectedAccount, VaultPathStatus } from "../types";
+import type { ConnectedAccount, VaultPathStatus, VoiceModelStatus } from "../types";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 type ConnectState = "idle" | "connecting" | "error";
+type DownloadState = "idle" | "downloading" | "error";
 
 export function Settings() {
   const [hasKey, setHasKey] = useState<boolean | null>(null);
@@ -37,6 +42,19 @@ export function Settings() {
   const [vaultPathDraft, setVaultPathDraft] = useState("");
   const [vaultSaveState, setVaultSaveState] = useState<SaveState>("idle");
   const [vaultErrorMessage, setVaultErrorMessage] = useState("");
+
+  const [voiceStatus, setVoiceStatus] = useState<VoiceModelStatus | null>(null);
+  const [downloadState, setDownloadState] = useState<DownloadState>("idle");
+  const [downloadErrorMessage, setDownloadErrorMessage] = useState("");
+
+  // null = still checking. Only meaningful for the Fn-key trigger — the
+  // Cmd+Shift+D hotkey doesn't need Accessibility permission at all.
+  const [accessibilityTrusted, setAccessibilityTrusted] = useState<boolean | null>(null);
+
+  // null = still checking. Purely informational — the terminal tab always
+  // opens and spawns a plain shell regardless of this; it's setup guidance,
+  // not a gate.
+  const [claudeCliFound, setClaudeCliFound] = useState<boolean | null>(null);
 
   function refreshVaultStatus() {
     return getVaultPathStatus()
@@ -69,6 +87,49 @@ export function Settings() {
       .then(setGmailAccount)
       .catch(() => setGmailAccount(null));
   }, [hasGoogleClientId]);
+
+  useEffect(() => {
+    getVoiceModelStatus()
+      .then(setVoiceStatus)
+      .catch((err) => {
+        setDownloadErrorMessage(err instanceof Error ? err.message : String(err));
+        setDownloadState("error");
+      });
+  }, []);
+
+  // Re-checked every time Settings mounts (not just once at app startup) —
+  // the user grants this in System Settings, outside the app entirely, so
+  // the only way to reflect a just-granted permission without a full
+  // restart is to check again whenever they come back to look.
+  useEffect(() => {
+    getAccessibilityTrustStatus()
+      .then(setAccessibilityTrusted)
+      .catch(() => setAccessibilityTrusted(false));
+  }, []);
+
+  // Re-checked every mount, same reasoning as accessibility trust above —
+  // installing the CLI happens outside the app entirely, so the only way to
+  // reflect a just-installed binary without a restart is to check again
+  // whenever the user comes back to look.
+  useEffect(() => {
+    getClaudeCliStatus()
+      .then(setClaudeCliFound)
+      .catch(() => setClaudeCliFound(false));
+  }, []);
+
+  async function handleDownloadVoiceModel() {
+    setDownloadState("downloading");
+    setDownloadErrorMessage("");
+    try {
+      await downloadVoiceModel();
+      const status = await getVoiceModelStatus();
+      setVoiceStatus(status);
+      setDownloadState("idle");
+    } catch (err) {
+      setDownloadErrorMessage(err instanceof Error ? err.message : String(err));
+      setDownloadState("error");
+    }
+  }
 
   async function handleSaveClientId(e: React.FormEvent) {
     e.preventDefault();
@@ -332,6 +393,104 @@ export function Settings() {
         <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
           notes here are searchable context daimon reads while planning tasks. point this at a real
           obsidian vault and the agent's notes show up there directly, alongside your own.
+        </p>
+      </div>
+
+      <div className="mt-8 border-t border-white/5 pt-6">
+        <h3 className="font-mono text-sm text-neutral-100">voice</h3>
+        <p className="mt-1 font-mono text-xs text-neutral-500">
+          {voiceStatus === null && downloadState !== "error" && "checking…"}
+          {voiceStatus?.downloaded && (
+            <span className="text-emerald-400">● {voiceStatus.modelName} downloaded</span>
+          )}
+          {voiceStatus && !voiceStatus.downloaded && downloadState !== "downloading" && (
+            <span>○ {voiceStatus.modelName} not downloaded yet — required before dictation works</span>
+          )}
+          {downloadState === "downloading" && (
+            <span className="text-[#4f8dff]">downloading… this may take a minute</span>
+          )}
+          {voiceStatus === null && downloadState === "error" && (
+            <span className="text-red-400">could not read voice model status</span>
+          )}
+        </p>
+
+        {voiceStatus && !voiceStatus.downloaded && (
+          <div className="mt-4 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleDownloadVoiceModel}
+              disabled={downloadState === "downloading"}
+              className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95 disabled:opacity-40"
+            >
+              {downloadState === "downloading" ? "downloading…" : "download model"}
+            </button>
+            {downloadState === "error" && (
+              <span className="font-mono text-xs text-red-400">{downloadErrorMessage}</span>
+            )}
+          </div>
+        )}
+
+        <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+          once downloaded, press <span className="text-neutral-400">⌘⇧D</span> (or ctrl+shift+d) anywhere to
+          start dictating — press it again to stop and transcribe. runs fully on-device; nothing you say
+          leaves this machine.
+        </p>
+
+        <div className="mt-4 flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2.5">
+          <div>
+            <p className="font-mono text-sm text-neutral-100">fn key trigger</p>
+            <p className="mt-0.5 font-mono text-xs text-neutral-500">
+              {accessibilityTrusted === null && "checking…"}
+              {accessibilityTrusted === true && <span className="text-emerald-400">● accessibility permission granted</span>}
+              {accessibilityTrusted === false && (
+                <span>○ accessibility permission required — the fn key won't trigger dictation without it</span>
+              )}
+            </p>
+          </div>
+          {accessibilityTrusted === false && (
+            <button
+              type="button"
+              onClick={() => openUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")}
+              className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95"
+            >
+              open settings
+            </button>
+          )}
+        </div>
+        <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+          the fn key is an additional trigger alongside ⌘⇧D — grant accessibility permission above, then
+          restart daimon, and a single press of fn toggles dictation the same way.
+        </p>
+        <p className="mt-2 font-mono text-xs leading-relaxed text-neutral-600">
+          macos itself also opens the character viewer on a fn tap by default — daimon can only observe
+          the keypress, not suppress that. turn it off in{" "}
+          <span className="text-neutral-400">system settings → keyboard → "press 🌐 key to" → do nothing</span>{" "}
+          so fn only triggers dictation.
+        </p>
+      </div>
+
+      <div className="mt-8 border-t border-white/5 pt-6">
+        <h3 className="font-mono text-sm text-neutral-100">claude code</h3>
+        <p className="mt-1 font-mono text-xs text-neutral-500">
+          {claudeCliFound === null && "checking…"}
+          {claudeCliFound === true && <span className="text-emerald-400">● claude cli found on PATH</span>}
+          {claudeCliFound === false && <span>○ claude cli not found on PATH</span>}
+        </p>
+
+        {claudeCliFound === false && (
+          <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+            install it with{" "}
+            <span className="rounded bg-white/5 px-1 py-0.5 text-neutral-400">
+              npm install -g @anthropic-ai/claude-code
+            </span>
+            .
+          </p>
+        )}
+
+        <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+          the terminal tab opens a real shell on this machine either way — once installed, just type{" "}
+          <span className="text-neutral-400">claude</span> inside it to start a session against your real project
+          files.
         </p>
       </div>
     </div>
