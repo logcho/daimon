@@ -583,7 +583,7 @@ export function PipelinePanel({
   return (
     <div className="relative flex h-full w-full items-center justify-center p-6">
       <ResizeHandles />
-      <div className="animate-daimon-in liquid-glass flex h-full w-full flex-col overflow-hidden rounded-[28px] text-neutral-200">
+      <div className="animate-daimon-in liquid-glass flex h-full w-full flex-col overflow-hidden rounded-[28px] text-white">
         <div
           onMouseDown={(e) => {
             // Lets the header double as a drag handle — this window has no
@@ -768,7 +768,7 @@ export function PipelinePanel({
                             as one run-on paragraph regardless of how the
                             agent actually formatted them. */}
                         {turn.result && (
-                          <p className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">{turn.result}</p>
+                          <p className="whitespace-pre-wrap text-sm leading-relaxed text-white">{turn.result}</p>
                         )}
                         {turn.error && (
                           <p className="whitespace-pre-wrap text-sm leading-relaxed text-red-400">{turn.error}</p>
