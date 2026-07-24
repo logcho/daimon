@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required by macOS before any app can open a microphone input stream
+	     (cpal, via voice.rs's toggle_dictation). Tauri's bundler merges this
+	     file's keys into the generated app Info.plist at `tauri build` time.
+	     Dictation is entirely on-device (whisper.cpp) — this string should
+	     stay accurate to that; nothing recorded here is ever uploaded. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Daimon uses your microphone only to transcribe dictated instructions on-device (via local whisper.cpp) when you press the dictation hotkey. Audio never leaves your machine.</string>
+</dict>
+</plist>

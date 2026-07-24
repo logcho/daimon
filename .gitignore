@@ -29,6 +29,10 @@ dist-ssr
 /automations.json
 /automations/
 
+# Downloaded local whisper.cpp model(s) for on-device dictation — a large
+# binary artifact fetched on demand from Settings, not source (see voice.rs)
+/whisper-models/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

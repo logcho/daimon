@@ -24,6 +24,16 @@ fn main() {
             "create_automation",
             "set_automation_enabled",
             "delete_automation",
+            "get_voice_model_status",
+            "download_voice_model",
+            "toggle_dictation",
+            "start_terminal",
+            "write_to_terminal",
+            "resize_terminal",
+            "close_terminal",
+            "get_claude_cli_status",
+            "get_accessibility_trust_status",
+            "activate_and_focus_window",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }

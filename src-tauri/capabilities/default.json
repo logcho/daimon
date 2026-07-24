@@ -11,12 +11,13 @@
     "core:window:allow-current-monitor",
     "core:window:allow-primary-monitor",
     "core:window:allow-inner-size",
+    "core:window:allow-outer-position",
     "core:window:allow-scale-factor",
     "core:window:allow-show",
     "core:window:allow-set-resizable",
     "core:window:allow-set-min-size",
     "core:window:allow-set-max-size",
-    "core:window:allow-start-resize-dragging",
+    "core:window:allow-start-dragging",
     "opener:default",
     "global-shortcut:default",
     "allow-start-session",
@@ -36,6 +37,16 @@
     "allow-list-automations",
     "allow-create-automation",
     "allow-set-automation-enabled",
-    "allow-delete-automation"
+    "allow-delete-automation",
+    "allow-get-voice-model-status",
+    "allow-download-voice-model",
+    "allow-toggle-dictation",
+    "allow-start-terminal",
+    "allow-write-to-terminal",
+    "allow-resize-terminal",
+    "allow-close-terminal",
+    "allow-get-claude-cli-status",
+    "allow-get-accessibility-trust-status",
+    "allow-activate-and-focus-window"
   ]
 }

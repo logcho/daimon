@@ -1,8 +1,12 @@
 mod automation;
+mod fn_key;
 mod oauth;
 mod session;
 mod settings;
+mod terminal;
 mod vault;
+mod voice;
+mod window_focus;
 mod workspace;
 
 use tauri::menu::{Menu, MenuItem};
@@ -25,6 +29,32 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()>
     .build(app)?;
 
     Ok(())
+}
+
+/// Whether this process currently holds macOS Accessibility trust — a
+/// prerequisite for `fn_key`'s global Fn-key monitor to receive any events at
+/// all. Exposed to the frontend so Settings can surface it (with a button
+/// that deep-links to System Settings -> Privacy & Security -> Accessibility
+/// via the existing `@tauri-apps/plugin-opener`) rather than leaving a
+/// silently-inert trigger with no explanation. Deliberately doesn't attempt
+/// to trigger the system permission prompt itself (that's a separate,
+/// meaningfully bigger FFI surface — `AXIsProcessTrustedWithOptions` with a
+/// `CFDictionary` argument — left out of scope here).
+#[tauri::command]
+async fn get_accessibility_trust_status() -> Result<bool, String> {
+    Ok(fn_key::accessibility_trusted())
+}
+
+/// Forces real OS-level keyboard focus onto Daimon's pill/panel window — see
+/// `window_focus.rs`'s module doc for the full accessory-app focus quirk
+/// this exists to work around. Called from the frontend in addition to (or
+/// instead of) the plain `getCurrentWindow().setFocus()` JS API, whenever a
+/// programmatic path (dictation finishing, `expandToPanel()`) needs the very
+/// next keystroke to actually reach Daimon rather than whatever app the OS
+/// still considers frontmost.
+#[tauri::command]
+async fn activate_and_focus_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    window_focus::activate_and_focus(&app).await
 }
 
 /// Shared app construction so tests can exercise the exact same command
@@ -64,7 +94,17 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             automation::list_automations,
             automation::create_automation,
             automation::set_automation_enabled,
-            automation::delete_automation
+            automation::delete_automation,
+            voice::get_voice_model_status,
+            voice::download_voice_model,
+            voice::toggle_dictation,
+            terminal::start_terminal,
+            terminal::write_to_terminal,
+            terminal::resize_terminal,
+            terminal::close_terminal,
+            terminal::get_claude_cli_status,
+            get_accessibility_trust_status,
+            activate_and_focus_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -101,6 +141,16 @@ pub fn run() {
     );
 
     setup_tray(app.handle()).expect("failed to set up the tray icon");
+
+    // The bare Fn key, additive alongside the CommandOrControl+Shift+D hotkey
+    // registered above/from the frontend — see `fn_key.rs` for why this needs
+    // native NSEvent monitors (both a global one and a local one — see that
+    // module's doc comment) rather than the global-shortcut plugin. Needs a
+    // real `AppHandle`, so this runs here rather than in `build_app` (same
+    // timing as the automation scheduler loop spawned below); macOS-only,
+    // matching where this whole feature is scoped.
+    #[cfg(target_os = "macos")]
+    fn_key::install_fn_key_monitors(app.handle().clone());
 
     // Phase 10's scheduler loop: promotes any pending agent-created
     // automation requests and fires whatever's due. 30s keeps "daily at
@@ -151,6 +201,56 @@ pub fn run() {
             {
                 log::warn!("app exit: session cleanup sweep did not finish within 10s, exiting anyway");
             }
+
+            // Phase 11's host-shell terminal is a real OS process directly on
+            // the user's machine (not a Docker container like the sweep
+            // above) — a plain synchronous kill is all that's needed, and all
+            // that's possible, since there's no async Docker daemon to wait
+            // on here.
+            log::info!("app exit: killing any still-running terminal shell process");
+            terminal::kill_terminal_on_exit();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use tauri::ipc::CallbackFn;
+    use tauri::test::{get_ipc_response, mock_builder, INVOKE_KEY};
+    use tauri::webview::InvokeRequest;
+    use tauri::WebviewWindowBuilder;
+
+    fn invoke_request(cmd: &str, body: serde_json::Value) -> InvokeRequest {
+        InvokeRequest {
+            cmd: cmd.into(),
+            callback: CallbackFn(0),
+            error: CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: body.into(),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        }
+    }
+
+    /// Same ACL-reachability pattern used by every other command module in
+    /// this crate (e.g. `voice.rs`'s `voice_commands_clear_the_acl`) — a
+    /// missing `"allow-<command>"` capability entry compiles fine and only
+    /// fails at runtime, so this is worth catching here rather than only
+    /// finding out from a real Settings screen later.
+    #[test]
+    fn get_accessibility_trust_status_clears_the_acl() {
+        let app = crate::build_app(mock_builder());
+        let webview = WebviewWindowBuilder::new(&app, "pill", Default::default())
+            .build()
+            .expect("failed to build mock webview");
+
+        let response = get_ipc_response(
+            &webview,
+            invoke_request("get_accessibility_trust_status", serde_json::json!({})),
+        )
+        .expect("get_accessibility_trust_status should be allowed by the capability");
+        let _trusted: bool = response
+            .deserialize()
+            .expect("expected a plain bool — value itself is environment-dependent, not asserted here");
+    }
 }
