@@ -33,6 +33,10 @@ dist-ssr
 # binary artifact fetched on demand from Settings, not source (see voice.rs)
 /whisper-models/
 
+# Recorded .webm videos of the agent's background browser sessions —
+# bind-mounted into the workspace container, not source (see browser.ts)
+/recordings/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

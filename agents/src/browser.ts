@@ -1,6 +1,7 @@
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 let browserPromise: Promise<Browser> | null = null;
+let contentContextPromise: Promise<BrowserContext> | null = null;
 let contentPagePromise: Promise<Page> | null = null;
 let searchPagePromise: Promise<Page> | null = null;
 
@@ -9,6 +10,34 @@ function getBrowser(): Promise<Browser> {
     browserPromise = chromium.launch({ headless: true });
   }
   return browserPromise;
+}
+
+// Bind-mounted into the container at this exact path — see workspace.rs's
+// `recordings_mount` — so a finished video actually survives `docker rm -f`
+// and lands somewhere watchable on the host, rather than being written to a
+// container filesystem layer that disappears the moment the container goes.
+const RECORDINGS_DIR = "/workspace/recordings";
+
+// The context (not just page) the agent actually browses/reads/fills in,
+// kept separate from `search()`'s page below — see the comment on
+// `getContentPage()` for why. A real `BrowserContext`, not the browser's
+// implicit default context a bare `browser.newPage()` would use, because
+// Playwright's video recording (`recordVideo`) is a context-level option —
+// there's no way to turn it on for a single page after the fact. Every page
+// opened inside this context has its actions captured to a .webm file,
+// finalized only once the context is closed (see `finishRecording` below);
+// headless recording needs no extra system dependencies (no ffmpeg, no
+// virtual display) — Playwright captures frames via the browser's own
+// screencast protocol and muxes the video itself.
+function getContentContext(): Promise<BrowserContext> {
+  if (!contentContextPromise) {
+    contentContextPromise = getBrowser().then((browser) =>
+      browser.newContext({
+        recordVideo: { dir: RECORDINGS_DIR, size: { width: 1280, height: 720 } },
+      }),
+    );
+  }
+  return contentContextPromise;
 }
 
 // The page the agent actually browses/reads/fills — kept on a separate tab
@@ -24,7 +53,7 @@ function getBrowser(): Promise<Browser> {
 // `read_page`/`click`/`fill` are currently looking at.
 function getContentPage(): Promise<Page> {
   if (!contentPagePromise) {
-    contentPagePromise = getBrowser().then((browser) => browser.newPage());
+    contentPagePromise = getContentContext().then((context) => context.newPage());
   }
   return contentPagePromise;
 }
@@ -67,6 +96,33 @@ export async function screenshotBase64(): Promise<string> {
 export async function currentUrl(): Promise<string> {
   const page = await getContentPage();
   return page.url();
+}
+
+// Stops recording the content context's session, finalizes its .webm file
+// into RECORDINGS_DIR, and returns the (in-container) path — or `null` if
+// nothing was ever opened yet, since there's no context/recording to finish.
+// Closing the context is what actually flushes the video to disk (Playwright
+// stitches its captured frames into the final file on close, not
+// continuously) — this is the only way to get a *watchable* video out of a
+// still-running container's session, since an abrupt `docker rm -f` (no
+// graceful shutdown signal reaches the container — see workspace.rs) would
+// otherwise leave the recording unfinished or lost entirely.
+//
+// The content context/page caches are reset to null afterward, so the next
+// open_url/read_page/etc. call transparently starts a brand new context (and
+// therefore a new recording) rather than reusing — and erroring against —
+// the now-closed one.
+export async function finishRecording(): Promise<string | null> {
+  if (!contentPagePromise || !contentContextPromise) {
+    return null;
+  }
+  const page = await contentPagePromise;
+  const context = await contentContextPromise;
+  const video = page.video();
+  await context.close();
+  contentContextPromise = null;
+  contentPagePromise = null;
+  return video ? video.path() : null;
 }
 
 export interface SearchResult {

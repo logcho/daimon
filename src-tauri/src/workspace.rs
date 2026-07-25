@@ -137,12 +137,23 @@ async fn run_container(session_id: &str) -> Result<(), String> {
     let automations_dir = crate::automation::automations_dir();
     let automations_mount = format!("{}:/workspace/automations", automations_dir.display());
 
+    // Fourth bind mount, same shape again: Playwright's built-in video
+    // recording (see `browser.ts`) writes finished .webm files inside the
+    // container at `/workspace/recordings` — bind-mounting it out here is
+    // what lets that video actually survive `docker rm -f` and be watchable
+    // on the host afterward, rather than being written to a filesystem layer
+    // that disappears the moment the container is removed.
+    let recordings_dir = project_root().join("recordings");
+    std::fs::create_dir_all(&recordings_dir)
+        .map_err(|e| format!("failed to create recordings directory: {e}"))?;
+    let recordings_mount = format!("{}:/workspace/recordings", recordings_dir.display());
+
     // Host port left unspecified (`::4711`) so Docker assigns a free one —
     // this is what lets N task containers coexist without a colliding fixed
     // binding.
     let mut args = vec![
         "run", "-d", "--name", &name, "-p", "127.0.0.1::4711", "-v", &memory_mount, "-v", &vault_mount, "-v",
-        &automations_mount,
+        &automations_mount, "-v", &recordings_mount,
     ];
 
     let api_key_env;

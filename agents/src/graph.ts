@@ -37,7 +37,10 @@ const SYSTEM_PROMPT =
   "open_terminal_with_command only stages a command into a new terminal tab " +
   "for the user to review — it never executes anything on their machine on " +
   "its own, so it's always safe to use, but combine a multi-step request " +
-  "into one && -joined command line rather than calling it more than once.";
+  "into one && -joined command line rather than calling it more than once.\n\n" +
+  "If the user explicitly asks to see, watch, or record what you're doing in " +
+  "the browser, call finish_recording once at the end of that browsing to " +
+  "save a video and mention it in your final result.";
 
 export function buildAgent(memoryContext: string, emit: (event: TaskEvent) => void) {
   const llm = new ChatAnthropic({

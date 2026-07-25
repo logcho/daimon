@@ -207,6 +207,26 @@ export function buildDaimonTools(emit: (event: TaskEvent) => void) {
       },
     ),
     tool(
+      async () => {
+        const path = await browser.finishRecording();
+        if (!path) {
+          return "No browser recording is in progress — open_url/click/fill_field haven't been used yet this turn.";
+        }
+        return `Saved a video recording of the browser session to ${path}. Mention this to the user so they know they can watch it.`;
+      },
+      {
+        name: "finish_recording",
+        description:
+          "Stop and save a video recording of everything the background browser has done so far " +
+          "this turn (every open_url/click/fill_field action), so the user can watch it. Call this " +
+          "whenever the user explicitly asks to see, record, or review what you did in the browser " +
+          "— e.g. 'show me what you're doing' or 'record this.' Call it once, at the end, after " +
+          "you've finished the browsing you want captured — calling it starts a fresh, empty " +
+          "recording for anything that happens afterward.",
+        schema: z.object({}),
+      },
+    ),
+    tool(
       async ({ name, description }: { name: string; description: string }) => {
         saveSkill(name, description);
         return `Saved skill "${name}" for future reuse.`;
