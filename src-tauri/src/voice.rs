@@ -51,7 +51,28 @@ const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/ma
 /// must already be resampled to this rate, mono, f32.
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
+// Test-only override for `model_dir()` — see `HideModelFile` in the test
+// module below for why this exists. A plain `Mutex`-guarded static, not a
+// `thread_local!`: Tauri commands run on the async runtime, which very
+// plausibly executes the command body on a different OS thread than the one
+// that called `get_ipc_response` in the test — a `thread_local!` set on the
+// test's own thread would then be invisible to `model_dir()` when it's
+// actually invoked from inside the command, which is exactly what happened
+// (this was tried first, and the test failed because of it). Safe as a
+// process-wide static in practice because exactly one test in this suite
+// (`voice_commands_clear_the_acl`) ever depends on `model_dir()`'s value —
+// if a future test needs the same override concurrently, this assumption
+// needs revisiting.
+#[cfg(test)]
+static TEST_MODEL_DIR_OVERRIDE: StdMutex<Option<PathBuf>> = StdMutex::new(None);
+
 fn model_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(dir) = TEST_MODEL_DIR_OVERRIDE.lock().expect("test model dir override mutex poisoned").clone() {
+            return dir;
+        }
+    }
     workspace::project_root().join("whisper-models")
 }
 
@@ -916,35 +937,43 @@ mod tests {
         assert!(!super::is_bracketed_annotation("[mismatched)"));
     }
 
-    /// Temporarily moves the real model file out of the way (if present) so
-    /// a test can rely on `model_path()` being absent, and puts it back on
-    /// drop — including on panic/early-return, since this is exactly the
-    /// kind of side effect (see the caller below) that must never leak past
-    /// one test into the rest of the suite or into a developer's checkout.
+    /// Points `model_dir()` at a fresh, empty temp directory for the
+    /// duration of this test, via `TEST_MODEL_DIR_OVERRIDE`, so
+    /// `model_path().is_file()` is guaranteed false without ever touching a
+    /// developer's real downloaded model file.
+    ///
+    /// This replaces an earlier version that renamed the *real* model file
+    /// out of the way and relied on a `Drop` impl to rename it back — which
+    /// turned out not to be crash-safe in practice: a hard process abort
+    /// (verified the hard way — a segfault in an unrelated test during this
+    /// project's own development, from a native FFI bug since fixed,
+    /// happened to kill the whole `cargo test` process while this guard's
+    /// stash was in effect) skips `Drop` entirely, silently leaving the real
+    /// model permanently renamed with no error surfaced anywhere — exactly
+    /// what happened. Operating on a disposable per-test temp directory
+    /// instead means there's no shared state left to restore, so there's
+    /// nothing for a crash to corrupt.
     struct HideModelFile {
-        original: std::path::PathBuf,
-        stashed: Option<std::path::PathBuf>,
+        temp_dir: std::path::PathBuf,
     }
 
     impl HideModelFile {
         fn new() -> Self {
-            let original = super::model_path();
-            let stashed = if original.is_file() {
-                let stash_path = original.with_extension("bin.test-stash");
-                std::fs::rename(&original, &stash_path).expect("failed to stash existing model file for test");
-                Some(stash_path)
-            } else {
-                None
-            };
-            Self { original, stashed }
+            let temp_dir = std::env::temp_dir().join(format!("daimon-voice-test-{}", std::process::id()));
+            std::fs::create_dir_all(&temp_dir).expect("failed to create isolated test model directory");
+            *super::TEST_MODEL_DIR_OVERRIDE
+                .lock()
+                .expect("test model dir override mutex poisoned") = Some(temp_dir.clone());
+            Self { temp_dir }
         }
     }
 
     impl Drop for HideModelFile {
         fn drop(&mut self) {
-            if let Some(stash_path) = &self.stashed {
-                let _ = std::fs::rename(stash_path, &self.original);
-            }
+            *super::TEST_MODEL_DIR_OVERRIDE
+                .lock()
+                .expect("test model dir override mutex poisoned") = None;
+            let _ = std::fs::remove_dir_all(&self.temp_dir);
         }
     }
 
