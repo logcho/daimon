@@ -1,4 +1,11 @@
 @import "tailwindcss";
+/* Renders the Obsidian-style markdown preview in VaultPanel.tsx (`prose
+   prose-invert` below) — the note's actual markdown syntax rendered as real
+   formatting (headings, lists, code blocks, blockquotes, links) rather than
+   showing the literal source text, unlike the deliberately-plain-text agent
+   chat responses elsewhere in this app (see graph.ts's system prompt — that
+   surface has no renderer at all, this one now does). */
+@plugin "@tailwindcss/typography";
 
 /* Hybrid typography (see PROMPT.md's UI-restyle notes): a modern sans stack
    for all UI chrome — chat prose, labels, buttons, headings — while the
@@ -165,4 +172,22 @@ textarea {
   -webkit-backdrop-filter: blur(14px) saturate(160%);
   border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.16);
+}
+
+/* Retunes Tailwind Typography's `prose-invert` palette (used by
+   VaultPanel.tsx's markdown preview) to this app's actual design system —
+   the plugin's own CSS custom-property hooks, not a full class override, so
+   everything typography already handles well (heading scale/margins, list
+   indentation, code-block padding, table borders) is untouched. Only the
+   link color changes, to the app's one accent (`#4f8dff` — see the design
+   system skill's "never introduce a second accent color" rule) in place of
+   the plugin's default invert blue, which is a different, unrelated blue. */
+.daimon-prose {
+  --tw-prose-invert-links: #4f8dff;
+}
+.daimon-prose a {
+  text-decoration: none;
+}
+.daimon-prose a:hover {
+  text-decoration: underline;
 }
