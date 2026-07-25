@@ -32,4 +32,15 @@ export interface UiActionEvent {
   command: string;
 }
 
-export type TaskEvent = StepEvent | DoneEvent | ErrorEvent | UiActionEvent;
+// Emitted periodically (see run.ts's LIVE_FRAME_INTERVAL_MS) for the
+// duration of a turn — a base64-encoded PNG screenshot of whatever the
+// background browser's content page currently shows, so the frontend can
+// render a live-updating "watch it work" view instead of only a finished
+// recording after the fact. Best-effort: a single failed screenshot (e.g.
+// mid-navigation) just skips that tick rather than erroring the turn.
+export interface LiveFrameEvent {
+  type: "live_frame";
+  data: string;
+}
+
+export type TaskEvent = StepEvent | DoneEvent | ErrorEvent | UiActionEvent | LiveFrameEvent;

@@ -1,6 +1,7 @@
 mod automation;
 mod fn_key;
 mod oauth;
+mod recordings;
 mod session;
 mod settings;
 mod terminal;
@@ -113,6 +114,8 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             terminal::resize_terminal,
             terminal::close_terminal,
             terminal::get_claude_cli_status,
+            recordings::list_recordings,
+            recordings::read_recording_file,
             get_accessibility_trust_status,
             activate_and_focus_window,
             set_window_vibrancy

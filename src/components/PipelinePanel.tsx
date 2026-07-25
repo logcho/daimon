@@ -9,6 +9,7 @@ import { Settings } from "./Settings";
 import { VaultPanel } from "./VaultPanel";
 import { AutomationsPanel } from "./AutomationsPanel";
 import { TerminalPanel } from "./TerminalPanel";
+import { ScreenPanel } from "./ScreenPanel";
 import { SoundWave } from "./SoundWave";
 
 // Roughly 5-6 lines at text-sm before the input starts scrolling internally
@@ -554,6 +555,11 @@ export function PipelinePanel({
   // result or error (starting a brand-new session is unaffected — nothing to
   // race there).
   const activeTurnInFlight = Boolean(activeSession && lastTurn && !lastTurn.result && !lastTurn.error);
+  // Drives the "screen" tab's live view — see ScreenPanel.tsx. Only
+  // meaningful while the active session's last turn is actually running;
+  // once it completes, `applyToTurn` (sessionEvents.ts) clears `liveFrame`
+  // itself, so there's nothing extra to reset here.
+  const isLive = activeTurnInFlight && Boolean(lastTurn?.liveFrame);
 
   useEffect(() => {
     historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: "smooth" });
@@ -653,6 +659,9 @@ export function PipelinePanel({
           >
             terminal
           </TabButton>
+          <TabButton active={view === "screen"} onClick={() => onViewChange("screen")}>
+            {isLive ? "screen ●" : "screen"}
+          </TabButton>
           <TabButton active={view === "settings"} onClick={() => onViewChange("settings")}>
             settings
           </TabButton>
@@ -729,6 +738,8 @@ export function PipelinePanel({
           <VaultPanel />
         ) : view === "automations" ? (
           <AutomationsPanel />
+        ) : view === "screen" ? (
+          <ScreenPanel isLive={isLive} liveFrame={lastTurn?.liveFrame} />
         ) : view === "chat" ? (
           <div ref={historyRef} className="themed-scroll min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
             {!activeSession && (

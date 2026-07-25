@@ -4,6 +4,7 @@ import type {
   Automation,
   ConnectedAccount,
   DictationEvent,
+  RecordingFile,
   StepStatus,
   VaultFile,
   VaultPathStatus,
@@ -14,7 +15,11 @@ export type WorkspaceEvent =
   | { type: "step"; id: string; label: string; status: StepStatus; tool?: string }
   | { type: "done"; result: string }
   | { type: "error"; message: string }
-  | { type: "ui_action"; action: "open_terminal_with_command"; command: string };
+  | { type: "ui_action"; action: "open_terminal_with_command"; command: string }
+  // A base64-encoded PNG screenshot of the background browser, emitted
+  // periodically while a turn is running — see agents/src/run.ts's
+  // LIVE_FRAME_INTERVAL_MS. Powers the "screen" tab's live view.
+  | { type: "live_frame"; data: string };
 
 interface SessionStatusPayload {
   session_id: string;
@@ -84,6 +89,17 @@ export function listVaultFiles(): Promise<VaultFile[]> {
 
 export function readVaultFile(name: string): Promise<string> {
   return invoke<string>("read_vault_file", { name });
+}
+
+export function listRecordings(): Promise<RecordingFile[]> {
+  return invoke<RecordingFile[]>("list_recordings");
+}
+
+// Returns the video's raw bytes, base64-encoded — decode to a Uint8Array and
+// wrap in a Blob for a <video> element's src, same "just base64 it over IPC"
+// approach already used for the terminal's PTY output.
+export function readRecordingFile(name: string): Promise<string> {
+  return invoke<string>("read_recording_file", { name });
 }
 
 export function listAutomations(): Promise<Automation[]> {

@@ -32,6 +32,8 @@ fn main() {
             "resize_terminal",
             "close_terminal",
             "get_claude_cli_status",
+            "list_recordings",
+            "read_recording_file",
             "get_accessibility_trust_status",
             "activate_and_focus_window",
             "set_window_vibrancy",

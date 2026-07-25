@@ -46,6 +46,8 @@
     "allow-resize-terminal",
     "allow-close-terminal",
     "allow-get-claude-cli-status",
+    "allow-list-recordings",
+    "allow-read-recording-file",
     "allow-get-accessibility-trust-status",
     "allow-activate-and-focus-window",
     "allow-set-window-vibrancy"

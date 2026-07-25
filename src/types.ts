@@ -13,6 +13,11 @@ export interface Turn {
   steps: TaskStep[];
   result?: string;
   error?: string;
+  // The latest base64-encoded screenshot of the background browser, while
+  // this turn is actively running — see `agents/src/run.ts`'s periodic
+  // `live_frame` events. Cleared once the turn finishes (done or error),
+  // since there's nothing left to show "live."
+  liveFrame?: string;
 }
 
 export interface Session {
@@ -31,6 +36,12 @@ export interface VaultPathStatus {
 }
 
 export interface VaultFile {
+  name: string;
+  sizeBytes: number;
+  modifiedAt: string;
+}
+
+export interface RecordingFile {
   name: string;
   sizeBytes: number;
   modifiedAt: string;
@@ -95,4 +106,4 @@ export interface PendingInput {
 // Without this, collapsing while on e.g. the terminal tab and re-expanding
 // would always land back on "chat" instead of wherever the user actually
 // left off.
-export type View = "chat" | "vault" | "automations" | "terminal" | "settings";
+export type View = "chat" | "vault" | "automations" | "terminal" | "screen" | "settings";

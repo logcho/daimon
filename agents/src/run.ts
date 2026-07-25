@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AIMessage, BaseMessage, HumanMessage, MessageContent, ToolMessage } from "@langchain/core/messages";
 import { GraphRecursionError } from "@langchain/langgraph";
 import { buildAgent } from "./graph.js";
+import * as browser from "./browser.js";
 import { runDemoTask } from "./demo.js";
 import { formatMemoryContext, recordTask, searchNotes, searchSkills, searchTasks } from "./memory.js";
 import type { TaskEvent } from "./events.js";
@@ -21,6 +22,14 @@ const INACTIVITY_TIMEOUT_MS = 60_000;
 // Anthropic API turns before it's caught. 40 gives real tasks headroom
 // without leaving a stuck loop effectively unbounded.
 const RECURSION_LIMIT = 40;
+
+// How often a live screenshot of the background browser goes out while a
+// turn is running — frequent enough to feel "live" for someone watching the
+// in-app viewer, infrequent enough not to meaningfully compete with the
+// turn's own real work for CPU/screenshot time. Not user-configurable; this
+// is a first pass (see PROMPT.md) and can be tuned once there's real
+// feedback on how it feels.
+const LIVE_FRAME_INTERVAL_MS = 1_500;
 
 // Phase 8: each container is now dedicated to exactly one session for its
 // whole lifetime (the daemon reuses the same container/port across every
@@ -77,6 +86,24 @@ export async function runTurn(instruction: string, emit: (event: TaskEvent) => v
   // every subsequent turn in the session, not just this one.
   const lengthBeforeThisTurn = conversation.length;
   conversation.push(new HumanMessage(instruction));
+
+  // Periodic live screenshots of the background browser's content page, for
+  // the duration of this turn — powers the in-app "watch it work" viewer.
+  // Best-effort: a single failed capture (e.g. mid-navigation, or no content
+  // page open yet) just skips that tick silently rather than surfacing as a
+  // turn error — a missed frame here and there is invisible to a human
+  // watching a live feed, unlike an actual tool failure. Cleared in the
+  // `finally` below regardless of how the turn ends (success, error, or
+  // anything else), so a crashed turn never leaves a stray timer running
+  // past it into the next one.
+  const liveFrameTimer = setInterval(() => {
+    browser
+      .screenshotBase64()
+      .then((data) => emit({ type: "live_frame", data }))
+      .catch(() => {
+        // Best-effort — see comment above.
+      });
+  }, LIVE_FRAME_INTERVAL_MS);
 
   try {
     const memoryContext = formatMemoryContext(
@@ -183,5 +210,7 @@ export async function runTurn(instruction: string, emit: (event: TaskEvent) => v
     conversation.length = lengthBeforeThisTurn;
     emit({ type: "error", message });
     recordTask(instruction, message, "error");
+  } finally {
+    clearInterval(liveFrameTimer);
   }
 }
