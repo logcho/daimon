@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listRecordings, readRecordingFile } from "../lib/api";
 import type { RecordingFile } from "../types";
 
@@ -23,23 +23,104 @@ function formatModifiedAt(iso: string): string {
   return date.toLocaleString();
 }
 
-function decodeBase64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
+// A short, human-friendly title in place of the raw `page@<hash>.webm`
+// filename — reads like a real video title rather than an opaque hash. The
+// real filename is still used for every actual file operation and shown as
+// a tooltip (`title` attribute) on the card.
+function titleFromModifiedAt(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "Recording";
+  return `Recording — ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  const total = Math.round(seconds);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
+
+interface ThumbnailInfo {
+  dataUrl: string;
+  durationSeconds: number;
+}
+
+// Extracts one representative frame (skipping a hair past the very start,
+// which is often black/blank right as a recording begins) as a JPEG data
+// URL, plus the video's duration — both read off a single hidden <video>
+// element that's never attached to the DOM. There's no server-side/ffmpeg
+// thumbnail step in this app, so this is the only way to get a real frame
+// without shipping a new native dependency; cheap enough for the short
+// task-demonstration clips this feature is meant for.
+function extractThumbnail(videoDataUri: string): Promise<ThumbnailInfo> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.src = videoDataUri;
+
+    function cleanup() {
+      video.removeEventListener("loadedmetadata", onLoadedMetadata);
+      video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("error", onError);
+      video.src = "";
+    }
+
+    function onError() {
+      cleanup();
+      reject(new Error("failed to load video for thumbnail extraction"));
+    }
+
+    function onLoadedMetadata() {
+      video.currentTime = Math.min(0.3, Math.max(0, video.duration - 0.05));
+    }
+
+    function onSeeked() {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth || 320;
+      canvas.height = video.videoHeight || 180;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        cleanup();
+        reject(new Error("canvas 2d context unavailable"));
+        return;
+      }
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const info: ThumbnailInfo = { dataUrl: canvas.toDataURL("image/jpeg", 0.75), durationSeconds: video.duration };
+      cleanup();
+      resolve(info);
+    }
+
+    video.addEventListener("loadedmetadata", onLoadedMetadata);
+    video.addEventListener("seeked", onSeeked);
+    video.addEventListener("error", onError);
+  });
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-4 w-4 translate-x-[1px] fill-white">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
 }
 
 export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?: string }) {
   const [listState, setListState] = useState<ListState>("loading");
   const [files, setFiles] = useState<RecordingFile[]>([]);
   const [listErrorMessage, setListErrorMessage] = useState("");
+  const [thumbnails, setThumbnails] = useState<Record<string, ThumbnailInfo>>({});
+  // Tracks which files have already had a thumbnail extraction *started*
+  // (not just completed) — a plain ref, not state, so re-renders triggered
+  // by one file's thumbnail arriving don't cause this effect to re-fire and
+  // kick off duplicate fetches for every other file still in flight.
+  const startedThumbnailsRef = useRef<Set<string>>(new Set());
 
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [detailState, setDetailState] = useState<DetailState>("idle");
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoDataUri, setVideoDataUri] = useState<string | null>(null);
   const [detailErrorMessage, setDetailErrorMessage] = useState("");
 
   // Remounts each time the screen tab becomes active (PipelinePanel only
@@ -59,21 +140,44 @@ export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?
       });
   }, []);
 
+  // Lazily generates a thumbnail (+ duration) for every listed recording
+  // that hasn't had one started yet. Each one requires fetching that file's
+  // full bytes over IPC — there's no cheaper way to get a real frame — so
+  // this is deliberately fire-and-forget per file rather than blocking the
+  // list on all of them.
+  useEffect(() => {
+    let cancelled = false;
+    for (const file of files) {
+      if (startedThumbnailsRef.current.has(file.name)) continue;
+      startedThumbnailsRef.current.add(file.name);
+      readRecordingFile(file.name)
+        .then((base64) => extractThumbnail(`data:video/webm;base64,${base64}`))
+        .then((info) => {
+          if (cancelled) return;
+          setThumbnails((prev) => ({ ...prev, [file.name]: info }));
+        })
+        .catch(() => {
+          // Best-effort — a file that fails to produce a thumbnail (e.g. a
+          // corrupt/incomplete recording) just keeps its placeholder rather
+          // than blocking the rest of the grid.
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [files]);
+
   function handleOpenFile(name: string) {
     setSelectedFile(name);
     setDetailState("loading");
     readRecordingFile(name)
       .then((base64) => {
-        const bytes = decodeBase64ToBytes(base64);
-        // A fresh object URL per selection — revoked below (on unmount or
-        // before the next selection replaces it) so repeatedly opening
-        // different recordings in one visit to this tab doesn't leak a
-        // growing pile of blob URLs for the lifetime of the webview.
-        const url = URL.createObjectURL(new Blob([bytes], { type: "video/webm" }));
-        setVideoUrl((previous) => {
-          if (previous) URL.revokeObjectURL(previous);
-          return url;
-        });
+        // A plain data: URI, not a Blob/object URL — WKWebView (what Tauri
+        // uses on macOS) has documented, longstanding bugs specifically with
+        // `blob:` URLs in <video> elements; a data URI sidesteps that bug
+        // class entirely, and costs nothing extra here since the base64
+        // payload is already in hand from the IPC call.
+        setVideoDataUri(`data:video/webm;base64,${base64}`);
         setDetailState("ready");
       })
       .catch((err) => {
@@ -85,24 +189,9 @@ export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?
   function handleBack() {
     setSelectedFile(null);
     setDetailState("idle");
-    setVideoUrl((previous) => {
-      if (previous) URL.revokeObjectURL(previous);
-      return null;
-    });
+    setVideoDataUri(null);
     setDetailErrorMessage("");
   }
-
-  // Revoke whatever object URL is still live if the whole tab unmounts
-  // (switching to a different view) while a video is open — otherwise that
-  // blob stays retained in memory for the rest of the webview's lifetime.
-  useEffect(() => {
-    return () => {
-      setVideoUrl((current) => {
-        if (current) URL.revokeObjectURL(current);
-        return current;
-      });
-    };
-  }, []);
 
   if (selectedFile) {
     return (
@@ -114,14 +203,16 @@ export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?
         >
           ← back to recordings
         </button>
-        <h3 className="mt-3 text-sm font-semibold tracking-tight text-neutral-100">{selectedFile}</h3>
+        <h3 className="mt-3 text-sm font-semibold tracking-tight text-neutral-100">
+          {titleFromModifiedAt(files.find((f) => f.name === selectedFile)?.modifiedAt ?? "")}
+        </h3>
         {detailState === "loading" && <p className="mt-3 text-xs text-neutral-500">loading…</p>}
         {detailState === "error" && <p className="mt-3 text-xs text-red-400">{detailErrorMessage}</p>}
-        {detailState === "ready" && videoUrl && (
+        {detailState === "ready" && videoDataUri && (
           <video
             controls
             autoPlay
-            src={videoUrl}
+            src={videoDataUri}
             className="mt-3 w-full rounded-xl border border-white/10 bg-black/40"
           />
         )}
@@ -156,22 +247,44 @@ export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?
         </p>
       )}
       {listState === "ready" && files.length > 0 && (
-        <ul className="mt-3 space-y-1.5">
-          {files.map((file) => (
-            <li key={file.name}>
+        <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-4">
+          {files.map((file) => {
+            const thumb = thumbnails[file.name];
+            return (
               <button
+                key={file.name}
                 type="button"
                 onClick={() => handleOpenFile(file.name)}
-                className="liquid-glass-subtle flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition duration-200 hover:[border-color:rgba(255,255,255,0.25)] active:scale-[0.99]"
+                title={file.name}
+                className="group text-left"
               >
-                <span className="truncate text-sm font-medium text-neutral-100">{file.name}</span>
-                <span className="ml-3 shrink-0 text-xs text-neutral-500">
+                <div className="relative aspect-video overflow-hidden rounded-xl border border-white/10 bg-black/40">
+                  {thumb ? (
+                    <img src={thumb.dataUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="h-full w-full animate-pulse bg-white/[0.04]" />
+                  )}
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/0 transition duration-200 group-hover:bg-black/25">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-black/60 opacity-0 shadow-lg transition duration-200 group-hover:opacity-100">
+                      <PlayIcon />
+                    </div>
+                  </div>
+                  {thumb && thumb.durationSeconds > 0 && (
+                    <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 py-0.5 text-[10px] font-medium text-white">
+                      {formatDuration(thumb.durationSeconds)}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1.5 truncate text-sm font-medium text-neutral-100">
+                  {titleFromModifiedAt(file.modifiedAt)}
+                </p>
+                <p className="text-xs text-neutral-500">
                   {formatBytes(file.sizeBytes)} · {formatModifiedAt(file.modifiedAt)}
-                </span>
+                </p>
               </button>
-            </li>
-          ))}
-        </ul>
+            );
+          })}
+        </div>
       )}
     </div>
   );
