@@ -12,12 +12,20 @@ import {
 } from "../lib/api";
 import type { PendingInput } from "../types";
 
-// Matches the app's one dark/glass theme (neutral-950 background, single
-// #4f8dff accent) rather than xterm's default black-on-white — this is a
-// real shell prompt embedded in Daimon's own panel, not a separate widget
-// with its own visual identity.
+// Matches the app's one dark/glass theme (single #4f8dff accent) rather than
+// xterm's default black-on-white — this is a real shell prompt embedded in
+// Daimon's own panel, not a separate widget with its own visual identity.
+//
+// `background` is fully transparent, so the panel's native vibrancy glass
+// (and the live desktop blurred behind it) shows straight through behind the
+// terminal text — the terminal reads as the same glass surface as the rest
+// of the panel, not a tinted slab over it. Requires `allowTransparency: true`
+// on the Terminal (set below); without that flag xterm forces the background
+// fully opaque regardless of the alpha here. If shell text ever proves hard
+// to read against a busy desktop, the tradeoff dial is this alpha — nudge it
+// up toward an opaque dark to reintroduce a legibility backing.
 const TERMINAL_THEME = {
-  background: "#0a0a0a",
+  background: "rgba(0, 0, 0, 0)",
   foreground: "#e5e5e5",
   cursor: "#4f8dff",
   cursorAccent: "#0a0a0a",
@@ -136,6 +144,11 @@ export function TerminalPanel({
       cursorBlink: true,
       theme: TERMINAL_THEME,
       allowProposedApi: true,
+      // Lets TERMINAL_THEME.background's alpha actually take effect (xterm
+      // forces an opaque background otherwise) so the terminal renders as a
+      // glass surface over the panel. Carries a documented render-perf cost,
+      // negligible for an interactive shell at this size.
+      allowTransparency: true,
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -272,16 +285,20 @@ export function TerminalPanel({
   }, [id, pendingInput, onConsumePendingInput]);
 
   return (
-    <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0a0a0a]">
+    // No opaque background on this container — the terminal is transparent
+    // (see TERMINAL_THEME/allowTransparency) so the panel's liquid glass
+    // shows through behind the text, making the terminal read as another
+    // glass surface rather than a solid slab.
+    <div className="relative min-h-0 flex-1 overflow-hidden">
       <div ref={containerRef} className="h-full w-full p-2" />
       {exitCode !== undefined && (
-        <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-3 border-t border-white/10 bg-neutral-950/95 px-4 py-2.5 backdrop-blur">
-          <span className="font-mono text-xs text-neutral-400">
+        <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-3 border-t border-white/10 bg-neutral-950/70 px-4 py-2.5 backdrop-blur-xl">
+          <span className="text-xs text-neutral-300">
             shell exited{exitCode !== null ? ` (code ${exitCode})` : ""}
           </span>
           <button
             onClick={handleRestart}
-            className="rounded-full border border-white/15 bg-white/5 px-3 py-1 font-mono text-xs text-neutral-100 transition hover:border-[#4f8dff]/40 hover:text-[#4f8dff] active:scale-95"
+            className="liquid-glass-subtle rounded-full px-3 py-1 text-xs font-medium text-neutral-100 transition duration-200 hover:text-[#4f8dff] hover:[border-color:rgba(79,141,255,0.4)] active:scale-95"
           >
             restart
           </button>

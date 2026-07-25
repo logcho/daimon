@@ -39,15 +39,22 @@ type ResizeDirection = "East" | "North" | "NorthEast" | "NorthWest" | "South" | 
 // ourselves means the actual resize behavior only depends on `setSize`/
 // `setPosition`, which are already used elsewhere in this app and known to
 // work correctly.
+// The panel now fills the window edge-to-edge (no p-6 margin — that margin
+// existed for a soft outer glow that's since been replaced by native
+// vibrancy, see vibrancy.rs). So the grab targets sit right at the window
+// edges rather than in a margin straddling an inset panel edge. Edges are
+// thin strips; corners are small squares. The corner squares overlap the
+// transparent rounded-corner region of the window, which still captures
+// pointer events on a transparent Tauri window, so they remain grabbable.
 const RESIZE_HANDLES: { direction: ResizeDirection; className: string }[] = [
-  { direction: "North", className: "inset-x-9 top-4 h-4 cursor-ns-resize" },
-  { direction: "South", className: "inset-x-9 bottom-4 h-4 cursor-ns-resize" },
-  { direction: "West", className: "inset-y-9 left-4 w-4 cursor-ew-resize" },
-  { direction: "East", className: "inset-y-9 right-4 w-4 cursor-ew-resize" },
-  { direction: "NorthWest", className: "left-3 top-3 h-6 w-6 cursor-nwse-resize" },
-  { direction: "NorthEast", className: "right-3 top-3 h-6 w-6 cursor-nesw-resize" },
-  { direction: "SouthWest", className: "left-3 bottom-3 h-6 w-6 cursor-nesw-resize" },
-  { direction: "SouthEast", className: "right-3 bottom-3 h-6 w-6 cursor-nwse-resize" },
+  { direction: "North", className: "inset-x-5 top-0 h-1.5 cursor-ns-resize" },
+  { direction: "South", className: "inset-x-5 bottom-0 h-1.5 cursor-ns-resize" },
+  { direction: "West", className: "inset-y-5 left-0 w-1.5 cursor-ew-resize" },
+  { direction: "East", className: "inset-y-5 right-0 w-1.5 cursor-ew-resize" },
+  { direction: "NorthWest", className: "left-0 top-0 h-4 w-4 cursor-nwse-resize" },
+  { direction: "NorthEast", className: "right-0 top-0 h-4 w-4 cursor-nesw-resize" },
+  { direction: "SouthWest", className: "left-0 bottom-0 h-4 w-4 cursor-nesw-resize" },
+  { direction: "SouthEast", className: "right-0 bottom-0 h-4 w-4 cursor-nwse-resize" },
 ];
 
 function clamp(value: number, min: number, max: number) {
@@ -274,8 +281,10 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   return (
     <button
       onClick={onClick}
-      className={`rounded-full px-2.5 py-1 font-mono text-xs transition ${
-        active ? "bg-[#4f8dff]/15 text-[#4f8dff]" : "text-neutral-500 hover:text-neutral-200"
+      className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
+        active
+          ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+          : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
       }`}
     >
       {children}
@@ -308,10 +317,10 @@ function SessionChip({
   const title = session.turns[0]?.instruction ?? "";
   return (
     <span
-      className={`flex shrink-0 items-center gap-1 rounded-full border pl-2.5 pr-1 py-1 font-mono text-xs transition ${
+      className={`liquid-glass-subtle flex shrink-0 items-center gap-1 rounded-full pl-2.5 pr-1 py-1 text-xs transition duration-200 ${
         active
-          ? "border-[#4f8dff]/40 bg-[#4f8dff]/15 text-neutral-100"
-          : "border-white/10 bg-white/5 text-neutral-500 hover:text-neutral-200"
+          ? "text-neutral-100 [border-color:rgba(79,141,255,0.45)] [box-shadow:inset_0_1px_0_0_rgba(255,255,255,0.2)]"
+          : "text-neutral-400 hover:text-neutral-100"
       }`}
     >
       <button onClick={onClick} title={title} className="flex items-center gap-1.5">
@@ -579,9 +588,13 @@ export function PipelinePanel({
   const showChipRow = view === "chat" && sessions.length > 0;
 
   return (
-    <div className="relative flex h-full w-full items-center justify-center p-6">
+    // No p-6 margin — the panel fills the window edge-to-edge so its visible
+    // rounded rectangle aligns exactly with the native vibrancy material (see
+    // vibrancy.rs). The soft outer glow that margin used to provide is gone,
+    // traded for the dynamic native glass.
+    <div className="relative flex h-full w-full items-center justify-center">
       <ResizeHandles />
-      <div className="animate-daimon-in flex h-full w-full flex-col overflow-hidden rounded-[28px] border border-white/10 bg-neutral-950/95 text-neutral-200 shadow-[0_0_40px_-12px_rgba(79,141,255,0.25)] backdrop-blur-2xl">
+      <div className="animate-daimon-in liquid-glass flex h-full w-full flex-col overflow-hidden rounded-[28px] text-white">
         <div
           onMouseDown={(e) => {
             // Lets the header double as a drag handle — this window has no
@@ -592,11 +605,11 @@ export function PipelinePanel({
             if ((e.target as HTMLElement).closest("button")) return;
             getCurrentWindow().startDragging();
           }}
-          className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-3"
+          className="flex shrink-0 items-center gap-2 border-b border-white/[0.08] px-4 py-3 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]"
         >
           <img src="/logo.svg" alt="" draggable={false} className="h-5 w-5 invert" />
-          <span className="font-mono text-sm font-medium text-neutral-100">daimon</span>
-          <span className="h-3.5 w-1.5 animate-pulse bg-[#4f8dff]/70" />
+          <span className="text-sm font-semibold tracking-tight text-neutral-50">daimon</span>
+          <span className="h-1.5 w-1.5 animate-daimon-pulse rounded-full bg-[#4f8dff]" />
           {dictationState === "recording" && (
             <span className="flex items-center gap-1.5 font-mono text-xs text-[#4f8dff]">
               <SoundWave barHeight={10} />
@@ -615,7 +628,7 @@ export function PipelinePanel({
             <span className="block h-3 w-3 animate-spin rounded-full border-2 border-[#4f8dff]/25 border-t-[#4f8dff]" />
           )}
           {dictationState === "error" && (
-            <span className="font-mono text-xs text-red-400">{dictationMessage || "dictation error"}</span>
+            <span className="text-xs text-red-400">{dictationMessage || "dictation error"}</span>
           )}
           <div className="flex-1" />
           <TabButton active={view === "chat"} onClick={() => onViewChange("chat")}>
@@ -645,14 +658,14 @@ export function PipelinePanel({
           </TabButton>
           <button
             onClick={onCollapse}
-            className="rounded-md px-2 py-1 font-mono text-xs text-neutral-500 transition hover:bg-white/5 hover:text-neutral-200 active:scale-90"
+            className="rounded-full px-2 py-1 text-xs font-medium text-neutral-400 transition duration-200 hover:bg-white/5 hover:text-neutral-100 active:scale-90"
           >
             collapse
           </button>
         </div>
 
         {showChipRow && (
-          <div className="themed-scroll flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/10 px-3 py-2">
+          <div className="themed-scroll flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/[0.08] px-3 py-2">
             {sessions.map((s) => (
               <SessionChip
                 key={s.id}
@@ -665,7 +678,7 @@ export function PipelinePanel({
             <button
               onClick={onNewSession}
               title="start a new session"
-              className="flex shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 py-1 font-mono text-xs text-neutral-500 transition hover:border-[#4f8dff]/40 hover:text-[#4f8dff] active:scale-90"
+              className="liquid-glass-subtle flex shrink-0 items-center justify-center rounded-full px-2 py-1 text-xs text-neutral-400 transition duration-200 hover:text-[#4f8dff] hover:[border-color:rgba(79,141,255,0.4)] active:scale-90"
             >
               +
             </button>
@@ -677,14 +690,14 @@ export function PipelinePanel({
             shown while the terminal view itself is active, same as the
             session chip row only showing on the chat view. */}
         {view === "terminal" && (
-          <div className="themed-scroll flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/10 px-3 py-2">
+          <div className="themed-scroll flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/[0.08] px-3 py-2">
             {terminalTabs.map((id, index) => (
               <span
                 key={id}
-                className={`flex shrink-0 items-center gap-1 rounded-full border pl-2.5 pr-1 py-1 font-mono text-xs transition ${
+                className={`liquid-glass-subtle flex shrink-0 items-center gap-1 rounded-full pl-2.5 pr-1 py-1 text-xs transition duration-200 ${
                   id === activeTerminalId
-                    ? "border-[#4f8dff]/40 bg-[#4f8dff]/15 text-neutral-100"
-                    : "border-white/10 bg-white/5 text-neutral-500 hover:text-neutral-200"
+                    ? "text-neutral-100 [border-color:rgba(79,141,255,0.45)] [box-shadow:inset_0_1px_0_0_rgba(255,255,255,0.2)]"
+                    : "text-neutral-400 hover:text-neutral-100"
                 }`}
               >
                 <button onClick={() => onSelectTerminalTab(id)} className="flex items-center gap-1.5">
@@ -703,7 +716,7 @@ export function PipelinePanel({
             <button
               onClick={onOpenTerminalTab}
               title="open a new terminal"
-              className="flex shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 py-1 font-mono text-xs text-neutral-500 transition hover:border-[#4f8dff]/40 hover:text-[#4f8dff] active:scale-90"
+              className="liquid-glass-subtle flex shrink-0 items-center justify-center rounded-full px-2 py-1 text-xs text-neutral-400 transition duration-200 hover:text-[#4f8dff] hover:[border-color:rgba(79,141,255,0.4)] active:scale-90"
             >
               +
             </button>
@@ -719,7 +732,7 @@ export function PipelinePanel({
         ) : view === "chat" ? (
           <div ref={historyRef} className="themed-scroll min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
             {!activeSession && (
-              <p className="font-mono text-sm text-neutral-500">no active session — give daimon something to do.</p>
+              <p className="text-sm text-neutral-500">No active session — give daimon something to do.</p>
             )}
             {activeSession &&
               activeSession.turns.map((turn) => {
@@ -741,13 +754,13 @@ export function PipelinePanel({
                 return (
                   <div key={turn.id} className="space-y-3">
                     <div className="flex justify-end">
-                      <div className="max-w-[85%] rounded-2xl rounded-br-sm border border-[#4f8dff]/20 bg-[#4f8dff]/15 px-3 py-2 font-mono text-sm text-neutral-100">
-                        <span className="text-[#4f8dff]">{">"}</span> {turn.instruction}
+                      <div className="max-w-[85%] rounded-2xl rounded-br-md border border-[#4f8dff]/30 bg-[#4f8dff]/[0.18] px-3.5 py-2 text-sm leading-relaxed text-neutral-50 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.15)] backdrop-blur-sm">
+                        {turn.instruction}
                       </div>
                     </div>
 
                     <div className="flex justify-start">
-                      <div className="max-w-[85%] space-y-2 rounded-2xl rounded-bl-sm border border-white/10 bg-white/5 px-3 py-2">
+                      <div className="liquid-glass-subtle max-w-[85%] space-y-2 rounded-2xl rounded-bl-md px-3.5 py-2.5">
                         {toolSteps.length > 0 && (
                           <ul className="space-y-1.5">
                             {toolSteps.map((step) => (
@@ -766,10 +779,10 @@ export function PipelinePanel({
                             as one run-on paragraph regardless of how the
                             agent actually formatted them. */}
                         {turn.result && (
-                          <p className="whitespace-pre-wrap font-mono text-sm text-emerald-400">{turn.result}</p>
+                          <p className="whitespace-pre-wrap text-sm leading-relaxed text-white">{turn.result}</p>
                         )}
                         {turn.error && (
-                          <p className="whitespace-pre-wrap font-mono text-sm text-red-400">{turn.error}</p>
+                          <p className="whitespace-pre-wrap text-sm leading-relaxed text-red-400">{turn.error}</p>
                         )}
                       </div>
                     </div>
@@ -802,8 +815,11 @@ export function PipelinePanel({
         })}
 
         {view === "chat" && (
-          <form onSubmit={handleSubmit} className="flex shrink-0 items-start gap-2 border-t border-white/10 p-3">
-            <span className="pl-1 pt-0.5 font-mono text-sm text-[#4f8dff]">{">"}</span>
+          <form
+            onSubmit={handleSubmit}
+            className="m-3 flex shrink-0 items-start gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)] backdrop-blur-md transition focus-within:border-[#4f8dff]/40 focus-within:bg-white/[0.06]"
+          >
+            <span className="pt-0.5 font-mono text-sm text-[#4f8dff]">{">"}</span>
             <textarea
               ref={draftRef}
               autoFocus

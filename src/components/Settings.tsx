@@ -215,8 +215,8 @@ export function Settings() {
 
   return (
     <div className="themed-scroll flex-1 overflow-y-auto p-4">
-      <h3 className="font-mono text-sm text-neutral-100">anthropic_api_key</h3>
-      <p className="mt-1 font-mono text-xs text-neutral-500">
+      <h3 className="text-sm font-semibold tracking-tight text-neutral-100">anthropic_api_key</h3>
+      <p className="mt-1 text-xs text-neutral-500">
         {hasKey === null && "checking…"}
         {hasKey === true && <span className="text-emerald-400">● configured</span>}
         {hasKey === false && (
@@ -236,18 +236,18 @@ export function Settings() {
           <button
             type="submit"
             disabled={!draft.trim() || saveState === "saving"}
-            className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95 disabled:opacity-40"
+            className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
           >
             {saveState === "saving" ? "saving…" : "save"}
           </button>
           {saveState === "saved" && (
-            <span className="font-mono text-xs text-emerald-400">saved — applies to the next task</span>
+            <span className="text-xs text-emerald-400">saved — applies to the next task</span>
           )}
-          {saveState === "error" && <span className="font-mono text-xs text-red-400">{errorMessage}</span>}
+          {saveState === "error" && <span className="text-xs text-red-400">{errorMessage}</span>}
         </div>
       </form>
 
-      <p className="mt-6 font-mono text-xs leading-relaxed text-neutral-600">
+      <p className="mt-6 text-xs leading-relaxed text-neutral-600">
         get a key from{" "}
         <button
           type="button"
@@ -260,11 +260,11 @@ export function Settings() {
       </p>
 
       <div className="mt-8 border-t border-white/5 pt-6">
-        <h3 className="font-mono text-sm text-neutral-100">connected_accounts</h3>
+        <h3 className="text-sm font-semibold tracking-tight text-neutral-100">connected_accounts</h3>
 
         {hasGoogleClientId === false && (
           <>
-            <p className="mt-1 font-mono text-xs text-neutral-500">
+            <p className="mt-1 text-xs text-neutral-500">
               ○ no google oauth client configured — needed before connecting gmail
             </p>
             <form onSubmit={handleSaveClientId} className="mt-4 space-y-2">
@@ -279,19 +279,19 @@ export function Settings() {
                 <button
                   type="submit"
                   disabled={!clientIdDraft.trim() || clientIdSaveState === "saving"}
-                  className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95 disabled:opacity-40"
+                  className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
                 >
                   {clientIdSaveState === "saving" ? "saving…" : "save"}
                 </button>
                 {clientIdSaveState === "saved" && (
-                  <span className="font-mono text-xs text-emerald-400">saved</span>
+                  <span className="text-xs text-emerald-400">saved</span>
                 )}
                 {clientIdSaveState === "error" && (
-                  <span className="font-mono text-xs text-red-400">{clientIdErrorMessage}</span>
+                  <span className="text-xs text-red-400">{clientIdErrorMessage}</span>
                 )}
               </div>
             </form>
-            <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+            <p className="mt-3 text-xs leading-relaxed text-neutral-600">
               create one in{" "}
               <button
                 type="button"
@@ -306,24 +306,24 @@ export function Settings() {
         )}
 
         {hasGoogleClientId === null && (
-          <p className="mt-1 font-mono text-xs text-neutral-500">checking…</p>
+          <p className="mt-1 text-xs text-neutral-500">checking…</p>
         )}
 
         {hasGoogleClientId === true && (
-          <div className="mt-3 flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2.5">
+          <div className="mt-3 flex items-center justify-between liquid-glass-subtle rounded-xl px-3 py-2.5">
             <div>
-              <p className="font-mono text-sm text-neutral-100">gmail</p>
+              <p className="text-sm font-medium text-neutral-100">gmail</p>
               {gmailAccount === undefined && (
-                <p className="font-mono text-xs text-neutral-500">checking…</p>
+                <p className="text-xs text-neutral-500">checking…</p>
               )}
               {gmailAccount === null && (
-                <p className="font-mono text-xs text-neutral-500">○ not connected</p>
+                <p className="text-xs text-neutral-500">○ not connected</p>
               )}
               {gmailAccount && (
-                <p className="font-mono text-xs text-emerald-400">● {gmailAccount.email}</p>
+                <p className="text-xs text-emerald-400">● {gmailAccount.email}</p>
               )}
               {connectState === "error" && (
-                <p className="mt-1 font-mono text-xs text-red-400">{connectErrorMessage}</p>
+                <p className="mt-1 text-xs text-red-400">{connectErrorMessage}</p>
               )}
             </div>
 
@@ -332,7 +332,7 @@ export function Settings() {
                 type="button"
                 onClick={handleDisconnectGmail}
                 disabled={disconnecting}
-                className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95 disabled:opacity-40"
+                className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
               >
                 {disconnecting ? "disconnecting…" : "disconnect"}
               </button>
@@ -341,7 +341,7 @@ export function Settings() {
                 type="button"
                 onClick={handleConnectGmail}
                 disabled={connectState === "connecting" || gmailAccount === undefined}
-                className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95 disabled:opacity-40"
+                className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
               >
                 {connectState === "connecting" ? "waiting for google sign-in…" : "connect gmail"}
               </button>
@@ -351,8 +351,8 @@ export function Settings() {
       </div>
 
       <div className="mt-8 border-t border-white/5 pt-6">
-        <h3 className="font-mono text-sm text-neutral-100">vault</h3>
-        <p className="mt-1 font-mono text-xs text-neutral-500">
+        <h3 className="text-sm font-semibold tracking-tight text-neutral-100">vault</h3>
+        <p className="mt-1 text-xs text-neutral-500">
           {vaultStatus === null && vaultSaveState !== "error" && "checking…"}
           {vaultStatus && vaultStatus.isDefault && (
             <span className="text-emerald-400">● using default vault at {vaultStatus.path}</span>
@@ -377,28 +377,28 @@ export function Settings() {
             <button
               type="submit"
               disabled={!vaultPathDraft.trim() || vaultSaveState === "saving"}
-              className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95 disabled:opacity-40"
+              className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
             >
               {vaultSaveState === "saving" ? "saving…" : "save"}
             </button>
             {vaultSaveState === "saved" && (
-              <span className="font-mono text-xs text-emerald-400">saved</span>
+              <span className="text-xs text-emerald-400">saved</span>
             )}
             {vaultSaveState === "error" && (
-              <span className="font-mono text-xs text-red-400">{vaultErrorMessage}</span>
+              <span className="text-xs text-red-400">{vaultErrorMessage}</span>
             )}
           </div>
         </form>
 
-        <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+        <p className="mt-3 text-xs leading-relaxed text-neutral-600">
           notes here are searchable context daimon reads while planning tasks. point this at a real
           obsidian vault and the agent's notes show up there directly, alongside your own.
         </p>
       </div>
 
       <div className="mt-8 border-t border-white/5 pt-6">
-        <h3 className="font-mono text-sm text-neutral-100">voice</h3>
-        <p className="mt-1 font-mono text-xs text-neutral-500">
+        <h3 className="text-sm font-semibold tracking-tight text-neutral-100">voice</h3>
+        <p className="mt-1 text-xs text-neutral-500">
           {voiceStatus === null && downloadState !== "error" && "checking…"}
           {voiceStatus?.downloaded && (
             <span className="text-emerald-400">● {voiceStatus.modelName} downloaded</span>
@@ -420,26 +420,26 @@ export function Settings() {
               type="button"
               onClick={handleDownloadVoiceModel}
               disabled={downloadState === "downloading"}
-              className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95 disabled:opacity-40"
+              className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
             >
               {downloadState === "downloading" ? "downloading…" : "download model"}
             </button>
             {downloadState === "error" && (
-              <span className="font-mono text-xs text-red-400">{downloadErrorMessage}</span>
+              <span className="text-xs text-red-400">{downloadErrorMessage}</span>
             )}
           </div>
         )}
 
-        <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+        <p className="mt-3 text-xs leading-relaxed text-neutral-600">
           once downloaded, press <span className="text-neutral-400">⌘⇧D</span> (or ctrl+shift+d) anywhere to
           start dictating — press it again to stop and transcribe. runs fully on-device; nothing you say
           leaves this machine.
         </p>
 
-        <div className="mt-4 flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2.5">
+        <div className="mt-4 flex items-center justify-between liquid-glass-subtle rounded-xl px-3 py-2.5">
           <div>
-            <p className="font-mono text-sm text-neutral-100">fn key trigger</p>
-            <p className="mt-0.5 font-mono text-xs text-neutral-500">
+            <p className="text-sm font-medium text-neutral-100">fn key trigger</p>
+            <p className="mt-0.5 text-xs text-neutral-500">
               {accessibilityTrusted === null && "checking…"}
               {accessibilityTrusted === true && <span className="text-emerald-400">● accessibility permission granted</span>}
               {accessibilityTrusted === false && (
@@ -451,17 +451,17 @@ export function Settings() {
             <button
               type="button"
               onClick={() => openUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")}
-              className="rounded-full border border-white/15 bg-white/5 px-4 py-1.5 font-mono text-xs text-neutral-100 transition hover:border-white/25 hover:bg-white/10 active:scale-95"
+              className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95"
             >
               open settings
             </button>
           )}
         </div>
-        <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+        <p className="mt-3 text-xs leading-relaxed text-neutral-600">
           the fn key is an additional trigger alongside ⌘⇧D — grant accessibility permission above, then
           restart daimon, and a single press of fn toggles dictation the same way.
         </p>
-        <p className="mt-2 font-mono text-xs leading-relaxed text-neutral-600">
+        <p className="mt-2 text-xs leading-relaxed text-neutral-600">
           macos itself also opens the character viewer on a fn tap by default — daimon can only observe
           the keypress, not suppress that. turn it off in{" "}
           <span className="text-neutral-400">system settings → keyboard → "press 🌐 key to" → do nothing</span>{" "}
@@ -470,26 +470,26 @@ export function Settings() {
       </div>
 
       <div className="mt-8 border-t border-white/5 pt-6">
-        <h3 className="font-mono text-sm text-neutral-100">claude code</h3>
-        <p className="mt-1 font-mono text-xs text-neutral-500">
+        <h3 className="text-sm font-semibold tracking-tight text-neutral-100">claude code</h3>
+        <p className="mt-1 text-xs text-neutral-500">
           {claudeCliFound === null && "checking…"}
           {claudeCliFound === true && <span className="text-emerald-400">● claude cli found on PATH</span>}
           {claudeCliFound === false && <span>○ claude cli not found on PATH</span>}
         </p>
 
         {claudeCliFound === false && (
-          <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+          <p className="mt-3 text-xs leading-relaxed text-neutral-600">
             install it with{" "}
-            <span className="rounded bg-white/5 px-1 py-0.5 text-neutral-400">
+            <span className="rounded bg-white/5 px-1 py-0.5 font-mono text-neutral-400">
               npm install -g @anthropic-ai/claude-code
             </span>
             .
           </p>
         )}
 
-        <p className="mt-3 font-mono text-xs leading-relaxed text-neutral-600">
+        <p className="mt-3 text-xs leading-relaxed text-neutral-600">
           the terminal tab opens a real shell on this machine either way — once installed, just type{" "}
-          <span className="text-neutral-400">claude</span> inside it to start a session against your real project
+          <span className="font-mono text-neutral-400">claude</span> inside it to start a session against your real project
           files.
         </p>
       </div>

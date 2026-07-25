@@ -1,5 +1,23 @@
 @import "tailwindcss";
 
+/* Hybrid typography (see PROMPT.md's UI-restyle notes): a modern sans stack
+   for all UI chrome — chat prose, labels, buttons, headings — while the
+   monospace stack is kept for genuinely machine-flavored surfaces (the
+   terminal tab, agent tool-step lines, the chat input's `>` command
+   prompt), reached via the `font-mono` utility. Overriding these two theme
+   tokens repoints Tailwind's own `font-sans`/`font-mono` utilities at them,
+   so nothing else needs a bespoke font declaration. Kept to a native system
+   stack rather than a bundled webfont — the app ships offline-first and a
+   FOUT/network dependency on a floating always-on-top widget isn't worth
+   it; SF Pro / Segoe / Inter already read as "modern" on their platforms. */
+@theme {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter",
+    "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
 html,
 body,
 #root {
@@ -9,8 +27,13 @@ body,
   height: 100%;
   background: transparent;
   overflow: hidden;
-  font-family:
-    ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-sans);
+  /* Modern sans stacks look noticeably better with the browser's optical/
+     kerning niceties turned on — cheap, and it's what native macOS/Windows
+     UI does by default. */
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern", "liga", "calt";
   user-select: none;
 }
 
@@ -83,4 +106,63 @@ textarea {
 
 .themed-scroll::-webkit-scrollbar-thumb:hover {
   background-color: rgba(255, 255, 255, 0.3);
+}
+
+/* --- Liquid glass -------------------------------------------------------
+   The actual desktop blur is now done by a native macOS NSVisualEffectView
+   *behind* this webview (see src-tauri/src/vibrancy.rs) — that's what makes
+   the glass dynamic, tracking the live desktop as the window moves, which a
+   CSS `backdrop-filter` on a transparent window can't do (it freezes its
+   captured backdrop when the window is dragged). So `.liquid-glass` no longer
+   blurs anything itself; it's the *tint + finish* layered on top of that
+   native material:
+
+   - A dark translucent fill (kept fairly light so the native blur shows
+     through it), as a two-stop gradient so the pane has a top-lit sheen of
+     its own rather than a flat wash.
+   - A hairline border, and a specular top-edge highlight via `inset 0 1px`
+     in the box-shadow — the bright rim that reads as "a curved pane of glass
+     catching light from above," the most recognizable cue of the style.
+
+   No outer glow/shadow: this element now fills the window edge-to-edge (the
+   old p-5/p-6 margins are gone), so any outer box-shadow would just clip at
+   the window bounds. The native material rounds itself (its own layer corner
+   radius, set to 28px in vibrancy.rs) to match this element's CSS
+   `rounded-[28px]`/`rounded-full`, so tint and blur share one silhouette. */
+.liquid-glass {
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.015) 55%, rgba(255, 255, 255, 0.04)),
+    rgba(9, 9, 13, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.26),
+    inset 0 -1px 0 0 rgba(255, 255, 255, 0.05);
+}
+
+/* xterm.js's bundled stylesheet hard-codes `background-color: #000` on
+   `.xterm-viewport` (its own comment: "required in order for the scroll bar
+   to appear fully opaque" on macOS). That opaque black wins over
+   `allowTransparency: true` + a transparent theme background, leaving the
+   terminal a solid black slab that clashes with the panel's glass. Override
+   it to transparent so the native vibrancy (and the desktop blurred behind
+   it) shows through behind the shell text, matching every other surface —
+   see TerminalPanel.tsx's TERMINAL_THEME. `!important` because this is
+   overriding a third-party stylesheet whose load order relative to this file
+   isn't guaranteed. */
+.xterm,
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+/* A lighter-weight variant for smaller floating elements (chips, inline
+   controls) that want the same glassy character without the full panel's
+   heavy shadow stack — less blur, subtler specular line, no accent glow. */
+.liquid-glass-subtle {
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.16);
 }

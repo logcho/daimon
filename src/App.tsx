@@ -10,6 +10,7 @@ import {
   onDictationStatus,
   onSessionStatus,
   sendMessage,
+  setWindowVibrancy,
   startSession,
   toggleDictation,
 } from "./lib/api";
@@ -60,6 +61,12 @@ function App() {
 
   useEffect(() => {
     collapseToPill();
+    // Install the native macOS vibrancy material behind the window (see
+    // vibrancy.rs). Done here on mount, not at Rust startup, so the window is
+    // guaranteed to exist and be shown. 28px = a circle at the collapsed pill
+    // size and the panel's rounded corner when expanded, so one value covers
+    // both states and the effect never needs re-applying on collapse/expand.
+    void setWindowVibrancy(28);
   }, []);
 
   // Registered once for the app's lifetime — see onSessionStatus for why this

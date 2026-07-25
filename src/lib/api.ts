@@ -199,3 +199,12 @@ export function onTerminalExited(handler: (id: string, code: number | null) => v
 export function activateAndFocusWindow(): Promise<void> {
   return invoke<void>("activate_and_focus_window");
 }
+
+// Applies the native macOS vibrancy material (the real, dynamic desktop-blur
+// "liquid glass") behind the window with the given corner radius — see
+// `src-tauri/src/vibrancy.rs`. 28px is a circle at the collapsed pill size and
+// the panel's rounded corner when expanded, so one value serves both states.
+// Called once on mount; a no-op on non-macOS platforms.
+export function setWindowVibrancy(radius: number): Promise<void> {
+  return invoke<void>("set_window_vibrancy", { radius });
+}

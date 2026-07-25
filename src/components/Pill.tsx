@@ -94,7 +94,10 @@ export function Pill({
       : null;
 
   return (
-    <div className="flex h-full w-full items-center justify-center p-5">
+    // No padding wrapper any more — the button fills the window so the visible
+    // circle aligns exactly with the native vibrancy material behind it (which
+    // fills the whole window). See vibrancy.rs and window.ts's PILL_SIZE note.
+    <div className="flex h-full w-full items-center justify-center">
       <button
         onClick={(e) => {
           const start = mouseDownAt.current;
@@ -111,12 +114,17 @@ export function Pill({
           getCurrentWindow().startDragging();
         }}
         title={dictationLabel ?? label}
-        className={`animate-daimon-in group relative flex h-full w-full items-center justify-center rounded-full backdrop-blur-2xl transition hover:scale-105 active:scale-95 ${
+        // No grow-on-hover (hover:scale-105) any more — the button now fills
+        // the window edge-to-edge, so scaling up would clip against the window
+        // bounds. active:scale-95 (a shrink) is fine and stays. Outer-glow
+        // shadows are gone too (no transparent margin left to fade into); the
+        // dictation states are signaled by border color + opacity instead.
+        className={`animate-daimon-in liquid-glass group relative flex h-full w-full items-center justify-center rounded-full transition duration-300 active:scale-95 ${
           dictationState === "error"
-            ? "border border-red-400/40 bg-neutral-950/70 opacity-100 shadow-[0_0_24px_-8px_rgba(248,113,113,0.45)]"
+            ? "opacity-100 [border-color:rgba(248,113,113,0.55)]"
             : dictationActive
-            ? "border border-[#4f8dff]/50 bg-neutral-900/90 opacity-100 shadow-[0_0_28px_-6px_rgba(79,141,255,0.55)]"
-            : "border border-white/[0.06] bg-neutral-950/70 opacity-70 shadow-[0_0_24px_-8px_rgba(79,141,255,0.35)] hover:border-white/20 hover:bg-neutral-900/90 hover:opacity-100"
+            ? "opacity-100 [border-color:rgba(79,141,255,0.6)]"
+            : "opacity-90 hover:opacity-100 hover:[border-color:rgba(255,255,255,0.22)]"
         }`}
       >
         {dictationState === "recording" ? (
@@ -149,7 +157,7 @@ export function Pill({
         )}
         {multiple ? (
           <span
-            className={`absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-neutral-950 px-1 font-mono text-[9px] font-medium text-neutral-950 ${
+            className={`absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-neutral-950 px-1 text-[9px] font-semibold text-neutral-950 ${
               DOT_COLOR[aggregateStatus(sessions)] ?? DOT_COLOR.idle
             } ${aggregateStatus(sessions) === "running" ? "animate-daimon-pulse" : ""}`}
           >
