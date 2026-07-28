@@ -23,8 +23,10 @@ use crate::workspace;
 /// Unlike Phase 3's one-shot tasks, a stall here does *not* trigger any
 /// teardown — sessions only tear down on an explicit `end_session` (or app
 /// exit), so a stalled turn just surfaces an error event and leaves the
-/// container up for the next message (or for a dev to inspect via `docker
-/// logs`) exactly like every other outcome.
+/// workspace processes up for the next message (or for a dev to inspect via
+/// the per-session log files under `workspace::data_dir()/logs/` — the
+/// native-process equivalent of `docker logs`) exactly like every other
+/// outcome.
 const STALL_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Clone, serde::Serialize)]
@@ -156,9 +158,8 @@ async fn run_and_stream<R: tauri::Runtime>(
     session_id: &str,
     instruction: String,
 ) -> Result<Option<String>, String> {
-    let port = workspace::ensure_session_workspace(session_id).await?;
-    let container_name = format!("daimon-workspace-{session_id}");
-    log::info!("session {session_id}: workspace ready on port {port} (container {container_name})");
+    let port = workspace::ensure_session_workspace(app, session_id).await?;
+    log::info!("session {session_id}: workspace ready on port {port}");
 
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/task");
@@ -177,16 +178,16 @@ async fn run_and_stream<R: tauri::Runtime>(
         let next = match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
             Ok(next) => next,
             Err(_) => {
-                // `docker logs {container_name}` is the only place the
-                // agent-side detail of *why* it stalled still exists (see
-                // `agents/src/run.ts`'s own, shorter inactivity timeout,
-                // which — if it wins the race — would have logged a more
-                // specific cause inside the container right before this
-                // fires). The container is left running either way — a
-                // stalled turn is just one more turn's outcome, not a reason
-                // to tear the session down.
+                // The per-session log files under `workspace::data_dir()/logs/`
+                // are the only place the agent-side detail of *why* it
+                // stalled still exists (see `agents/src/run.ts`'s own,
+                // shorter inactivity timeout, which — if it wins the race —
+                // would have logged a more specific cause there right before
+                // this fires). The workspace processes are left running
+                // either way — a stalled turn is just one more turn's
+                // outcome, not a reason to tear the session down.
                 log::error!(
-                    "session {session_id}: stalled — no event from workspace within {}s (container {container_name} still running: `docker logs {container_name}`)",
+                    "session {session_id}: stalled — no event from workspace within {}s (workspace processes still running; see logs/{session_id}-*.log)",
                     STALL_TIMEOUT.as_secs()
                 );
                 let message = format!(
@@ -236,7 +237,10 @@ async fn run_and_stream<R: tauri::Runtime>(
     Ok(last_done_result)
 }
 
-fn emit<R: tauri::Runtime>(app: &tauri::AppHandle<R>, session_id: &str, event: serde_json::Value) {
+/// `pub(crate)` (not private) so `workspace.rs`'s memory watchdog can emit
+/// its own hard-ceiling error event over this exact same `session-status`
+/// channel/shape, rather than duplicating `SessionStatusPayload`.
+pub(crate) fn emit<R: tauri::Runtime>(app: &tauri::AppHandle<R>, session_id: &str, event: serde_json::Value) {
     let _ = app.emit(
         "session-status",
         SessionStatusPayload {
@@ -255,27 +259,18 @@ mod tests {
     use tauri::webview::InvokeRequest;
     use tauri::{Listener, WebviewWindowBuilder};
 
-    fn container_id(name: &str) -> Option<String> {
-        let output = std::process::Command::new("docker")
-            .args(["inspect", "-f", "{{.Id}}", name])
-            .output()
-            .expect("failed to run docker inspect");
-        if output.status.success() {
-            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            None
-        }
-    }
-
-    async fn wait_for_container_removed(session_id: &str) {
-        let name = format!("daimon-workspace-{session_id}");
+    /// Polls `workspace::session_process_snapshot` (a `#[cfg(test)]`-only
+    /// accessor into `SESSIONS` — see that module's doc comment) until this
+    /// session's native PinchTab/Node processes are gone, replacing the old
+    /// `docker inspect`-based `wait_for_container_removed`.
+    async fn wait_for_session_torn_down(session_id: &str) {
         for _ in 0..20 {
-            if container_id(&name).is_none() {
+            if crate::workspace::session_process_snapshot(session_id).await.is_none() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        panic!("container {name} was not torn down within 5s of end_session");
+        panic!("session {session_id}'s workspace processes were not torn down within 5s of end_session");
     }
 
     fn invoke_start_session(webview: &tauri::WebviewWindow<tauri::test::MockRuntime>, instruction: &str) -> String {
@@ -375,14 +370,13 @@ mod tests {
         );
 
         // The behavior change under test: no auto-teardown after `done`.
-        let name = format!("daimon-workspace-{session_id}");
         assert!(
-            container_id(&name).is_some(),
-            "container {name} should still be running after a done event (sessions don't auto-teardown)"
+            crate::workspace::session_process_snapshot(&session_id).await.is_some(),
+            "session {session_id}'s workspace processes should still be running after a done event (sessions don't auto-teardown)"
         );
 
         invoke_end_session(&webview, &session_id);
-        wait_for_container_removed(&session_id).await;
+        wait_for_session_torn_down(&session_id).await;
     }
 
     /// Phase 3's guarantee still holds for sessions: two started back-to-back
@@ -439,15 +433,15 @@ mod tests {
 
         invoke_end_session(&webview, &session_a);
         invoke_end_session(&webview, &session_b);
-        wait_for_container_removed(&session_a).await;
-        wait_for_container_removed(&session_b).await;
+        wait_for_session_torn_down(&session_a).await;
+        wait_for_session_torn_down(&session_b).await;
     }
 
     /// The actual Phase 8 behavior change: a second message into an existing
-    /// session must reuse the exact same container (same container id and
-    /// port throughout — a recreated container would get a new id even under
-    /// the same name), proving real continuation rather than a fresh
-    /// workspace per message.
+    /// session must reuse the exact same workspace processes (same PinchTab
+    /// and Node PIDs throughout — a recreated workspace would get fresh
+    /// ones), proving real continuation rather than a fresh workspace per
+    /// message.
     #[tokio::test(flavor = "multi_thread")]
     async fn send_message_continues_the_same_workspace_container() {
         let app = crate::build_app(mock_builder());
@@ -483,8 +477,9 @@ mod tests {
         }
         assert!(saw_first_done, "expected a first done event within 30s");
 
-        let name = format!("daimon-workspace-{session_id}");
-        let id_after_first = container_id(&name).expect("container should still be running after first turn");
+        let snapshot_after_first = crate::workspace::session_process_snapshot(&session_id)
+            .await
+            .expect("session workspace should still be running after first turn");
 
         invoke_send_message(&webview, &session_id, "now tell me one more fact about it");
 
@@ -499,14 +494,16 @@ mod tests {
         let captured = events.lock().unwrap().clone();
         assert!(saw_second_done, "expected a second done event within 30s, got {captured:?}");
 
-        let id_after_second = container_id(&name).expect("container should still be running after second turn");
+        let snapshot_after_second = crate::workspace::session_process_snapshot(&session_id)
+            .await
+            .expect("session workspace should still be running after second turn");
         assert_eq!(
-            id_after_first, id_after_second,
-            "the container must not be recreated between messages in the same session"
+            snapshot_after_first, snapshot_after_second,
+            "the workspace processes must not be recreated between messages in the same session"
         );
 
         invoke_end_session(&webview, &session_id);
-        wait_for_container_removed(&session_id).await;
+        wait_for_session_torn_down(&session_id).await;
     }
 
     /// `send_message` against an id this daemon has never seen (or already

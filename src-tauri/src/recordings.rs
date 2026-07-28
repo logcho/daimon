@@ -5,10 +5,11 @@
 //! half of the in-app "watch it work" viewer this module's commands back.
 //!
 //! Same shape as `vault.rs` throughout, deliberately: recordings live on the
-//! host filesystem (bind-mounted into every session's container — see
-//! `workspace.rs`'s `recordings_mount`), so browsing them never needs a
-//! container running at all, and `sanitize_filename` guards the same
-//! path-traversal concern a browse-only IPC surface always has to.
+//! host filesystem (passed to every session's native Node agent process as
+//! the `DAIMON_RECORDINGS_DIR` env var — see `workspace.rs`'s
+//! `spawn_node_agent`), so browsing them never needs a workspace process
+//! running at all, and `sanitize_filename` guards the same path-traversal
+//! concern a browse-only IPC surface always has to.
 //!
 //! `read_recording_file` returns the video as a base64 string rather than
 //! wiring up Tauri's asset-protocol/fs-scope machinery for a one-off need —
@@ -26,8 +27,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::workspace;
 
-fn recordings_dir() -> PathBuf {
-    let dir = workspace::project_root().join("recordings");
+pub(crate) fn recordings_dir() -> PathBuf {
+    let dir = workspace::data_dir().join("recordings");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

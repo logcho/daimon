@@ -87,6 +87,11 @@ export async function runTurn(instruction: string, emit: (event: TaskEvent) => v
   const lengthBeforeThisTurn = conversation.length;
   conversation.push(new HumanMessage(instruction));
 
+  // Must happen before the model gets a chance to call any tool this turn —
+  // see `resetRecordingForNewTurn`'s doc comment in browser.ts. Never
+  // throws, so no try/catch needed here.
+  await browser.resetRecordingForNewTurn();
+
   // Periodic live screenshots of the background browser's content page, for
   // the duration of this turn — powers the in-app "watch it work" viewer.
   // Best-effort: a single failed capture (e.g. mid-navigation, or no content

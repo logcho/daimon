@@ -33,9 +33,23 @@ dist-ssr
 # binary artifact fetched on demand from Settings, not source (see voice.rs)
 /whisper-models/
 
-# Recorded .webm videos of the agent's background browser sessions —
-# bind-mounted into the workspace container, not source (see browser.ts)
+# Recorded .webm videos of the agent's background browser sessions — passed
+# to the agent process as DAIMON_RECORDINGS_DIR, not source (see browser.ts)
 /recordings/
+
+# Per-session PinchTab config/profile directories (XDG_CONFIG_HOME/HOME for
+# the native PinchTab process, including Chrome's own derived profile) and
+# session PID files used for orphan reconciliation — both runtime state, not
+# source (see workspace.rs)
+/pinchtab-profiles/
+/run/
+
+# Full extracted Node.js toolchain (node + its own bundled npm) cached by
+# scripts/fetch-sidecars.sh so agents/'s production node_modules gets built
+# against the *bundled* Node's ABI rather than whatever Node happens to be on
+# a developer's PATH — a build-time cache, not source or a shipped resource
+# (the actual sidecar copy lives in src-tauri/binaries/, also gitignored).
+/.cache/
 
 # Editor directories and files
 .vscode/*

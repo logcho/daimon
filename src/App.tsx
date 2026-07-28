@@ -91,8 +91,29 @@ function App() {
         return; // never turn/chat content — nothing to fold into a session
       }
       setSessions((prev) => {
-        const session = prev[sessionId];
-        if (!session) return prev;
+        // A real, confirmed race: `start_session`'s Rust command spawns the
+        // turn (`spawn_turn`) and returns the session id essentially
+        // immediately, while the spawned task goes on to actually start the
+        // workspace and begin streaming `session-status` events — those two
+        // things (the invoke's own Promise resolving vs. events arriving
+        // over Tauri's separate event channel) have no guaranteed ordering.
+        // Under load (this app spawning/tearing down many real Chrome
+        // processes, which is exactly what heavy testing looks like) the
+        // event channel can win, meaning early events — including this
+        // turn's very first `live_frame` ticks — would arrive before
+        // `submitInstruction`'s own post-`await startSession(...)` handler
+        // has created `sessions[sessionId]` at all. The old code silently
+        // dropped any event for a session id it didn't yet recognize
+        // (`if (!session) return prev`) — exactly enough to explain "the
+        // live view/recording never show anything, especially the first
+        // turn" without ever surfacing an error. Synthesize a minimal
+        // placeholder session/turn instead of dropping the event; the
+        // instruction text isn't known from the event stream itself, so
+        // `submitInstruction` fills it in afterward — see its own comment.
+        const session = prev[sessionId] ?? {
+          id: sessionId,
+          turns: [{ id: crypto.randomUUID(), instruction: "", steps: [] }],
+        };
         return { ...prev, [sessionId]: applySessionEvent(session, event) };
       });
     }).then((fn) => {
@@ -235,11 +256,24 @@ function App() {
       }
 
       const sessionId = await startSession(instruction);
-      const turnId = crypto.randomUUID();
-      setSessions((prev) => ({
-        ...prev,
-        [sessionId]: { id: sessionId, turns: [{ id: turnId, instruction, steps: [] }] },
-      }));
+      setSessions((prev) => {
+        // Mirror image of the placeholder-creation in the onSessionStatus
+        // listener above: if this turn's events already started arriving
+        // and synthesized a placeholder entry before this resolved (the
+        // race described there), fill the real instruction text into that
+        // same turn instead of clobbering whatever steps/liveFrame it's
+        // already captured with a brand-new, empty one. Only the "no race
+        // happened" case actually needs a fresh turn created here.
+        const existing = prev[sessionId];
+        if (existing && existing.turns.length > 0) {
+          const turns = [...existing.turns];
+          const lastIndex = turns.length - 1;
+          turns[lastIndex] = { ...turns[lastIndex], instruction };
+          return { ...prev, [sessionId]: { ...existing, turns } };
+        }
+        const turnId = crypto.randomUUID();
+        return { ...prev, [sessionId]: { id: sessionId, turns: [{ id: turnId, instruction, steps: [] }] } };
+      });
       setActiveSessionId(sessionId);
     },
     [activeSessionId]

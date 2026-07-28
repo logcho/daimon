@@ -107,7 +107,34 @@ function PlayIcon() {
   );
 }
 
-export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?: string }) {
+// One tile in the live-view grid — one per currently-live session, not just
+// the active one, so multiple concurrent sessions doing different things
+// can all be watched at once (see PipelinePanel.tsx, which computes this
+// list across the full `sessions` array rather than just `activeSession`).
+export interface LiveScreen {
+  sessionId: string;
+  label: string;
+  liveFrame: string;
+}
+
+export function ScreenPanel({
+  screens,
+  recordingsRefreshSignal,
+}: {
+  screens: LiveScreen[];
+  // Changes whenever any turn, in any session, finishes — see
+  // PipelinePanel.tsx. A recording is only ever written to disk once
+  // `finish_recording` (part of a turn) completes, so this is a reasonable
+  // proxy for "the recordings list may be stale" without needing a
+  // dedicated "a recording was saved" event. Included in the fetch effect's
+  // dependency array below so the list refreshes even if the user never
+  // leaves this tab (e.g. they were already watching live view when the
+  // recording finished) — previously it only ever refetched on mount,
+  // which relied on a full unmount/remount from switching tabs away and
+  // back, so a recording saved while already sitting on this tab could
+  // silently never appear.
+  recordingsRefreshSignal: number;
+}) {
   const [listState, setListState] = useState<ListState>("loading");
   const [files, setFiles] = useState<RecordingFile[]>([]);
   const [listErrorMessage, setListErrorMessage] = useState("");
@@ -123,11 +150,11 @@ export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?
   const [videoDataUri, setVideoDataUri] = useState<string | null>(null);
   const [detailErrorMessage, setDetailErrorMessage] = useState("");
 
-  // Remounts each time the screen tab becomes active (PipelinePanel only
-  // renders this component while `view === "screen"`), same "refetch on
-  // every switch" pattern as VaultPanel/AutomationsPanel — recordings are
-  // meant to reflect whatever the agent has just saved, not a one-time
-  // snapshot from whenever this tab was first opened.
+  // Refetches on mount (same "remounts each time the screen tab becomes
+  // active" pattern as VaultPanel/AutomationsPanel, since PipelinePanel only
+  // renders this component while `view === "screen"`) *and* whenever
+  // `recordingsRefreshSignal` changes — see its doc comment above for why
+  // mount-only wasn't enough on its own.
   useEffect(() => {
     listRecordings()
       .then((f) => {
@@ -138,7 +165,7 @@ export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?
         setListErrorMessage(err instanceof Error ? err.message : String(err));
         setListState("error");
       });
-  }, []);
+  }, [recordingsRefreshSignal]);
 
   // Lazily generates a thumbnail (+ duration) for every listed recording
   // that hasn't had one started yet. Each one requires fetching that file's
@@ -222,17 +249,42 @@ export function ScreenPanel({ isLive, liveFrame }: { isLive: boolean; liveFrame?
 
   return (
     <div className="themed-scroll flex-1 overflow-y-auto p-4">
-      {isLive && liveFrame && (
+      {screens.length === 1 && (
         <div className="mb-5">
           <div className="mb-2 flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 shrink-0 animate-daimon-pulse rounded-full bg-red-400" />
             <span className="text-xs font-medium text-red-400">live — watching the background browser</span>
           </div>
           <img
-            src={`data:image/png;base64,${liveFrame}`}
+            src={`data:image/png;base64,${screens[0].liveFrame}`}
             alt="Live view of the background browser"
             className="w-full rounded-xl border border-white/10 bg-black/40"
           />
+        </div>
+      )}
+
+      {screens.length > 1 && (
+        <div className="mb-5">
+          <div className="mb-2 flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 shrink-0 animate-daimon-pulse rounded-full bg-red-400" />
+            <span className="text-xs font-medium text-red-400">
+              live — {screens.length} sessions running
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {screens.map((screen) => (
+              <div key={screen.sessionId}>
+                <img
+                  src={`data:image/png;base64,${screen.liveFrame}`}
+                  alt={`Live view of ${screen.label || "a background browser session"}`}
+                  className="w-full rounded-xl border border-white/10 bg-black/40"
+                />
+                <p className="mt-1 truncate text-xs text-neutral-400" title={screen.label}>
+                  {screen.label || "untitled session"}
+                </p>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

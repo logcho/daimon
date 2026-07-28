@@ -1,15 +1,17 @@
 //! The notes vault: either a real Obsidian vault directory the user pointed
-//! us at in Settings, or (absent that) a Daimon-managed default folder at the
-//! project root. See `ARCHITECTURE.md` §3D and `PROMPT.md`'s Phase 9 section
-//! — same mechanism either way, just a different host directory, and it's
-//! this directory that `workspace::run_container` bind-mounts into every
-//! session's container so the agent's `write_note`/`read_note`/`list_notes`
-//! tools (see `agents/src/vault.ts`) see the exact same files a browse-only
-//! caller sees here.
+//! us at in Settings, or (absent that) a Daimon-managed default folder under
+//! `workspace::data_dir()`. See `ARCHITECTURE.md` §3D and `PROMPT.md`'s
+//! Phase 9 section — same mechanism either way, just a different host
+//! directory, and it's this directory that `workspace::spawn_node_agent`
+//! passes to every session's native Node agent process as
+//! `DAIMON_VAULT_DIR` so its `write_note`/`read_note`/`list_notes` tools
+//! (see `agents/src/vault.ts`) see the exact same files a browse-only caller
+//! sees here.
 //!
-//! Browsing (`list_vault_files`/`read_vault_file`) never touches a container
-//! — the vault lives on the host filesystem, so the daemon can read it
-//! directly for the UI without spinning up a session at all.
+//! Browsing (`list_vault_files`/`read_vault_file`) never touches a
+//! workspace process — the vault lives on the host filesystem, so the
+//! daemon can read it directly for the UI without spinning up a session at
+//! all.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -17,7 +19,7 @@ use std::time::SystemTime;
 use crate::workspace;
 
 /// Resolves the vault directory: `OBSIDIAN_VAULT_PATH` if set and non-empty,
-/// otherwise `<project root>/vault`. Always ensures the directory exists
+/// otherwise `<app data dir>/vault`. Always ensures the directory exists
 /// before returning — for the default case nothing else would create it; for
 /// a user-configured path this is a no-op if it already exists (by the time
 /// anything calls this for real use, `set_vault_path` should already have
@@ -27,7 +29,7 @@ pub fn vault_path() -> PathBuf {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace::project_root().join("vault"));
+        .unwrap_or_else(|| workspace::data_dir().join("vault"));
 
     let _ = std::fs::create_dir_all(&path);
     path

@@ -21,7 +21,7 @@ Planned stack (see `ARCHITECTURE.md` §2 for full detail):
 - **Desktop shell:** Tauri v2 (Rust backend, React/TypeScript frontend, Tailwind)
 - **Ambient UI:** a small draggable floating pill, expandable into a full pipeline view
 - **Orchestration:** LangGraph (TypeScript/Node) for agent planning/state as a graph, with subagent delegation and a growing skill library
-- **Execution:** Docker SDK + headless browser (Playwright) providing each task/project its own background workspace
+- **Execution:** native OS processes (a PinchTab-driven headless Chrome + Node agent server, supervised directly by the Rust daemon — no Docker) providing each task/project its own background workspace, bundled as pinned sidecar binaries/resources for single-download distribution (`scripts/fetch-sidecars.sh`)
 - **Memory & skills:** local SQLite + FTS/embeddings store for cross-session context and reusable learned skills
 - **Gateway:** optional bridge to chat platforms (Telegram/Slack/Discord) for remote check-in/control
 - **Communication:** Tauri IPC commands bridging the React frontend and the Rust daemon
@@ -32,22 +32,22 @@ Planned stack (see `ARCHITECTURE.md` §2 for full detail):
 
 Four-part model — keep this separation when adding code:
 
-1. **Shell (frontend):** the ambient pill widget (React + Tailwind), toggled/expanded by a global hotkey into a "Thought-Action-Result" pipeline view. No direct host, Docker, or workspace access — everything goes through Tauri IPC.
-2. **Daemon (Rust backend):** owns the Tauri IPC handlers, the lifecycle of background workspaces (Docker containers running a headless browser + shell — created on demand, resumable, not always ephemeral), and the optional gateway process.
+1. **Shell (frontend):** the ambient pill widget (React + Tailwind), toggled/expanded by a global hotkey into a "Thought-Action-Result" pipeline view. No direct host, process, or workspace access — everything goes through Tauri IPC.
+2. **Daemon (Rust backend):** owns the Tauri IPC handlers, the lifecycle of background workspaces (native OS processes — a PinchTab-driven headless Chrome + Node agent server, supervised directly by the daemon via process-group-leader spawning, not Docker containers — created on demand, resumable, not always ephemeral), and the optional gateway process.
 3. **Orchestrator (LangGraph engine):** decomposes user intent into a graph of actions using a standardized tool library (`read_file`, `shell_exec`, `browse`, `fill_form`, `web_search`, ...) that execute inside a background workspace; pulls relevant memory/skills into context; persists checkpoints so tasks resume across restarts.
 4. **Memory/Gateway layer:** durable cross-session memory and skill store, plus an opt-in bridge exposing the same agent/session to external chat channels.
 
 Build phases (see `PROMPT.md` for the authoritative, detailed breakdown — do not skip ahead to a later phase before the current one's "done when" criterion is verified):
 - **Phase 1:** ambient pill + hotkey + a single background workspace running one task end-to-end, with live status streamed to the widget. No memory, skills, or gateway yet.
 - **Phase 2:** persistent memory + skill library.
-- **Phase 3:** concurrent multi-task execution (per-task workspaces instead of one shared container).
+- **Phase 3:** concurrent multi-task execution (per-task workspaces instead of one shared workspace).
 - **Phase 4:** remote gateway (starting with Telegram), scoped per channel to read-only status vs. full control.
 - **Phase 5 (voice done, out of order; subagent delegation still open):** local whisper.cpp dictation, triggered by either `CommandOrControl+Shift+D` or the real bare Fn key (`src-tauri/src/fn_key.rs`, macOS-only native `NSEvent` hook, needs Accessibility permission), filling Daimon's own chat input. Multi-task tracking moved into Phase 3.
 - **Phase 6:** OAuth2 connected accounts (Gmail/Outlook), MCP tool servers, onboarding rework.
 - **Phase 7:** terminal CLI companion (Hermes/OpenClaw-style), sharing the same daemon/orchestrator session.
 - **Phase 8 (done, out of order):** continuable chat sessions instead of one-shot tasks — a session's workspace stays alive between messages (see `PROMPT.md`).
 - **Phase 9 (done, out of order):** vaults/Obsidian integration — a file/notes vault (real Obsidian vault path or a Daimon-native folder fallback), browsable in-app (`VaultPanel.tsx`), with notes indexed into Phase 2's memory/skill retrieval as a third searchable category.
-- **Phase 10 (done, out of order):** cron jobs/automations — recurring instructions (cron-scheduled) that fire unattended, creatable either from the `automations` tab UI or by the agent itself mid-conversation via a `create_automation` tool. Triggered runs auto-teardown their container (unlike interactive sessions) since they don't need continuation.
+- **Phase 10 (done, out of order):** cron jobs/automations — recurring instructions (cron-scheduled) that fire unattended, creatable either from the `automations` tab UI or by the agent itself mid-conversation via a `create_automation` tool. Triggered runs auto-teardown their workspace processes (unlike interactive sessions) since they don't need continuation.
 
 Task loop (full, end-state — see `ARCHITECTURE.md` §4 for detail): input (voice/text, from the widget or a remote channel) → LangGraph plan, informed by memory/skills → daemon creates/resumes a background workspace → agent executes steps invisibly inside it → status streams live to the pill (and any connected channel) → progress checkpoints continuously → on completion, result surfaces and new skills/facts are written to memory.
 
@@ -64,12 +64,14 @@ These constraints come from `ARCHITECTURE.md` §5 and should hold for any code t
 
 ```text
 /daimon
-├── src-tauri/          # Rust backend: IPC handlers, workspace/container manager (built)
+├── src-tauri/          # Rust backend: IPC handlers, workspace/process manager (built)
+│                        #   binaries/, resources/ — gitignored bundled sidecars (pinchtab, node, pinned
+│                        #   Chromium, compiled+pruned agents/) — see scripts/fetch-sidecars.sh
 ├── src/                # React frontend: ambient pill UI + expanded pipeline view (built)
 ├── agents/             # LangGraph agent server + SQLite memory/skill store (built)
-├── memory/             # Local SQLite DB, gitignored — bind-mounted into the workspace container
-├── vault/               # Notes vault, gitignored — bind-mounted alongside memory/ (built, Phase 9)
-├── sandbox/            # Dockerfile for the background workspace image (built)
+├── scripts/             # fetch-sidecars.sh — fetches/checksum-verifies the bundled sidecars above (built)
+├── memory/             # Local SQLite DB, gitignored — passed to the workspace process via DAIMON_MEMORY_DB
+├── vault/               # Notes vault, gitignored — passed alongside memory/ (built, Phase 9)
 ├── website/            # Public landing page, Astro — separate project, own package.json (built)
 ├── gateway/             # Remote channel bridge (Telegram/Slack/etc.) — Phase 4, not built yet
 ├── cli/                 # Terminal companion sharing the daemon/orchestrator session — Phase 7, not built yet

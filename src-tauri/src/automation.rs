@@ -2,25 +2,25 @@
 //! without the user opening the app or typing anything (`ARCHITECTURE.md`
 //! §3B/C, `PROMPT.md`'s Phase 10 section).
 //!
-//! **The real design wrinkle:** the agent runs inside a Docker container
-//! that only ever gets called *into* over HTTP by this daemon (`POST
-//! /task`, see `session.rs`) — there's no reverse channel for the container
-//! to call back out, and opening one (a host-reachable listener the
-//! container can hit) would be a real trust-direction reversal. So, same
-//! shape as `memory/` and `vault/` (see `workspace.rs`'s `run_container`):
-//! a third bind-mounted directory, `automations_dir()` (host) <->
-//! `/workspace/automations` (container). The agent's `create_automation`
-//! tool (`agents/src/automation.ts`) writes a small pending-request JSON
-//! file into that mount; `poll_and_fire`'s scan step (below) picks it up,
-//! re-validates it, and promotes it into the real store — the container
-//! never reaches back into the daemon directly.
+//! **The real design wrinkle:** the agent runs as a native OS process that
+//! only ever gets called *into* over HTTP by this daemon (`POST /task`, see
+//! `session.rs`) — there's no reverse channel for it to call back out, and
+//! opening one (a daemon-side listener the agent process could hit) would
+//! be a real trust-direction reversal. So, same shape as `memory/` and
+//! `vault/` (both passed to the agent process as plain host-path env
+//! vars — see `workspace.rs`'s `spawn_node_agent`): a third directory,
+//! `automations_dir()`, passed as `DAIMON_AUTOMATIONS_DIR`. The agent's
+//! `create_automation` tool (`agents/src/automation.ts`) writes a small
+//! pending-request JSON file into that directory; `poll_and_fire`'s scan
+//! step (below) picks it up, re-validates it, and promotes it into the real
+//! store — the agent process never reaches back into the daemon directly.
 //!
-//! Storage is a plain `automations.json` at the project root (gitignored,
-//! same treatment as `/memory/`/`/vault/`) — a small, infrequently-written
-//! list, not worth a database. The in-memory `AUTOMATIONS` cache below is
-//! this process's single source of truth while running; every mutation
-//! (new automation, enable/disable, delete, or a recorded run outcome) is
-//! immediately persisted back to disk.
+//! Storage is a plain `automations.json` under `workspace::data_dir()`
+//! (gitignored in dev, same treatment as `/memory/`/`/vault/`) — a small,
+//! infrequently-written list, not worth a database. The in-memory
+//! `AUTOMATIONS` cache below is this process's single source of truth while
+//! running; every mutation (new automation, enable/disable, delete, or a
+//! recorded run outcome) is immediately persisted back to disk.
 //!
 //! Schedules are evaluated in UTC (via `chrono::Utc::now()`) — no
 //! timezone picker, a deliberately deferred stretch goal per the Phase 10
@@ -64,15 +64,16 @@ pub struct Automation {
 static AUTOMATIONS: LazyLock<Mutex<Vec<Automation>>> = LazyLock::new(|| Mutex::new(load_automations()));
 
 pub(crate) fn automations_path() -> PathBuf {
-    workspace::project_root().join("automations.json")
+    workspace::data_dir().join("automations.json")
 }
 
-/// The pending-request mount point — created if missing, since nothing else
+/// The pending-request directory — created if missing, since nothing else
 /// (unlike `memory/`/`vault/`, which get created by their own modules on
 /// first real use) otherwise guarantees this directory exists before
-/// `workspace::run_container` tries to bind-mount it.
+/// `workspace::spawn_node_agent` passes it to the agent process as
+/// `DAIMON_AUTOMATIONS_DIR`.
 pub(crate) fn automations_dir() -> PathBuf {
-    let dir = workspace::project_root().join("automations");
+    let dir = workspace::data_dir().join("automations");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -321,18 +322,6 @@ mod tests {
         }
     }
 
-    fn container_id(name: &str) -> Option<String> {
-        let output = std::process::Command::new("docker")
-            .args(["inspect", "-f", "{{.Id}}", name])
-            .output()
-            .expect("failed to run docker inspect");
-        if output.status.success() {
-            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            None
-        }
-    }
-
     /// Test-only insertion that (unlike `create_automation`) lets a test
     /// force an automation straight into an already-due state, rather than
     /// waiting on a real wall-clock cron boundary.
@@ -446,13 +435,14 @@ mod tests {
     }
 
     /// The core Phase 10 behavior: a due, enabled automation actually fires
-    /// through the real session machinery (live Docker workspace) and, on
-    /// completion, its container is gone — unlike an interactive session
-    /// (see `session.rs`'s own test asserting the opposite for
-    /// `start_session`). Forces "due" via a far-in-the-past `last_run_at`
-    /// rather than waiting on a real cron boundary, per the Phase 10 brief.
+    /// through the real session machinery (a live native workspace) and, on
+    /// completion, its PinchTab/Node processes are gone — unlike an
+    /// interactive session (see `session.rs`'s own test asserting the
+    /// opposite for `start_session`). Forces "due" via a far-in-the-past
+    /// `last_run_at` rather than waiting on a real cron boundary, per the
+    /// Phase 10 brief.
     #[tokio::test(flavor = "multi_thread")]
-    async fn poll_and_fire_runs_a_due_automation_and_tears_down_its_container() {
+    async fn poll_and_fire_runs_a_due_automation_and_tears_down_its_workspace() {
         let app = crate::build_app(mock_builder());
 
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -500,10 +490,9 @@ mod tests {
             "expected a done event for the ephemeral run's session, got {captured:?}"
         );
 
-        let name = format!("daimon-workspace-{session_id}");
         assert!(
-            container_id(&name).is_none(),
-            "container {name} should have been torn down once the ephemeral automation run completed"
+            crate::workspace::session_process_snapshot(&session_id).await.is_none(),
+            "session {session_id}'s workspace processes should have been torn down once the ephemeral automation run completed"
         );
 
         let automations = list_automations().await.expect("list_automations should succeed");

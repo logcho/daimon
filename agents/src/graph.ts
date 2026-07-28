@@ -21,6 +21,12 @@ const SYSTEM_PROMPT =
   "web_search/open_url/read_page share a hard, enforced limit on how many " +
   "times they can be used in a single turn, so treat each one as worth " +
   "using deliberately, not for open-ended exploring.\n\n" +
+  "click and fill_field address elements by ref (e.g. 'e5'), not CSS " +
+  "selector — call read_page first to see the current page's interactive " +
+  "elements listing and use a ref from there. Refs go stale after any " +
+  "navigation, click, or fill_field, since the page's elements get " +
+  "renumbered — call read_page again before reusing one rather than " +
+  "assuming an old ref still points at the same thing.\n\n" +
   "Your final result is shown in a small chat bubble in a floating panel, " +
   "not a document — write it like a short text message summarizing what " +
   "you did, not a report. Plain text only: no markdown ('#' headers, " +

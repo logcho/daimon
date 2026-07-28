@@ -20,6 +20,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-opener = "2"
+# Registered for sidecar-execution ACL/bundling conventions (matches how
+# `tauri.conf.json`'s `bundle.externalBin` sidecars are meant to be declared
+# and permissioned in Tauri v2) — actual spawning of the bundled
+# pinchtab/node sidecars still goes through `workspace.rs`'s own
+# `tokio::process::Command` + `process_wrap` (needed for process-group-leader
+# semantics this plugin's own `Command` executor doesn't expose; path
+# resolution is replicated directly in `workspace.rs::bundled_sidecar_path`
+# using the same `Contents/MacOS/<name>` convention this plugin uses
+# internally), not this plugin's own spawn path.
+tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-global-shortcut = "2.3.2"
@@ -39,6 +49,15 @@ chrono = { version = "0.4", features = ["clock"] }
 whisper-rs = "0.16.0"
 cpal = "0.18.1"
 portable-pty = "0.9.0"
+# Native process-group/session supervision for the background workspace
+# (replaces Docker — see workspace.rs's module doc). Not `command-group`,
+# which is now in maintenance-only mode per its own README; process-wrap is
+# its actively maintained, more composable successor.
+process-wrap = { version = "9.1", features = ["tokio1"] }
+# Process-tree walking (RSS summation for the memory watchdog, and the
+# recursive descendant kill teardown needs — see workspace.rs) and PID/name
+# cross-checking for orphan reconciliation.
+sysinfo = "0.39"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -15,7 +15,7 @@ export async function runDemoTask(instruction: string, emit: (event: TaskEvent) 
     emit({ type: "step", ...steps[0], status: "done" });
 
     emit({ type: "step", ...steps[1], status: "running" });
-    const text = await browser.getPageText();
+    const { text } = await browser.readPage();
     emit({ type: "step", ...steps[1], status: "done" });
 
     emit({ type: "step", ...steps[2], status: "running" });

@@ -27,6 +27,8 @@ fn main() {
             "get_voice_model_status",
             "download_voice_model",
             "toggle_dictation",
+            "get_chromium_status",
+            "download_chromium",
             "start_terminal",
             "write_to_terminal",
             "resize_terminal",

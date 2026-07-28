@@ -73,11 +73,119 @@ fn model_dir() -> PathBuf {
             return dir;
         }
     }
-    workspace::project_root().join("whisper-models")
+    let dir = workspace::data_dir().join("whisper-models");
+    migrate_legacy_model_once(&dir);
+    dir
 }
 
 fn model_path() -> PathBuf {
     model_dir().join(MODEL_FILENAME)
+}
+
+/// Guards `migrate_legacy_model` so it only ever actually runs its
+/// filesystem work once per process — `model_dir()` is called on essentially
+/// every dictation-related operation (`get_voice_model_status`,
+/// `start_recording_internal`, `whisper_context()`, …), and there's no
+/// reason to re-stat both paths on every single one of those once this
+/// process has already settled the question.
+static MODEL_MIGRATION_DONE: OnceLock<()> = OnceLock::new();
+
+fn migrate_legacy_model_once(new_dir: &std::path::Path) {
+    MODEL_MIGRATION_DONE.get_or_init(|| {
+        migrate_legacy_model(new_dir, &workspace::project_root().join("whisper-models"));
+    });
+}
+
+/// One-time migration for the Docker-to-native-process directory change:
+/// `model_dir()` used to resolve to `project_root().join("whisper-models")`
+/// (a git-checkout-relative path), and now resolves to
+/// `workspace::data_dir().join("whisper-models")` (the real, per-app OS data
+/// directory — see `workspace.rs`'s module doc). Existing installs that
+/// already downloaded the ~148MB model have it sitting at the *old* path,
+/// which the new `model_dir()` never looks at — every dictation attempt was
+/// silently hitting "model not downloaded" as a result, even though the file
+/// was right there on disk.
+///
+/// A plain, best-effort move: `rename` first (fast, atomic, and the common
+/// case — `project_root()` and the real app-data dir are virtually always on
+/// the same volume on a real machine), falling back to copy+remove if
+/// `rename` fails (e.g. `EXDEV`, a genuine cross-filesystem move) rather than
+/// assuming `rename` always succeeds. If the old file is already gone (never
+/// downloaded, or already migrated in a previous process's run), this is a
+/// silent no-op — the normal "not downloaded yet, prompt the user" flow in
+/// `start_recording_internal`/`get_voice_model_status` takes over exactly as
+/// before, no new failure mode introduced. Also a no-op if a file already
+/// exists at the new location (nothing to overwrite, and a fresh
+/// `download_voice_model` run should never be clobbered by a stale old
+/// copy).
+///
+/// Split out from `migrate_legacy_model_once` as a plain, pure-ish function
+/// over two explicit paths (rather than reading `workspace::project_root()`
+/// directly inline) so it's directly testable against disposable temp
+/// directories — see the `migrate_legacy_model_*` tests below — without ever
+/// touching this crate's own real dev-checkout `whisper-models/` directory.
+fn migrate_legacy_model(new_dir: &std::path::Path, legacy_dir: &std::path::Path) {
+    let new_path = new_dir.join(MODEL_FILENAME);
+    if new_path.is_file() {
+        return;
+    }
+    let legacy_path = legacy_dir.join(MODEL_FILENAME);
+    if !legacy_path.is_file() {
+        return;
+    }
+
+    if let Err(e) = std::fs::create_dir_all(new_dir) {
+        log::error!(
+            "voice: failed to create {} while migrating the whisper model from its legacy location: {e}",
+            new_dir.display()
+        );
+        return;
+    }
+
+    match std::fs::rename(&legacy_path, &new_path) {
+        Ok(()) => {
+            log::info!(
+                "voice: migrated whisper model from legacy path {} to {}",
+                legacy_path.display(),
+                new_path.display()
+            );
+        }
+        Err(rename_err) => {
+            log::warn!(
+                "voice: rename failed migrating whisper model ({rename_err}) — falling back to copy+remove \
+                 (likely a cross-device move between {} and {})",
+                legacy_path.display(),
+                new_path.display()
+            );
+            match std::fs::copy(&legacy_path, &new_path) {
+                Ok(_) => match std::fs::remove_file(&legacy_path) {
+                    Ok(()) => log::info!(
+                        "voice: migrated whisper model via copy+remove from legacy path {} to {}",
+                        legacy_path.display(),
+                        new_path.display()
+                    ),
+                    Err(remove_err) => log::warn!(
+                        "voice: copied whisper model to {} but failed to remove the old copy at {}: {remove_err} \
+                         (harmless — the new copy is what's actually used from here on)",
+                        new_path.display(),
+                        legacy_path.display()
+                    ),
+                },
+                Err(copy_err) => {
+                    // Deliberately not deleting `legacy_path` in this branch —
+                    // leaving the old file in place (however unreachable) is
+                    // strictly safer than losing the only copy of a 148MB
+                    // download the user would otherwise have to refetch.
+                    log::error!(
+                        "voice: failed to migrate whisper model from legacy path {} to {}: {copy_err} \
+                         — leaving the old file in place; dictation will report \"not downloaded\" until this is resolved",
+                        legacy_path.display(),
+                        new_path.display()
+                    );
+                }
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -937,6 +1045,99 @@ mod tests {
         assert!(!super::is_bracketed_annotation("[mismatched)"));
     }
 
+    /// A disposable pair of temp directories standing in for
+    /// `project_root().join("whisper-models")` (legacy) and
+    /// `data_dir().join("whisper-models")` (new) — every
+    /// `migrate_legacy_model` test below operates entirely on these, never on
+    /// this crate's own real dev-checkout `whisper-models/` directory (which,
+    /// on a machine that's actually downloaded the model, is exactly the
+    /// real file this migration exists to move — the last thing a test
+    /// should touch).
+    struct MigrationDirs {
+        base: std::path::PathBuf,
+        legacy_dir: std::path::PathBuf,
+        new_dir: std::path::PathBuf,
+    }
+
+    impl MigrationDirs {
+        fn new(label: &str) -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "daimon-voice-migration-test-{}-{}-{label}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .expect("system clock before the epoch")
+                    .as_nanos()
+            ));
+            let legacy_dir = base.join("legacy");
+            let new_dir = base.join("new");
+            std::fs::create_dir_all(&legacy_dir).expect("failed to create isolated legacy dir");
+            Self { base, legacy_dir, new_dir }
+        }
+    }
+
+    impl Drop for MigrationDirs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn migrate_legacy_model_moves_the_file_to_the_new_location() {
+        let dirs = MigrationDirs::new("moves");
+        let legacy_path = dirs.legacy_dir.join(super::MODEL_FILENAME);
+        std::fs::write(&legacy_path, b"fake ggml model bytes").expect("failed to write fake legacy model file");
+
+        super::migrate_legacy_model(&dirs.new_dir, &dirs.legacy_dir);
+
+        let new_path = dirs.new_dir.join(super::MODEL_FILENAME);
+        assert!(new_path.is_file(), "expected the model file to exist at the new location");
+        assert!(!legacy_path.exists(), "expected the legacy file to be gone after a successful migration");
+        assert_eq!(
+            std::fs::read(&new_path).expect("failed to read migrated file"),
+            b"fake ggml model bytes",
+            "migrated file content should be unchanged"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_model_is_a_no_op_when_no_legacy_file_exists() {
+        // The common case for a brand-new install that's never downloaded
+        // the model at all — must not create the new directory or error,
+        // just leave the normal "not downloaded yet" flow to take over.
+        let dirs = MigrationDirs::new("no-legacy");
+
+        super::migrate_legacy_model(&dirs.new_dir, &dirs.legacy_dir);
+
+        assert!(
+            !dirs.new_dir.join(super::MODEL_FILENAME).exists(),
+            "should not fabricate a model file when there's nothing to migrate"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_model_does_not_overwrite_an_existing_new_file() {
+        // Guards against a stale legacy copy clobbering a model that was
+        // already freshly downloaded (or already migrated) at the new
+        // location — the legacy file should be left completely untouched in
+        // this case, not silently deleted.
+        let dirs = MigrationDirs::new("already-present");
+        let legacy_path = dirs.legacy_dir.join(super::MODEL_FILENAME);
+        std::fs::write(&legacy_path, b"old legacy bytes").expect("failed to write fake legacy model file");
+        std::fs::create_dir_all(&dirs.new_dir).expect("failed to create new dir");
+        let new_path = dirs.new_dir.join(super::MODEL_FILENAME);
+        std::fs::write(&new_path, b"already-downloaded bytes").expect("failed to write fake new model file");
+
+        super::migrate_legacy_model(&dirs.new_dir, &dirs.legacy_dir);
+
+        assert_eq!(
+            std::fs::read(&new_path).unwrap(),
+            b"already-downloaded bytes",
+            "existing new-location file should not be overwritten by a stale legacy copy"
+        );
+        assert!(legacy_path.is_file(), "legacy file should be left alone, not deleted, when the new file already exists");
+    }
+
     /// Points `model_dir()` at a fresh, empty temp directory for the
     /// duration of this test, via `TEST_MODEL_DIR_OVERRIDE`, so
     /// `model_path().is_file()` is guaranteed false without ever touching a
@@ -1021,6 +1222,56 @@ mod tests {
         // for reasons unrelated to what this test checks. Its own real,
         // network-touching behavior is covered by the `#[ignore]`d test
         // below, run manually.
+    }
+
+    /// A real, one-time end-to-end check of the legacy-model migration (see
+    /// `migrate_legacy_model`'s doc comment): resolves this crate's *real*
+    /// OS app-data directory via a real `AppHandle`'s
+    /// `app.path().app_data_dir()` (not `HideModelFile`'s temp-dir override),
+    /// then confirms `model_path()` — and therefore every real dictation
+    /// attempt from here on — resolves to an actually-present, migrated
+    /// file. This is the literal scenario the migration exists to fix: a
+    /// pre-migration install with the model already downloaded at the old
+    /// `project_root()`-relative location.
+    ///
+    /// `#[ignore]`d, like the network-touching test below, for a different
+    /// reason: this one specifically calls `workspace::init_data_dir`, which
+    /// sets `workspace::DATA_DIR` — a process-global `OnceLock` — for the
+    /// remaining lifetime of whatever process runs it. Every other test in
+    /// this crate relies on that `OnceLock` staying unset (so `data_dir()`
+    /// keeps falling back to the git-checkout-relative `project_root()`);
+    /// running this test alongside any of them in the same `cargo test`
+    /// process would silently corrupt their view of where data lives. Run
+    /// alone: `cargo test --lib -- --ignored --test-threads=1
+    /// real_app_data_dir_migration_moves_the_legacy_model_into_place`.
+    #[test]
+    #[ignore]
+    fn real_app_data_dir_migration_moves_the_legacy_model_into_place() {
+        let app = crate::build_app(mock_builder());
+        crate::workspace::init_data_dir(app.handle());
+
+        let path = super::model_path();
+        eprintln!("resolved real (post-migration) model path: {}", path.display());
+        assert!(
+            path.is_file(),
+            "expected the whisper model to be present (migrated from the legacy path, or already there) at {}",
+            path.display()
+        );
+
+        // Also confirm the IPC surface a real Settings screen (or
+        // `start_recording_internal`'s "is the model there" check) actually
+        // relies on agrees — not just that the raw file exists on disk.
+        let webview = WebviewWindowBuilder::new(&app, "pill", Default::default())
+            .build()
+            .expect("failed to build mock webview");
+        let status = get_ipc_response(&webview, invoke_request("get_voice_model_status", serde_json::json!({})))
+            .expect("get_voice_model_status should succeed")
+            .deserialize::<super::VoiceModelStatus>()
+            .expect("expected a VoiceModelStatus");
+        assert!(
+            status.downloaded,
+            "get_voice_model_status should report the model as downloaded after migration"
+        );
     }
 
     /// Exercises the real download path end-to-end (a real HTTPS request

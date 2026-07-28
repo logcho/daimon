@@ -14,7 +14,7 @@ Decided 2026-07-24 (see the `daimon-positioning` project memory for full context
 2. **On-device, so it can be trusted with sensitive things.** Cloud "computer-use" agents run your browser session, your files, your voice on someone else's server. Everything here — the sandboxed headless browser, the terminal (running directly against your real project files), on-device whisper.cpp transcription, the memory/skill/vault store — runs on your machine. That's what makes it safe to point at a resume, a logged-in inbox, or a real dev environment in the first place, not a checkbox privacy feature.
 3. **Non-disruptive.** It never steals the real cursor, keyboard focus, or foreground app. This is the architectural precondition for the ambient premise at all — if it grabbed the screen like a remote-desktop tool, the user couldn't keep working while it works.
 
-**Docker's actual scope, stated plainly (a recurring point of confusion worth being explicit about):** Docker sandboxes exactly one thing — the per-session background workspace (headless Playwright browser + shell) where the agent does *open-web* work it doesn't control (§3B, §4). That isolation exists because the agent is browsing real, untrusted sites and filling out real forms; a bad page or a misbehaving agent step shouldn't be able to touch the real filesystem, and each session's browser/shell state should be disposable and independent of every other session's. **The embedded terminal (Phase 11) deliberately does *not* use Docker** — documented in `PROMPT.md` as the first explicit exception to the sandboxing rule, because its entire purpose is running the user's real `claude` CLI against their real project files exactly like a normal terminal; sandboxing it would defeat the point. The rule in one sentence: *work touching the untrusted open web is sandboxed; a tool deliberately pointed at the user's own trusted machine isn't* — two different trust models for two different jobs, not an inconsistency.
+**The background workspace's actual isolation model, stated plainly (a recurring point of confusion worth being explicit about, and one that changed mid-build):** the per-session background workspace (a real, stealth-patched headless Chrome driven via PinchTab, plus the Node agent server) is where the agent does *open-web* work it doesn't control (§3B, §4) — browsing real, untrusted sites and filling out real forms. Through Phase 1–7 this ran inside a Docker container per session, giving that untrusted work a real filesystem/namespace boundary. That container model was replaced with plain native OS processes, supervised directly by the Rust daemon (`src-tauri/src/workspace.rs`), so Daimon can ship as a single downloadable app with no separate Docker Desktop install requirement — a real, deliberate tradeoff: native processes run with the same filesystem permissions as Daimon itself, so a bad page or a misbehaving agent step is no longer stopped by a container namespace the way it was before. This is accepted for now, matching how most single-download desktop agent products work (OS-level sandboxing via `sandbox-exec`/Seatbelt on macOS is a possible future mitigation, not yet built); what's *not* given up is per-session disposability and independence — each session still gets its own PinchTab/Chrome instance, its own port, and its own profile directory (`pinchtab-profiles/<session-id>`, acting as that session's isolated `XDG_CONFIG_HOME`/`HOME`), so one session's browser/cookie state still can't leak into another's, and a session's whole process tree is still torn down atomically on end. **The embedded terminal (Phase 11) was always a deliberate exception to even the old Docker-based sandboxing rule** — documented in `PROMPT.md`, because its entire purpose is running the user's real `claude` CLI against their real project files exactly like a normal terminal; sandboxing it would defeat the point. The rule in one sentence, unchanged by the Docker-to-native-process migration: *work touching the untrusted open web gets its own disposable, isolated workspace; a tool deliberately pointed at the user's own trusted machine doesn't* — two different trust models for two different jobs, not an inconsistency.
 
 ---
 
@@ -32,7 +32,7 @@ Decided 2026-07-24 (see the `daimon-positioning` project memory for full context
 | **Desktop Shell** | Tauri v2 (Rust/React) | Native window management, low footprint, system tray. |
 | **Ambient UI** | React + Tailwind, custom floating widget | Wispr Flow-style persistent pill: glanceable status, expands to a full pipeline view on demand. |
 | **Orchestration** | LangGraph (TypeScript/Node) | State machine for multi-step agent planning, tool calling, and subagent delegation. |
-| **Execution** | Docker SDK + headless browser (Playwright) | Background, invisible workspace per task/project — where the agent actually browses/types/runs shell commands without touching the user's visible screen. |
+| **Execution** | Native OS processes (PinchTab-driven headless Chrome + Node), supervised directly by the Rust daemon | Background, invisible workspace per task/project — where the agent actually browses/types/runs shell commands without touching the user's visible screen. Bundled as pinned sidecar binaries/resources (`scripts/fetch-sidecars.sh`) so the whole app ships as one download with no separate Docker install. |
 | **Memory & Skills** | Local store (SQLite + FTS/embeddings) | Cross-session memory of user context and task history; a growing library of reusable learned skills. |
 | **Gateway (remote access)** | Lightweight bridge service (Telegram/Slack/Discord to start) | Lets the user check status or send new instructions from a chat app when away from the desktop. Secondary to the native widget, not a replacement for it. |
 | **Communication** | IPC (Tauri Commands) | Secure bridge between UI frontend and Rust daemon. |
@@ -54,10 +54,10 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 
 ### B. The Daemon (Rust Backend)
 
-* **Workspace Lifecycle Manager:** Owns the background workspaces (Docker containers running a headless browser + shell) — one per active task or project, created on demand and resumable, not always torn down after a single run.
+* **Workspace Lifecycle Manager:** Owns the background workspaces (native OS processes — a PinchTab-driven headless Chrome plus the Node agent server, supervised directly by the daemon via process-group-leader spawning; see `src-tauri/src/workspace.rs`) — one per active task or project, created on demand and resumable, not always torn down after a single run.
 * **IPC Handler:** Bridges frontend requests to the orchestrator and to workspace state.
 * **Gateway Supervisor:** Manages the optional remote-access bridge process.
-* **Automation Scheduler (Phase 10, implemented):** a background loop (30s poll) that fires recurring instructions (cron-scheduled, e.g. a daily brief) on their own, with no user interaction — each firing reuses the Phase 8 session machinery but auto-tears-down its container once the run completes, since an unattended recurring job doesn't need the "stay open until closed" continuation an interactive chat does. Also picks up automation-creation requests the agent itself submits from inside a session (see (C) below) — the container has no reverse channel to call back into the daemon, so this goes through a bind-mounted directory the same way vault notes do, not a new network listener.
+* **Automation Scheduler (Phase 10, implemented):** a background loop (30s poll) that fires recurring instructions (cron-scheduled, e.g. a daily brief) on their own, with no user interaction — each firing reuses the Phase 8 session machinery but auto-tears-down its workspace processes once the run completes, since an unattended recurring job doesn't need the "stay open until closed" continuation an interactive chat does. Also picks up automation-creation requests the agent itself submits from inside a session (see (C) below) — the workspace process has no reverse channel to call back into the daemon, so this goes through a shared host directory (passed to the agent process as `DAIMON_AUTOMATIONS_DIR`) the same way vault notes do, not a new network listener.
 
 ### C. The Orchestrator (LangGraph Engine)
 
@@ -92,7 +92,7 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 
 1. **Input:** User gives Daimon an instruction via the widget (voice or text), or via a connected remote channel.
 2. **Plan:** LangGraph decomposes intent into a graph of actions, drawing on relevant memory/skills.
-3. **Spin-up:** Daemon creates or resumes a background workspace (Docker container + headless browser) for this task/project.
+3. **Spin-up:** Daemon creates or resumes a background workspace (native PinchTab-driven headless Chrome + Node agent process, not a Docker container — see §0/§2) for this task/project.
 4. **Execute:** Agent performs the real work — browsing, form-filling, shell commands — entirely inside the background workspace, invisible to the user's foreground screen.
 5. **Stream:** Live status renders on the ambient pill (and, if connected, mirrors to a remote channel); full logs are available in the expanded view.
 6. **Checkpoint:** Progress is checkpointed continuously so long tasks can pause/resume across restarts.
@@ -114,16 +114,18 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 
 ```text
 /daimon
-├── src-tauri/          # Rust backend: IPC handlers, workspace/container manager, gateway supervisor
+├── src-tauri/          # Rust backend: IPC handlers, workspace/process manager, gateway supervisor
+│                        #   src-tauri/binaries/, src-tauri/resources/ — gitignored bundled sidecars
+│                        #   (pinchtab, node, pinned Chromium, compiled+pruned agents/) — see scripts/fetch-sidecars.sh
 ├── src/                # React frontend: ambient pill UI + expanded pipeline view
 ├── agents/             # LangGraph definitions, tool schemas, skill library
+├── scripts/             # fetch-sidecars.sh — fetches/checksum-verifies the bundled sidecars above; run before `tauri build`
 ├── memory/             # Persistent memory & skills store
 ├── vault/               # Daimon-native notes vault (fallback when no Obsidian vault path is configured) — Phase 9, built
-├── automations/         # Pending agent-created automation requests (bind-mounted, gitignored) — Phase 10, built
+├── automations/         # Pending agent-created automation requests (gitignored, passed to the agent process via DAIMON_AUTOMATIONS_DIR) — Phase 10, built
 │                        # (automations.json — the real store — lives at the project root, also gitignored)
 ├── gateway/             # Remote channel bridge (Telegram/Slack/etc.)
 ├── cli/                 # Terminal companion sharing the daemon/orchestrator session — Phase 7, not built yet
-├── sandbox/            # Background workspace templates (headless browser + shell)
 ├── website/            # Public landing page (Astro) — separate project, own package.json
 ├── ARCHITECTURE.md     # This file (Source of Truth)
 └── package.json        # Dependencies

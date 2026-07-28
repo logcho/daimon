@@ -70,10 +70,10 @@ cd agents && npm run typecheck
 
 ```text
 /daimon
-├── src-tauri/   # Rust backend: IPC handlers, workspace/container manager
+├── src-tauri/   # Rust backend: IPC handlers, workspace/process manager
 ├── src/         # React frontend: ambient pill UI + expanded pipeline view
 ├── agents/      # LangGraph agent server (runs inside the background workspace)
-├── sandbox/     # Dockerfile for the background workspace image
+├── scripts/     # fetch-sidecars.sh — fetches/checksum-verifies bundled native binaries (pinchtab, node, Chromium)
 ├── memory/      # Local SQLite task/skill memory (gitignored — see ARCHITECTURE.md)
 ├── assets/      # Brand source files (e.g. logo.png, used to regenerate src-tauri/icons)
 ├── website/     # Public landing page (Astro) — self-contained, see website/README.md

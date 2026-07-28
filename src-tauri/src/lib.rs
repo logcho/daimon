@@ -87,6 +87,7 @@ async fn set_window_vibrancy<R: tauri::Runtime>(app: tauri::AppHandle<R>, radius
 pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::App<R> {
     builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             session::start_session,
             session::send_message,
@@ -109,6 +110,8 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             voice::get_voice_model_status,
             voice::download_voice_model,
             voice::toggle_dictation,
+            workspace::get_chromium_status,
+            workspace::download_chromium,
             terminal::start_terminal,
             terminal::write_to_terminal,
             terminal::resize_terminal,
@@ -126,12 +129,6 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Load ANTHROPIC_API_KEY (and any other secrets) from a .env file at the
-    // project root, so configuring them doesn't depend on the exact shell
-    // session that happens to launch the app — a real env var still wins if
-    // one is already set.
-    let _ = dotenvy::from_path(workspace::project_root().join(".env"));
-
     // Registered here (not in `build_app`, see the comment there) so both the
     // real app and `cargo test` runs get exactly one global logger init.
     // Targets default to stdout (visible in a `tauri dev` terminal) plus the
@@ -145,6 +142,34 @@ pub fn run() {
     #[allow(unused_mut)]
     let mut app = build_app(builder);
 
+    // Resolves the real OS app-data directory (via Tauri's own
+    // `app.path()`, only available once the app is built) that every data
+    // directory — memory/vault/automations/pinchtab-profiles/run/.env — now
+    // goes through instead of the dev-only `project_root()`. Must happen
+    // before the `.env` load right below, and before anything else that
+    // might touch a data directory (nothing does yet at this point in
+    // startup — commands only start firing once `app.run()` begins the
+    // event loop further down). Tests never call this and transparently
+    // fall back to `project_root()` — see `workspace::data_dir`'s doc
+    // comment.
+    workspace::init_data_dir(app.handle());
+
+    // Resolves the real OS resource directory a bundled `.app` copies
+    // `tauri.conf.json`'s `bundle.resources` entries into (`Contents/
+    // Resources/` on macOS) — the pinned Chromium build and the compiled+
+    // pruned `agents/` production bundle both live under here once
+    // `scripts/fetch-sidecars.sh` and `tauri build` have run. Same "resolve
+    // once, early" timing as `init_data_dir` right above; see
+    // `workspace::resource_dir`'s doc comment for the dev-checkout fallback
+    // this transparently uses when unset (tests never call this either).
+    workspace::init_resource_dir(app.handle());
+
+    // Load ANTHROPIC_API_KEY (and any other secrets) from a .env file in the
+    // app data directory, so configuring them doesn't depend on the exact
+    // shell session that happens to launch the app — a real env var still
+    // wins if one is already set.
+    let _ = dotenvy::from_path(workspace::data_dir().join(".env"));
+
     // Only meaningful once the log plugin above has finished its setup (it
     // runs synchronously inside `build_app`'s `.build()` call), so logged
     // rather than printed straight to stdout, and after `build_app` rather
@@ -153,6 +178,16 @@ pub fn run() {
         "ANTHROPIC_API_KEY present: {}",
         std::env::var("ANTHROPIC_API_KEY").is_ok()
     );
+
+    // A crash or force-quit skips the `RunEvent::Exit` sweep below entirely,
+    // so any session's workspace processes it left running stay up
+    // indefinitely — invisible to this new process's (freshly empty)
+    // `SESSIONS` cache, and therefore never torn down by anything else.
+    // Swept once here, before the UI becomes interactive but without
+    // blocking it (spawned, not awaited) — see
+    // `reconcile_orphaned_sessions`'s doc comment for why "any PID file
+    // found" is unambiguous at this specific point.
+    tauri::async_runtime::spawn(workspace::reconcile_orphaned_sessions());
 
     setup_tray(app.handle()).expect("failed to set up the tray icon");
 
@@ -192,13 +227,14 @@ pub fn run() {
 
     // Sessions no longer tear down automatically after every message (Phase
     // 8) — only an explicit `end_session` or the app quitting removes a
-    // session's container. So on exit, sweep every session this process
-    // still believes is open, rather than leaving orphaned
-    // `daimon-workspace-*` containers running indefinitely after quit.
-    // `teardown_workspace`/`end_session_workspace` are async and the process
-    // is about to die, so this blocks on a background runtime with a bounded
-    // wait — best-effort, not a hang: if Docker is slow to respond, the app
-    // still exits and just logs a warning rather than waiting forever.
+    // session's workspace processes. So on exit, sweep every session this
+    // process still believes is open, rather than leaving orphaned
+    // PinchTab/Node process trees running indefinitely after quit.
+    // `end_session_workspace` is async and the process is about to die, so
+    // this blocks on a background runtime with a bounded wait —
+    // best-effort, not a hang: if a workspace's `pinchtab server stop` is
+    // slow to respond, the app still exits and just logs a warning rather
+    // than waiting forever.
     app.run(|_app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             let sweep = tauri::async_runtime::spawn(async {

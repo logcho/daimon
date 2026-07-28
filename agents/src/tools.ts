@@ -118,39 +118,56 @@ export function buildDaimonTools(emit: (event: TaskEvent) => void) {
       },
     ),
     tool(
-      async ({ selector, text }: { selector: string; text: string }) => {
-        const warning = checkRepeat("fill_field", { selector, text });
+      async ({ ref, text }: { ref: string; text: string }) => {
+        // Scoped by `lastReadSignature` (the page a ref was read from), not
+        // just (ref, text) — PinchTab's refs (e0, e1, ...) are renumbered
+        // per snapshot, so clicking/filling ref "e5" on two different pages
+        // is a legitimately different action even though the ref string
+        // repeats, and must not be flagged as a no-op repeat.
+        const warning = checkRepeat("fill_field", { ref, text, page: lastReadSignature });
         if (warning) return warning;
-        await browser.fill(selector, text);
-        return `Filled "${selector}" with the given text.`;
+        await browser.fill(ref, text);
+        return `Filled element "${ref}" with the given text.`;
       },
       {
         name: "fill_field",
-        description: "Fill a form field matched by a CSS selector with the given text.",
+        description:
+          "Fill a form field with the given text. `ref` is an element reference from read_page's " +
+          "interactive elements listing (e.g. 'e3'), not a CSS selector — call read_page first if " +
+          "you don't already have a current one. Refs go stale after any navigation, click, or " +
+          "fill, so call read_page again before reusing one.",
         schema: z.object({
-          selector: z.string().describe("CSS selector for the input/textarea"),
+          ref: z.string().describe("Element ref from read_page's interactive elements listing, e.g. 'e3'"),
           text: z.string().describe("The text to type into the field"),
         }),
       },
     ),
     tool(
-      async ({ selector }: { selector: string }) => {
-        const warning = checkRepeat("click", { selector });
+      async ({ ref }: { ref: string }) => {
+        // See the comment on fill_field above for why `lastReadSignature` is
+        // part of this key.
+        const warning = checkRepeat("click", { ref, page: lastReadSignature });
         if (warning) return warning;
-        await browser.click(selector);
-        return `Clicked "${selector}".`;
+        await browser.click(ref);
+        return `Clicked element "${ref}".`;
       },
       {
         name: "click",
-        description: "Click an element (button, link, checkbox, ...) matched by a CSS selector.",
-        schema: z.object({ selector: z.string().describe("CSS selector for the element to click") }),
+        description:
+          "Click an element (button, link, checkbox, ...). `ref` is an element reference from " +
+          "read_page's interactive elements listing (e.g. 'e5'), not a CSS selector — call " +
+          "read_page first if you don't already have a current one. Refs go stale after any " +
+          "navigation, click, or fill, so call read_page again before reusing one.",
+        schema: z.object({
+          ref: z.string().describe("Element ref from read_page's interactive elements listing, e.g. 'e5'"),
+        }),
       },
     ),
     tool(
       async () => {
         const budgetHit = checkResearchBudget("read_page");
         if (budgetHit) return budgetHit;
-        const [text, url] = await Promise.all([browser.getPageText(), browser.currentUrl()]);
+        const { url, text, elements } = await browser.readPage();
         const signature = `${url}::${text}`;
         if (signature === lastReadSignature) {
           return (
@@ -162,11 +179,16 @@ export function buildDaimonTools(emit: (event: TaskEvent) => void) {
           );
         }
         lastReadSignature = signature;
-        return text;
+        if (elements.length === 0) return text;
+        const elementLines = elements.map((el) => `${el.ref}: ${el.role} "${el.label}"`).join("\n");
+        return `${text}\n\nInteractive elements:\n${elementLines}`;
       },
       {
         name: "read_page",
-        description: "Read the visible text content of the current page, to decide what to do next.",
+        description:
+          "Read the visible text content of the current page, along with a list of its " +
+          "interactive elements (ref, role, label) to decide what to do next. Use the ref shown " +
+          "here — not a CSS selector — with click/fill_field.",
         schema: z.object({}),
       },
     ),
