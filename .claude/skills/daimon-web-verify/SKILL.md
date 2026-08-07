@@ -14,7 +14,11 @@ npm run build          # tsc + vite build, from repo root
 cd src-tauri && cargo check
 ```
 
-If the change touches IPC commands, window config, or the workspace/agent pipeline, that's `cargo test` territory (there's a real integration test in `src-tauri/src/task.rs` that drives `start_task` through Tauri's test harness against the live Docker workspace) — run it if the change is anywhere near that surface, not just `cargo check`.
+If the change touches IPC commands, window config, or the workspace/agent pipeline, that's `cargo test` territory — run it if the change is anywhere near that surface, not just `cargo check`. The real integration tests live in `src-tauri/src/session.rs` and drive `start_session`/`send_message`/`end_session` through Tauri's test harness against a live workspace (PinchTab + the Node agent process).
+
+Those session/automation tests need `pinchtab` resolvable on `PATH`, which a plain dev checkout doesn't have — the sidecar in `src-tauri/binaries/` is only found by a bundled `.app`. Expect 4 failures with ``failed to run `pinchtab config init` `` on a machine without it; that's environmental, not a regression. Every `*_clears_the_acl` test does run, and those are the ones that catch a command registered in `lib.rs` but missing from `build.rs` or `capabilities/default.json`.
+
+If you changed anything under `agents/`, that's its own project: `cd agents && npm run typecheck && npm test`.
 
 Don't launch `npm run tauri dev` to "check" a UI change unless you actually need to see it render — a clean `npm run build` + `cargo check` already proves it compiles. If you do launch it (e.g. to confirm no runtime panic), background it, give it ~8-10s to compile and start, check the log, then kill it:
 
@@ -24,7 +28,9 @@ sleep 10 && tail -15 /tmp/daimon-dev.log
 pkill -f "target/debug/daimon"; pkill -f "npm run tauri dev"
 ```
 
-Never leave a dev process or a test Docker container running when you're done — `docker rm -f daimon-workspace-default` if you created one purely for verification, not for the user's actual use.
+Check whether port 1420 is already taken before launching — the user may well have their own `tauri dev` running, and killing it to run yours is not your call. `lsof -ti:1420` tells you; if it's occupied, `npm run build` + `cargo check` is enough on its own.
+
+Never leave a dev process or a stray agent server running when you're done (`pkill -f "tsx src/server.ts"` if you started one to exercise `agents/` directly).
 
 ## If you changed anything under `website/`
 

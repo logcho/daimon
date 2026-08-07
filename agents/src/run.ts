@@ -49,9 +49,13 @@ function mapMessage(message: SDKMessage, emit: (event: TaskEvent) => void, state
         } else if (block.type === "tool_use") {
           // Strip the `mcp__daimon__` prefix — the chat shows tool names
           // directly and "mcp__daimon__open_url" is noise to a human.
-          const label = block.name.replace(/^mcp__daimon__/, "");
-          state.toolLabels.set(block.id, { label, tool: block.name });
-          emit({ type: "step", id: block.id, label, status: "running", tool: block.name });
+          // Applied to `tool` as well as `label`, not just `label`: StepLine
+          // renders `step.tool ?? step.label`, so leaving the raw name on
+          // `tool` silently defeats the stripping. Nothing else reads the
+          // field, so there's no canonical-id use to preserve here.
+          const name = block.name.replace(/^mcp__daimon__/, "");
+          state.toolLabels.set(block.id, { label: name, tool: name });
+          emit({ type: "step", id: block.id, label: name, status: "running", tool: name });
         }
       }
       break;
