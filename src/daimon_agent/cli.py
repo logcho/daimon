@@ -1,16 +1,21 @@
 """Interactive/one-shot chat CLI. Events stream to stderr (pretty-printed),
 the final result lands on stdout. One session (thread_id "cli") persists
-across turns in interactive mode."""
+across turns in interactive mode, with a live Jupyter kernel and real tools
+behind it."""
 
 from __future__ import annotations
 
 import asyncio
 import sys
 
+from . import live_frames
+from .browser import aclose_browser, build_browser
 from .config import Settings
 from .graph import build_graph, close_checkpointer, make_sqlite_checkpointer
+from .memory import MemoryStore
 from .model import ModelRouter
 from .run import run_turn
+from .tools import build_tools
 
 SESSION_ID = "cli"
 
@@ -33,12 +38,19 @@ def _print_event(event: dict) -> None:
 async def _amain(argv: list[str]) -> int:
     settings = Settings.from_env()
     router = ModelRouter(settings)
-    # Phase C wires the real tool registry here.
+    memory = MemoryStore(settings.memory_db)
+    tools = build_tools(settings, memory=memory, session_id=SESSION_ID)
     checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
-    graph = build_graph(settings, router, [], checkpointer=checkpointer)
+    graph = build_graph(settings, router, tools, checkpointer=checkpointer)
 
     async def one_turn(instruction: str) -> int:
-        result = await run_turn(instruction, SESSION_ID, settings, _print_event, graph=graph)
+        def frame_task(emit_fn):
+            return live_frames.start(emit_fn, build_browser(settings), settings)
+
+        result = await run_turn(
+            instruction, SESSION_ID, settings, _print_event,
+            graph=graph, memory=memory, live_frames=frame_task,
+        )
         if result is None:
             return 1
         print(result)
@@ -64,6 +76,8 @@ async def _amain(argv: list[str]) -> int:
         # The aiosqlite worker thread is non-daemon; without this close the
         # process hangs at exit.
         await close_checkpointer(checkpointer)
+        await aclose_browser()
+        memory.close()
 
 
 def main() -> int:

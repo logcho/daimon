@@ -25,15 +25,17 @@ class ModelRouter:
 
     def _build(self, model: str, temperature: float) -> ChatDeepSeek:
         s = self._settings
-        return ChatDeepSeek(
-            model=model,
-            api_key=s.api_key,
-            api_base=s.api_base,
-            temperature=temperature,
-            max_tokens=s.max_tokens,
-            max_retries=s.max_retries,
-            timeout=s.request_timeout,
-        )
+        kwargs: dict = {
+            "model": model,
+            "api_key": s.api_key,
+            "temperature": temperature,
+            "max_tokens": s.max_tokens,
+            "max_retries": s.max_retries,
+            "timeout": s.request_timeout,
+        }
+        if s.api_base:  # None fails ChatDeepSeek's pydantic validation
+            kwargs["api_base"] = s.api_base
+        return ChatDeepSeek(**kwargs)
 
     def pro(self) -> ChatDeepSeek:
         if self._pro is None:

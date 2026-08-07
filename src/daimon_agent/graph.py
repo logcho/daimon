@@ -84,10 +84,13 @@ def build_graph(
     AsyncSqliteSaver on settings.checkpoints_db; the caller owns its lifetime
     (one per process)."""
 
-    model = router.pro().bind_tools(tools)
     tool_by_name = {t.name: t for t in tools}
 
     async def agent_node(state: AgentState) -> dict:
+        # Lazy: the model is constructed on the first call, not at graph-build
+        # time, so a keyless process can still boot and serve /health. The
+        # router caches instances; bind_tools per node call is cheap.
+        model = router.pro().bind_tools(tools)
         system_prompt = build_system_prompt(settings)
         messages: list[AnyMessage] = [SystemMessage(content=system_prompt), *state["messages"]]
         response = await model.ainvoke(messages)
