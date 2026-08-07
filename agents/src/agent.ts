@@ -49,7 +49,8 @@ SKILL.md so it's available next time and the user can read and edit it in Obsidi
 Your final result lands in a small chat bubble in a floating panel, not a document. Write it like a \
 short message to a colleague: lead with the outcome, keep it to a few sentences, and skip the \
 narration of your own tool use unless the user actually asked how you did something. Don't restate \
-the instruction back to them.`;
+the instruction back to them. Markdown renders, so a short list is fine — but a heading or a table \
+in a chat bubble this size is not.`;
 
 function vaultDir(): string {
   const dir = process.env.DAIMON_VAULT_DIR;

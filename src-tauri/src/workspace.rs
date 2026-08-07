@@ -613,7 +613,7 @@ fn pinchtab_binary() -> PathBuf {
 ///    run on a machine with Homebrew ffmpeg already on `PATH` still works —
 ///    exactly the situation that let this bug go unnoticed during earlier
 ///    development (see this module's `spawn_pinchtab_server` doc comment).
-fn ffmpeg_binary() -> Option<PathBuf> {
+pub(crate) fn ffmpeg_binary() -> Option<PathBuf> {
     if let Ok(bin) = std::env::var("DAIMON_FFMPEG_BIN") {
         return Some(PathBuf::from(bin));
     }

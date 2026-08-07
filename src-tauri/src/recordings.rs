@@ -135,6 +135,121 @@ pub async fn read_recording_file(name: String) -> Result<String, String> {
     Ok(STANDARD.encode(bytes))
 }
 
+/// A single JPEG frame from a recording, base64-encoded, for the gallery grid.
+///
+/// The frontend used to build these itself: for every file in the list it
+/// called `read_recording_file`, which base64-encodes the *entire* `.webm`
+/// over IPC, then seeked a detached `<video>` to 0.3s and drew it to a
+/// canvas. Opening the tab therefore downloaded every recording in full to
+/// produce a handful of thumbnails — by a wide margin the most expensive
+/// thing the frontend did.
+///
+/// `ffmpeg` is already bundled as a sidecar (for PinchTab's own recording
+/// encode step), so extracting one frame host-side costs a few tens of KB
+/// over IPC instead of the whole video. Results are cached under
+/// `recordings/.thumbs/` — the leading dot keeps them out of `list_recordings`,
+/// which only reports `.webm` files.
+///
+/// Seeks to 0.3s rather than 0 because the first frame of a browser capture is
+/// reliably a blank white or black page, before anything has painted.
+///
+/// `durationSeconds` comes from the same invocation: ffmpeg prints the
+/// container's `Duration:` header on stderr before decoding anything, so the
+/// gallery's duration badge survives without a second process or a bundled
+/// ffprobe. 0.0 when the header can't be parsed — the frontend hides the badge
+/// rather than showing a wrong one.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingThumbnail {
+    /// Base64-encoded JPEG.
+    pub data: String,
+    pub duration_seconds: f64,
+}
+
+/// Parses ffmpeg's `  Duration: 00:01:02.34, start: ...` stderr line.
+fn parse_duration(stderr: &str) -> f64 {
+    for line in stderr.lines() {
+        let Some(rest) = line.trim().strip_prefix("Duration:") else {
+            continue;
+        };
+        let value = rest.split(',').next().unwrap_or("").trim();
+        let mut parts = value.split(':');
+        let (Some(h), Some(m), Some(s)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if let (Ok(h), Ok(m), Ok(s)) = (h.parse::<f64>(), m.parse::<f64>(), s.parse::<f64>()) {
+            return h * 3600.0 + m * 60.0 + s;
+        }
+    }
+    0.0
+}
+
+#[tauri::command]
+pub async fn get_recording_thumbnail(name: String) -> Result<RecordingThumbnail, String> {
+    let safe_name = sanitize_filename(&name)?;
+    let source = recordings_dir().join(&safe_name);
+    if !source.exists() {
+        return Err(format!("no such recording: {safe_name}"));
+    }
+
+    let cache_dir = recordings_dir().join(".thumbs");
+    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("failed to create thumbnail cache: {e}"))?;
+    let cached = cache_dir.join(format!("{safe_name}.jpg"));
+    // Duration is cheap to store alongside the frame and would otherwise cost
+    // a second ffmpeg run on every cache hit.
+    let cached_duration = cache_dir.join(format!("{safe_name}.dur"));
+
+    // Regenerate if the recording has been rewritten since the thumbnail was
+    // made. A recording is normally write-once, but `finish_recording` can
+    // reuse a name, and a stale thumbnail is worse than a slow one.
+    let fresh = match (std::fs::metadata(&cached), std::fs::metadata(&source)) {
+        (Ok(thumb), Ok(video)) => match (thumb.modified(), video.modified()) {
+            (Ok(t), Ok(v)) => t >= v,
+            _ => false,
+        },
+        _ => false,
+    };
+
+    if fresh {
+        if let Ok(bytes) = std::fs::read(&cached) {
+            let duration_seconds = std::fs::read_to_string(&cached_duration)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0.0);
+            return Ok(RecordingThumbnail { data: STANDARD.encode(bytes), duration_seconds });
+        }
+    }
+
+    let ffmpeg = workspace::ffmpeg_binary()
+        .ok_or_else(|| "ffmpeg sidecar not found — run scripts/fetch-sidecars.sh".to_string())?;
+
+    let output = tokio::process::Command::new(&ffmpeg)
+        .args(["-y", "-ss", "0.3", "-i"])
+        .arg(&source)
+        // -frames:v 1 stops after one frame; scale caps width at 480 and
+        // derives the height (-2 keeps the aspect ratio and an even number of
+        // lines, which the JPEG encoder requires).
+        .args(["-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "5"])
+        .arg(&cached)
+        .output()
+        .await
+        .map_err(|e| format!("failed to run ffmpeg: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        // ffmpeg is extremely verbose on stderr even when it succeeds, so only
+        // the tail is worth surfacing.
+        let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+        return Err(format!("ffmpeg could not extract a frame from \"{safe_name}\": {tail}"));
+    }
+
+    let duration_seconds = parse_duration(&stderr);
+    let _ = std::fs::write(&cached_duration, duration_seconds.to_string());
+
+    let bytes = std::fs::read(&cached).map_err(|e| format!("failed to read generated thumbnail: {e}"))?;
+    Ok(RecordingThumbnail { data: STANDARD.encode(bytes), duration_seconds })
+}
+
 #[cfg(test)]
 mod tests {
     use tauri::ipc::CallbackFn;

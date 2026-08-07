@@ -41,6 +41,14 @@ export interface VaultFile {
   modifiedAt: string;
 }
 
+// `data` is a base64-encoded JPEG; `durationSeconds` is 0 when ffmpeg
+// couldn't report one, in which case the gallery hides the duration badge
+// rather than showing "0:00".
+export interface RecordingThumbnail {
+  data: string;
+  durationSeconds: number;
+}
+
 export interface RecordingFile {
   name: string;
   sizeBytes: number;
@@ -77,21 +85,6 @@ export interface ReminderFiredEvent {
   name: string;
   status: "done" | "error";
   result: string | null;
-}
-
-// A reusable procedure the agent decided to remember on its own
-// (save_skill), or one the user authored directly (SkillsPanel.tsx) — both
-// go through the same list/create/delete commands and the same retrieval
-// path, so nothing distinguishes the two once saved. See
-// `src-tauri/src/skills.rs`'s module doc comment for the underlying
-// storage.
-export interface Skill {
-  id: string;
-  name: string;
-  description: string;
-  // Milliseconds since epoch, not an ISO string — matches how
-  // `agents/src/memory.ts` originally wrote this column.
-  createdAt: number;
 }
 
 export interface VoiceModelStatus {
@@ -141,4 +134,4 @@ export interface PendingInput {
 // Without this, collapsing while on e.g. the terminal tab and re-expanding
 // would always land back on "chat" instead of wherever the user actually
 // left off.
-export type View = "chat" | "vault" | "automations" | "skills" | "terminal" | "screen" | "settings";
+export type View = "chat" | "vault" | "scheduled" | "terminal" | "screen" | "settings";

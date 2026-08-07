@@ -100,18 +100,14 @@ export function searchTasks(query: string, limit = 5): TaskMemory[] {
   }));
 }
 
-export function saveSkill(name: string, description: string): void {
-  const id = randomUUID();
-  const createdAt = Date.now();
-  db.prepare("INSERT INTO skills (id, name, description, created_at) VALUES (?, ?, ?, ?)").run(
-    id,
-    name,
-    description,
-    createdAt,
-  );
-  db.prepare("INSERT INTO skills_fts (id, name, description) VALUES (?, ?, ?)").run(id, name, description);
-}
-
+// No writer any more: skills used to be a name+description row written by a
+// `save_skill` tool and edited through a SkillsPanel tab, both of which are
+// gone — a skill is now a real `skills/<name>/SKILL.md` in the vault, which
+// the agent writes with the built-in Write tool and the user can read and
+// edit in Obsidian. The read path below stays because the `skills` table
+// still holds everything saved under the old scheme, and `recall` should keep
+// surfacing it rather than pretending that history never happened. Nothing
+// new lands here, so the table only shrinks from now on.
 export function searchSkills(query: string, limit = 5): SkillMemory[] {
   const matches = db
     .prepare("SELECT id FROM skills_fts WHERE skills_fts MATCH ? ORDER BY rank LIMIT ?")

@@ -5,8 +5,8 @@ import type {
   ConnectedAccount,
   DictationEvent,
   RecordingFile,
+  RecordingThumbnail,
   ReminderFiredEvent,
-  Skill,
   StepStatus,
   VaultFile,
   VaultPathStatus,
@@ -139,6 +139,14 @@ export function readRecordingFile(name: string): Promise<string> {
   return invoke<string>("read_recording_file", { name });
 }
 
+// One representative JPEG frame plus the clip's duration, extracted host-side
+// by the bundled ffmpeg and cached on disk. Previously the frontend produced
+// these itself by downloading each recording in full over IPC and drawing a
+// seeked <video> to a canvas — see `get_recording_thumbnail` in recordings.rs.
+export function getRecordingThumbnail(name: string): Promise<RecordingThumbnail> {
+  return invoke<RecordingThumbnail>("get_recording_thumbnail", { name });
+}
+
 export function listAutomations(): Promise<Automation[]> {
   return invoke<Automation[]>("list_automations");
 }
@@ -167,18 +175,6 @@ export function setAutomationEnabled(id: string, enabled: boolean): Promise<void
 
 export function deleteAutomation(id: string): Promise<void> {
   return invoke<void>("delete_automation", { id });
-}
-
-export function listSkills(): Promise<Skill[]> {
-  return invoke<Skill[]>("list_skills");
-}
-
-export function createSkill(name: string, description: string): Promise<Skill> {
-  return invoke<Skill>("create_skill", { name, description });
-}
-
-export function deleteSkill(id: string): Promise<void> {
-  return invoke<void>("delete_skill", { id });
 }
 
 export function getVoiceModelStatus(): Promise<VoiceModelStatus> {

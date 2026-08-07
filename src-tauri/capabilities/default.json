@@ -39,9 +39,6 @@
     "allow-connect-spotify-account",
     "allow-get-spotify-account",
     "allow-disconnect-spotify-account",
-    "allow-list-skills",
-    "allow-create-skill",
-    "allow-delete-skill",
     "allow-get-vault-path-status",
     "allow-set-vault-path",
     "allow-list-vault-files",
@@ -66,6 +63,7 @@
     "allow-get-claude-cli-status",
     "allow-list-recordings",
     "allow-read-recording-file",
+    "allow-get-recording-thumbnail",
     "allow-get-accessibility-trust-status",
     "allow-activate-and-focus-window",
     "allow-set-window-vibrancy"

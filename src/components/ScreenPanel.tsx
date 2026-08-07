@@ -1,9 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { listRecordings, readRecordingFile } from "../lib/api";
-import type { RecordingFile } from "../types";
-
-type ListState = "loading" | "ready" | "error";
-type DetailState = "idle" | "loading" | "ready" | "error";
+import { getRecordingThumbnail, listRecordings, readRecordingFile } from "../lib/api";
+import type { RecordingFile, RecordingThumbnail } from "../types";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -17,86 +14,21 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
-function formatModifiedAt(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString();
-}
-
 // A short, human-friendly title in place of the raw `page@<hash>.webm`
-// filename — reads like a real video title rather than an opaque hash. The
-// real filename is still used for every actual file operation and shown as
-// a tooltip (`title` attribute) on the card.
+// filename. The real filename is still used for every file operation and
+// shown as a tooltip on the card.
 function titleFromModifiedAt(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "Recording";
-  return `Recording — ${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+  const day = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const time = date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return `Recording — ${day}, ${time}`;
 }
 
 function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
   const total = Math.round(seconds);
-  const mins = Math.floor(total / 60);
-  const secs = total % 60;
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
-}
-
-interface ThumbnailInfo {
-  dataUrl: string;
-  durationSeconds: number;
-}
-
-// Extracts one representative frame (skipping a hair past the very start,
-// which is often black/blank right as a recording begins) as a JPEG data
-// URL, plus the video's duration — both read off a single hidden <video>
-// element that's never attached to the DOM. There's no server-side/ffmpeg
-// thumbnail step in this app, so this is the only way to get a real frame
-// without shipping a new native dependency; cheap enough for the short
-// task-demonstration clips this feature is meant for.
-function extractThumbnail(videoDataUri: string): Promise<ThumbnailInfo> {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    video.preload = "auto";
-    video.src = videoDataUri;
-
-    function cleanup() {
-      video.removeEventListener("loadedmetadata", onLoadedMetadata);
-      video.removeEventListener("seeked", onSeeked);
-      video.removeEventListener("error", onError);
-      video.src = "";
-    }
-
-    function onError() {
-      cleanup();
-      reject(new Error("failed to load video for thumbnail extraction"));
-    }
-
-    function onLoadedMetadata() {
-      video.currentTime = Math.min(0.3, Math.max(0, video.duration - 0.05));
-    }
-
-    function onSeeked() {
-      const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth || 320;
-      canvas.height = video.videoHeight || 180;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        cleanup();
-        reject(new Error("canvas 2d context unavailable"));
-        return;
-      }
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const info: ThumbnailInfo = { dataUrl: canvas.toDataURL("image/jpeg", 0.75), durationSeconds: video.duration };
-      cleanup();
-      resolve(info);
-    }
-
-    video.addEventListener("loadedmetadata", onLoadedMetadata);
-    video.addEventListener("seeked", onSeeked);
-    video.addEventListener("error", onError);
-  });
+  return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, "0")}`;
 }
 
 function PlayIcon() {
@@ -108,85 +40,96 @@ function PlayIcon() {
 }
 
 // One tile in the live-view grid — one per currently-live session, not just
-// the active one, so multiple concurrent sessions doing different things
-// can all be watched at once (see PipelinePanel.tsx, which computes this
-// list across the full `sessions` array rather than just `activeSession`).
+// the active one, so multiple concurrent sessions can all be watched at once
+// (PipelinePanel computes this across the full `sessions` array).
 export interface LiveScreen {
   sessionId: string;
   label: string;
   liveFrame: string;
 }
 
-export function ScreenPanel({
-  screens,
-  recordingsRefreshSignal,
-}: {
-  screens: LiveScreen[];
-  // Changes whenever any turn, in any session, finishes — see
-  // PipelinePanel.tsx. A recording is only ever written to disk once
-  // `finish_recording` (part of a turn) completes, so this is a reasonable
-  // proxy for "the recordings list may be stale" without needing a
-  // dedicated "a recording was saved" event. Included in the fetch effect's
-  // dependency array below so the list refreshes even if the user never
-  // leaves this tab (e.g. they were already watching live view when the
-  // recording finished) — previously it only ever refetched on mount,
-  // which relied on a full unmount/remount from switching tabs away and
-  // back, so a recording saved while already sitting on this tab could
-  // silently never appear.
-  recordingsRefreshSignal: number;
-}) {
-  const [listState, setListState] = useState<ListState>("loading");
+function LiveScreens({ screens }: { screens: LiveScreen[] }) {
+  if (screens.length === 0) return null;
+
+  return (
+    <div className="mb-5">
+      <div className="mb-2 flex items-center gap-1.5">
+        <span className="h-1.5 w-1.5 shrink-0 animate-daimon-pulse rounded-full bg-red-400" />
+        <span className="text-xs font-medium text-red-400">
+          {screens.length === 1
+            ? "live — watching the background browser"
+            : `live — ${screens.length} sessions running`}
+        </span>
+      </div>
+      <div className={screens.length === 1 ? "" : "grid grid-cols-2 gap-3"}>
+        {screens.map((screen) => (
+          <div key={screen.sessionId}>
+            <img
+              src={`data:image/png;base64,${screen.liveFrame}`}
+              alt={`Live view of ${screen.label || "a background browser session"}`}
+              className="w-full rounded-xl border border-white/10 bg-black/40"
+            />
+            {screens.length > 1 && (
+              <p className="mt-1 truncate text-xs text-neutral-400" title={screen.label}>
+                {screen.label || "untitled session"}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RecordingsGallery({ refreshSignal }: { refreshSignal: number }) {
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [files, setFiles] = useState<RecordingFile[]>([]);
-  const [listErrorMessage, setListErrorMessage] = useState("");
-  const [thumbnails, setThumbnails] = useState<Record<string, ThumbnailInfo>>({});
-  // Tracks which files have already had a thumbnail extraction *started*
-  // (not just completed) — a plain ref, not state, so re-renders triggered
-  // by one file's thumbnail arriving don't cause this effect to re-fire and
-  // kick off duplicate fetches for every other file still in flight.
-  const startedThumbnailsRef = useRef<Set<string>>(new Set());
+  const [error, setError] = useState("");
+  const [thumbnails, setThumbnails] = useState<Record<string, RecordingThumbnail>>({});
+  // Which files have had a thumbnail request *started* (not just finished) —
+  // a ref, not state, so one thumbnail arriving doesn't re-fire the effect and
+  // duplicate requests for everything still in flight.
+  const started = useRef<Set<string>>(new Set());
 
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [detailState, setDetailState] = useState<DetailState>("idle");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [detail, setDetail] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [videoDataUri, setVideoDataUri] = useState<string | null>(null);
-  const [detailErrorMessage, setDetailErrorMessage] = useState("");
+  const [detailError, setDetailError] = useState("");
 
-  // Refetches on mount (same "remounts each time the screen tab becomes
-  // active" pattern as VaultPanel/AutomationsPanel, since PipelinePanel only
-  // renders this component while `view === "screen"`) *and* whenever
-  // `recordingsRefreshSignal` changes — see its doc comment above for why
-  // mount-only wasn't enough on its own.
+  // Refetches on mount (this component only exists while the screen tab is
+  // active) and whenever a turn completes — a recording is only written once
+  // `finish_recording` runs, and there's no dedicated "recording saved" event,
+  // so without the signal a recording saved while sitting on this tab would
+  // never appear.
   useEffect(() => {
     listRecordings()
       .then((f) => {
         setFiles(f);
-        setListState("ready");
+        setState("ready");
       })
       .catch((err) => {
-        setListErrorMessage(err instanceof Error ? err.message : String(err));
-        setListState("error");
+        setError(err instanceof Error ? err.message : String(err));
+        setState("error");
       });
-  }, [recordingsRefreshSignal]);
+  }, [refreshSignal]);
 
-  // Lazily generates a thumbnail (+ duration) for every listed recording
-  // that hasn't had one started yet. Each one requires fetching that file's
-  // full bytes over IPC — there's no cheaper way to get a real frame — so
-  // this is deliberately fire-and-forget per file rather than blocking the
-  // list on all of them.
+  // One cheap IPC call per file. This used to download every recording in
+  // full — `readRecordingFile` base64-encodes the whole `.webm` — purely to
+  // seek a detached <video> and draw one frame to a canvas. ffmpeg now does it
+  // host-side and caches the result, so opening this tab costs a few tens of
+  // KB instead of every video the user has ever recorded.
   useEffect(() => {
     let cancelled = false;
     for (const file of files) {
-      if (startedThumbnailsRef.current.has(file.name)) continue;
-      startedThumbnailsRef.current.add(file.name);
-      readRecordingFile(file.name)
-        .then((base64) => extractThumbnail(`data:video/webm;base64,${base64}`))
-        .then((info) => {
-          if (cancelled) return;
-          setThumbnails((prev) => ({ ...prev, [file.name]: info }));
+      if (started.current.has(file.name)) continue;
+      started.current.add(file.name);
+      getRecordingThumbnail(file.name)
+        .then((thumb) => {
+          if (!cancelled) setThumbnails((prev) => ({ ...prev, [file.name]: thumb }));
         })
         .catch(() => {
-          // Best-effort — a file that fails to produce a thumbnail (e.g. a
-          // corrupt/incomplete recording) just keeps its placeholder rather
-          // than blocking the rest of the grid.
+          // Best-effort: a corrupt or still-being-written recording keeps its
+          // placeholder rather than blocking the rest of the grid.
         });
     }
     return () => {
@@ -194,48 +137,44 @@ export function ScreenPanel({
     };
   }, [files]);
 
-  function handleOpenFile(name: string) {
-    setSelectedFile(name);
-    setDetailState("loading");
+  function open(name: string) {
+    setSelected(name);
+    setDetail("loading");
     readRecordingFile(name)
       .then((base64) => {
         // A plain data: URI, not a Blob/object URL — WKWebView (what Tauri
         // uses on macOS) has documented, longstanding bugs specifically with
-        // `blob:` URLs in <video> elements; a data URI sidesteps that bug
-        // class entirely, and costs nothing extra here since the base64
-        // payload is already in hand from the IPC call.
+        // `blob:` URLs in <video> elements.
         setVideoDataUri(`data:video/webm;base64,${base64}`);
-        setDetailState("ready");
+        setDetail("ready");
       })
       .catch((err) => {
-        setDetailErrorMessage(err instanceof Error ? err.message : String(err));
-        setDetailState("error");
+        setDetailError(err instanceof Error ? err.message : String(err));
+        setDetail("error");
       });
   }
 
-  function handleBack() {
-    setSelectedFile(null);
-    setDetailState("idle");
-    setVideoDataUri(null);
-    setDetailErrorMessage("");
-  }
-
-  if (selectedFile) {
+  if (selected) {
     return (
-      <div className="themed-scroll flex-1 overflow-y-auto p-4">
+      <>
         <button
           type="button"
-          onClick={handleBack}
+          onClick={() => {
+            setSelected(null);
+            setDetail("idle");
+            setVideoDataUri(null);
+            setDetailError("");
+          }}
           className="text-xs text-neutral-500 transition hover:text-neutral-200"
         >
           ← back to recordings
         </button>
         <h3 className="mt-3 text-sm font-semibold tracking-tight text-neutral-100">
-          {titleFromModifiedAt(files.find((f) => f.name === selectedFile)?.modifiedAt ?? "")}
+          {titleFromModifiedAt(files.find((f) => f.name === selected)?.modifiedAt ?? "")}
         </h3>
-        {detailState === "loading" && <p className="mt-3 text-xs text-neutral-500">loading…</p>}
-        {detailState === "error" && <p className="mt-3 text-xs text-red-400">{detailErrorMessage}</p>}
-        {detailState === "ready" && videoDataUri && (
+        {detail === "loading" && <p className="mt-3 text-xs text-neutral-500">loading…</p>}
+        {detail === "error" && <p className="mt-3 text-xs text-red-400">{detailError}</p>}
+        {detail === "ready" && videoDataUri && (
           <video
             controls
             autoPlay
@@ -243,76 +182,38 @@ export function ScreenPanel({
             className="mt-3 w-full rounded-xl border border-white/10 bg-black/40"
           />
         )}
-      </div>
+      </>
     );
   }
 
   return (
-    <div className="themed-scroll flex-1 overflow-y-auto p-4">
-      {screens.length === 1 && (
-        <div className="mb-5">
-          <div className="mb-2 flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 shrink-0 animate-daimon-pulse rounded-full bg-red-400" />
-            <span className="text-xs font-medium text-red-400">live — watching the background browser</span>
-          </div>
-          <img
-            src={`data:image/png;base64,${screens[0].liveFrame}`}
-            alt="Live view of the background browser"
-            className="w-full rounded-xl border border-white/10 bg-black/40"
-          />
-        </div>
-      )}
-
-      {screens.length > 1 && (
-        <div className="mb-5">
-          <div className="mb-2 flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 shrink-0 animate-daimon-pulse rounded-full bg-red-400" />
-            <span className="text-xs font-medium text-red-400">
-              live — {screens.length} sessions running
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            {screens.map((screen) => (
-              <div key={screen.sessionId}>
-                <img
-                  src={`data:image/png;base64,${screen.liveFrame}`}
-                  alt={`Live view of ${screen.label || "a background browser session"}`}
-                  className="w-full rounded-xl border border-white/10 bg-black/40"
-                />
-                <p className="mt-1 truncate text-xs text-neutral-400" title={screen.label}>
-                  {screen.label || "untitled session"}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
+    <>
       <h3 className="text-sm font-semibold tracking-tight text-neutral-100">recordings</h3>
 
-      {listState === "loading" && <p className="mt-3 text-xs text-neutral-500">loading…</p>}
-      {listState === "error" && <p className="mt-3 text-xs text-red-400">{listErrorMessage}</p>}
-      {listState === "ready" && files.length === 0 && (
-        <p className="mt-3 text-xs text-neutral-500">
-          ○ no recordings yet — ask daimon to record what it's doing (e.g. "go to X and show me
-          what you did"), or watch live above while a task is running.
+      {state === "loading" && <p className="mt-3 text-xs text-neutral-500">loading…</p>}
+      {state === "error" && <p className="mt-3 text-xs text-red-400">{error}</p>}
+      {state === "ready" && files.length === 0 && (
+        <p className="mt-3 text-xs leading-relaxed text-neutral-500">
+          ○ no recordings yet — ask daimon to record what it's doing (e.g. "go to X and show me what
+          you did"), or watch live above while a task is running.
         </p>
       )}
-      {listState === "ready" && files.length > 0 && (
+      {state === "ready" && files.length > 0 && (
         <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-4">
           {files.map((file) => {
             const thumb = thumbnails[file.name];
+            const duration = thumb ? formatDuration(thumb.durationSeconds) : "";
             return (
               <button
                 key={file.name}
                 type="button"
-                onClick={() => handleOpenFile(file.name)}
+                onClick={() => open(file.name)}
                 title={file.name}
                 className="group text-left"
               >
                 <div className="relative aspect-video overflow-hidden rounded-xl border border-white/10 bg-black/40">
                   {thumb ? (
-                    <img src={thumb.dataUrl} alt="" className="h-full w-full object-cover" />
+                    <img src={`data:image/jpeg;base64,${thumb.data}`} alt="" className="h-full w-full object-cover" />
                   ) : (
                     <div className="h-full w-full animate-pulse bg-white/[0.04]" />
                   )}
@@ -321,9 +222,9 @@ export function ScreenPanel({
                       <PlayIcon />
                     </div>
                   </div>
-                  {thumb && thumb.durationSeconds > 0 && (
+                  {duration && (
                     <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 py-0.5 text-[10px] font-medium text-white">
-                      {formatDuration(thumb.durationSeconds)}
+                      {duration}
                     </span>
                   )}
                 </div>
@@ -331,13 +232,28 @@ export function ScreenPanel({
                   {titleFromModifiedAt(file.modifiedAt)}
                 </p>
                 <p className="text-xs text-neutral-500">
-                  {formatBytes(file.sizeBytes)} · {formatModifiedAt(file.modifiedAt)}
+                  {formatBytes(file.sizeBytes)} · {new Date(file.modifiedAt).toLocaleString()}
                 </p>
               </button>
             );
           })}
         </div>
       )}
+    </>
+  );
+}
+
+export function ScreenPanel({
+  screens,
+  recordingsRefreshSignal,
+}: {
+  screens: LiveScreen[];
+  recordingsRefreshSignal: number;
+}) {
+  return (
+    <div className="themed-scroll flex-1 overflow-y-auto p-4">
+      <LiveScreens screens={screens} />
+      <RecordingsGallery refreshSignal={recordingsRefreshSignal} />
     </div>
   );
 }

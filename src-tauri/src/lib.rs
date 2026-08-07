@@ -4,7 +4,6 @@ mod oauth;
 mod recordings;
 mod session;
 mod settings;
-mod skills;
 mod spotify_oauth;
 mod terminal;
 mod vault;
@@ -108,9 +107,6 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             spotify_oauth::connect_spotify_account,
             spotify_oauth::get_spotify_account,
             spotify_oauth::disconnect_spotify_account,
-            skills::list_skills,
-            skills::create_skill,
-            skills::delete_skill,
             vault::get_vault_path_status,
             vault::set_vault_path,
             vault::list_vault_files,
@@ -135,6 +131,7 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             terminal::get_claude_cli_status,
             recordings::list_recordings,
             recordings::read_recording_file,
+            recordings::get_recording_thumbnail,
             get_accessibility_trust_status,
             activate_and_focus_window,
             set_window_vibrancy
