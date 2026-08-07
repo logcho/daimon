@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { runTurn } from "./run.js";
+import { prepareWorkspace } from "./agent.js";
 import type { TaskEvent } from "./events.js";
 import { indexNote } from "./memory.js";
 import { listNotes, readNote } from "./vault.js";
@@ -27,6 +28,9 @@ async function indexExistingVaultNotes(): Promise<void> {
 }
 
 await indexExistingVaultNotes();
+// Makes `<vault>/skills` discoverable by the harness as project skills (via a
+// `.claude/skills` symlink onto it) — see agent.ts. Best-effort, never throws.
+await prepareWorkspace();
 
 const server = createServer((req, res) => {
   // Every request lands in `docker logs <container>` (this only goes to
