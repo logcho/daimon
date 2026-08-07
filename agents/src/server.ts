@@ -33,9 +33,9 @@ await indexExistingVaultNotes();
 await prepareWorkspace();
 
 const server = createServer((req, res) => {
-  // Every request lands in `docker logs <container>` (this only goes to
+  // Every request lands in this session's node log (this only goes to
   // stdout/stderr — there's no other durable record of what a still-running
-  // workspace container has seen), so it's the first thing worth checking
+  // workspace has seen), so it's the first thing worth checking
   // during a live stall, before the daemon's own stall timeout even fires.
   console.error(`[daimon-agent] ${req.method} ${req.url}`);
 

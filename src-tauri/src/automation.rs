@@ -37,6 +37,7 @@ use tokio::sync::Mutex;
 
 use crate::session;
 use crate::workspace;
+use crate::timefmt::now_rfc3339;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -112,10 +113,6 @@ fn save_automations(automations: &[Automation]) {
         }
         Err(e) => log::error!("failed to serialize automations: {e}"),
     }
-}
-
-fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339()
 }
 
 /// Standard 5-field cron (minute hour day-of-month month day-of-week) needs

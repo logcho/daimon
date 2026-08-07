@@ -439,11 +439,11 @@ mod tests {
     }
 
     /// Exercises the real `start_session`/`end_session` commands end to end
-    /// against the live background workspace (Docker container + agent
-    /// server), through Tauri's own IPC test harness rather than a
-    /// reimplementation. Phase 8's whole point is that a session's container
-    /// is *not* torn down the moment a turn completes — so this asserts the
-    /// container is still running right after `done`, and only goes away
+    /// against the live background workspace (the session's PinchTab and Node
+    /// agent processes), through Tauri's own IPC test harness rather than a
+    /// reimplementation. Phase 8's whole point is that a session's workspace
+    /// is *not* torn down the moment a turn completes — so this asserts those
+    /// processes are still running right after `done`, and only go away
     /// once `end_session` is called.
     #[tokio::test(flavor = "multi_thread")]
     async fn start_session_streams_events_and_stays_up_until_ended() {

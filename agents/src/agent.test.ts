@@ -15,8 +15,13 @@ const VAULT = "/tmp/daimon-test-vault";
 const gate = buildCanUseTool(VAULT);
 const noop = { signal: new AbortController().signal };
 
+// `CanUseTool` may return null, meaning "the consumer already sent the
+// control_response out of band". This gate never does that — it always
+// decides — so a null here is a bug in the gate, not a case to handle.
 async function decide(tool: string, input: Record<string, unknown>) {
-  return gate(tool, input, noop as Parameters<typeof gate>[2]);
+  const result = await gate(tool, input, noop as Parameters<typeof gate>[2]);
+  assert.ok(result, `${tool} returned null instead of an allow/deny decision`);
+  return result;
 }
 
 test("allows a write inside the vault", async () => {

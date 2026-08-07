@@ -35,8 +35,6 @@ fn main() {
             "get_voice_model_status",
             "download_voice_model",
             "toggle_dictation",
-            "get_chromium_status",
-            "download_chromium",
             "login_browser_profile",
             "finish_browser_login",
             "get_browser_login_status",

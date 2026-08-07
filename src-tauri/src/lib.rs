@@ -6,6 +6,7 @@ mod session;
 mod settings;
 mod spotify_oauth;
 mod terminal;
+mod timefmt;
 mod vault;
 mod vibrancy;
 mod voice;
@@ -88,7 +89,6 @@ async fn set_window_vibrancy<R: tauri::Runtime>(app: tauri::AppHandle<R>, radius
 pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::App<R> {
     builder
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             session::start_session,
             session::send_message,
@@ -119,8 +119,6 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             voice::get_voice_model_status,
             voice::download_voice_model,
             voice::toggle_dictation,
-            workspace::get_chromium_status,
-            workspace::download_chromium,
             workspace::login_browser_profile,
             workspace::finish_browser_login,
             workspace::get_browser_login_status,
@@ -267,10 +265,9 @@ pub fn run() {
             }
 
             // Phase 11's host-shell terminal is a real OS process directly on
-            // the user's machine (not a Docker container like the sweep
-            // above) — a plain synchronous kill is all that's needed, and all
-            // that's possible, since there's no async Docker daemon to wait
-            // on here.
+            // the user's machine, not part of a session workspace like the
+            // sweep above — a plain synchronous kill is all that's needed,
+            // with no process tree to walk or graceful stop to await.
             log::info!("app exit: killing any still-running terminal shell process");
             terminal::kill_terminal_on_exit();
         }

@@ -82,7 +82,6 @@ use futures_util::StreamExt;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
 use sha2::{Digest, Sha256};
 use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
-use tauri::Emitter;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -364,21 +363,6 @@ const CHROMIUM_SHA256_MAC_ARM64: &str = "96c90f22098860be358c9bfebdbf934b57adbb5
 /// own.
 static CHROMIUM_DOWNLOAD_LOCK: Mutex<()> = Mutex::const_new(());
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChromiumStatus {
-    downloaded: bool,
-}
-
-/// Whether a session can start right now without first downloading
-/// Chromium — true if `resolve_chrome_binary()` finds anything at all (an
-/// env override, an already-downloaded build, or a dev-checkout bundled
-/// fallback), matching exactly what `configure_pinchtab` will actually use.
-#[tauri::command]
-pub async fn get_chromium_status() -> Result<ChromiumStatus, String> {
-    Ok(ChromiumStatus { downloaded: resolve_chrome_binary().is_some() })
-}
-
 /// Downloads, checksum-verifies, and extracts the pinned Chrome for Testing
 /// build into `downloaded_chromium_dir()` — idempotent (a no-op, with no
 /// callback invocations at all, if `resolve_chrome_binary()` already
@@ -516,23 +500,6 @@ async fn download_chromium_impl(on_progress: impl Fn(u64, Option<u64>, bool)) ->
     log::info!("workspace: chromium download complete ({downloaded_bytes} bytes) at {}", platform_dir.display());
     on_progress(downloaded_bytes, total_bytes, true);
     Ok(())
-}
-
-/// Settings-triggered manual download (mirroring `voice.rs`'s
-/// `download_voice_model` command) — emits progress on the generic
-/// `chromium-download` event channel. Idempotent, safe to call more than
-/// once (e.g. a retry after a failed attempt, or the user re-opening
-/// Settings later).
-#[tauri::command]
-pub async fn download_chromium<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
-    let _guard = CHROMIUM_DOWNLOAD_LOCK.lock().await;
-    download_chromium_impl(|downloaded_bytes, total_bytes, done| {
-        let _ = app.emit(
-            "chromium-download",
-            serde_json::json!({ "downloadedBytes": downloaded_bytes, "totalBytes": total_bytes, "done": done }),
-        );
-    })
-    .await
 }
 
 // ---------------------------------------------------------------------

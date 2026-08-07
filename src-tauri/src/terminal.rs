@@ -1,6 +1,6 @@
 //! Phase 11: embedded terminals running the user's own login shell directly
-//! on the host machine — not inside a Docker workspace like every other
-//! execution surface in this app. See `PROMPT.md`'s "## 12. PHASE 11" for the
+//! on the host machine — outside the per-session background workspace every
+//! other execution surface in this app runs inside. See `PROMPT.md`'s "## 12. PHASE 11" for the
 //! full rationale; the short version is that this exists purely so the user
 //! can drive their *actual* Claude Code CLI against their *actual* project
 //! files exactly as if they'd opened Terminal.app, which is fundamentally

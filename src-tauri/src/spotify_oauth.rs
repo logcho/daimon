@@ -26,6 +26,7 @@ use std::time::Duration;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::oauth::ConnectedAccount;
+use crate::timefmt::now_rfc3339;
 
 const KEYRING_SERVICE: &str = "com.daimon.app";
 const KEYRING_REFRESH_TOKEN_ACCOUNT: &str = "spotify_refresh_token";
@@ -293,30 +294,6 @@ async fn fetch_spotify_profile(access_token: &str) -> Result<(String, Option<Str
         .map_err(|e| format!("failed to parse Spotify profile response: {e}"))?;
     let label = profile.email.clone().or(profile.display_name).unwrap_or_else(|| "connected".to_string());
     Ok((label, profile.email))
-}
-
-fn now_rfc3339() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-
-    let days_since_epoch = (secs / 86_400) as i64;
-    let secs_of_day = secs % 86_400;
-    let (hour, minute, second) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
-
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 // ---------------------------------------------------------------------

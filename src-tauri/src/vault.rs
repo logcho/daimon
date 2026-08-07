@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::workspace;
+use crate::timefmt::format_rfc3339;
 
 /// Resolves the vault directory: `OBSIDIAN_VAULT_PATH` if set and non-empty,
 /// otherwise `<app data dir>/vault`. Always ensures the directory exists
@@ -39,33 +40,6 @@ fn is_default_vault() -> bool {
     std::env::var("OBSIDIAN_VAULT_PATH")
         .map(|v| v.trim().is_empty())
         .unwrap_or(true)
-}
-
-/// Dependency-free `SystemTime` -> RFC3339-ish string, matching the approach
-/// `oauth.rs`'s `now_rfc3339` already uses to avoid a `chrono` dependency for
-/// one timestamp shape.
-fn format_rfc3339(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let days_since_epoch = (secs / 86_400) as i64;
-    let secs_of_day = secs % 86_400;
-    let (hour, minute, second) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
-
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Reduces an arbitrary IPC string to a bare filename — no path separators,
