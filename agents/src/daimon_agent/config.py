@@ -70,15 +70,24 @@ class Settings:
         """Load settings from environment variables (see module doc for order)."""
         if env is None:
             merged: dict[str, str] = {}
-            # Real environment first — wins over every file.
+            # Real environment first — wins over every file. The .env files
+            # below only fill keys the real environment doesn't already set
+            # (a plain dict.update would clobber, e.g. the app spawning the
+            # server with a specific PORT).
             merged.update(os.environ)
             # Project-root .env next (never overrides real env).
             root_env = dotenv_values(Path.cwd() / ".env")
-            merged.update({k: v for k, v in root_env.items() if v is not None})
+            merged.update(
+                {k: v for k, v in root_env.items() if v is not None and k not in merged}
+            )
             # PinchTab env file written by setup-pinchtab.sh — PINCHTAB_* only.
             pinchtab_env = dotenv_values(Path.cwd() / ".daimon" / "pinchtab.env")
             merged.update(
-                {k: v for k, v in pinchtab_env.items() if v is not None and k.startswith("PINCHTAB_")}
+                {
+                    k: v
+                    for k, v in pinchtab_env.items()
+                    if v is not None and k.startswith("PINCHTAB_") and k not in merged
+                }
             )
         else:
             merged = dict(env)

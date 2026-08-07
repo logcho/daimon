@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from daimon_agent.config import Settings
@@ -57,3 +58,19 @@ def test_api_base_falls_through_to_deepseek_env() -> None:
 def test_live_frames_bool_parsing() -> None:
     assert Settings.from_env({"DAIMON_LIVE_FRAMES": "0"}).live_frames is False
     assert Settings.from_env({"DAIMON_LIVE_FRAMES": "true"}).live_frames is True
+
+
+def test_real_env_wins_over_dotenv_file(tmp_path, monkeypatch) -> None:
+    """The file-merge path (env=None reads cwd/.env): a real env var must
+    never be clobbered by a .env value — the app spawns the server with a
+    specific PORT, and .env (e.g. PORT=4711) must not override it."""
+    (tmp_path / ".env").write_text("PORT=4711\nDAIMON_MODEL=deepseek-chat\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PORT", "59238")
+    monkeypatch.setenv("DAIMON_MODEL", "deepseek-v4-pro")
+    s = Settings.from_env()
+    assert s.port == 59238
+    assert s.model == "deepseek-v4-pro"
+    # And a key absent from the real env still comes from .env.
+    monkeypatch.delenv("DAIMON_MODEL")
+    assert Settings.from_env().model == "deepseek-chat"
