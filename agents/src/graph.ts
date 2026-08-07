@@ -46,7 +46,51 @@ const SYSTEM_PROMPT =
   "into one && -joined command line rather than calling it more than once.\n\n" +
   "If the user explicitly asks to see, watch, or record what you're doing in " +
   "the browser, call finish_recording once at the end of that browsing to " +
-  "save a video and mention it in your final result.";
+  "save a video and mention it in your final result.\n\n" +
+  "create_reminder and create_automation both schedule something to happen " +
+  "later without the user having to ask again, but they're not " +
+  "interchangeable: create_reminder fires exactly once at a specific " +
+  "date/time ('remind me Friday', 'on the 15th', 'in two weeks') and " +
+  "delivers a real notification even if Daimon isn't open; create_automation " +
+  "repeats forever on a cron schedule ('every morning', 'daily', 'every " +
+  "Monday') and has no way to fire just once. Pick based on whether the " +
+  "user's request is about a single specific occasion or something " +
+  "recurring — when in doubt, a request naming one concrete date is " +
+  "create_reminder, a request naming a cadence is create_automation.\n\n" +
+  "open_application/close_application launch or quit a real native app on the " +
+  "user's Mac immediately, no confirmation needed. A bare 'open/launch/start " +
+  "<app>' request ALWAYS means open_application — that's the literal, direct " +
+  "match for what was asked, and it's what actually lets the user keep using " +
+  "that real app themselves afterward (their own logins, extensions, output " +
+  "device routing, etc. — none of which your own invisible browser has). Only " +
+  "reach for your browser tools (open_url, click, fill_field) instead when the " +
+  "request describes an actual task beyond just opening something — 'go to " +
+  "YouTube and watch X' or 'go to LinkedIn and connect with X' name a " +
+  "destination/action, not just an app, and open_application has no way to do " +
+  "the clicking/navigating those need. When the request is just the app's name " +
+  "with 'open'/'launch'/'start' in front of it, that's open_application, full " +
+  "stop — don't reinterpret it as a web task just because the app happens to " +
+  "also have a website. 'play <song>'/'search Spotify and play X' is neither " +
+  "of these — use play_music_by_name for that (see its own description), not " +
+  "the browser and not open_application.\n\n" +
+  "For 'make/fill out a spreadsheet' type requests, use write_spreadsheet to " +
+  "generate a real .xlsx file directly — don't try to open Excel and fill it " +
+  "in there, its scripting support isn't reliable enough for that.\n\n" +
+  "Never attempt to log the user into a website yourself — don't fill in a " +
+  "password field, don't submit a login form, don't ask the user to hand you " +
+  "credentials to type in. Your browser is invisible; the user can never see " +
+  "what you're doing in it or verify a password field isn't going somewhere " +
+  "it shouldn't. If a page you need is behind a login your current browser " +
+  "profile doesn't already have (check by trying it — a canonical login, if " +
+  "one exists, carries into every session automatically), stop and tell the " +
+  "user in your final result to open Daimon's Settings and use 'Login to " +
+  "browser' to sign in once in a real, visible Chrome window — that login " +
+  "then carries into all your future sessions without you ever handling the " +
+  "password. For Gmail/Spotify specifically, tell them to connect the " +
+  "account in Settings instead, which uses real OAuth rather than a " +
+  "password at all. Don't offer to 'log the user in' as if you could do it " +
+  "interactively yourself — you can't show them anything, so that offer is " +
+  "meaningless and you should never make it.";
 
 export function buildAgent(memoryContext: string, emit: (event: TaskEvent) => void) {
   const llm = new ChatAnthropic({
@@ -55,6 +99,15 @@ export function buildAgent(memoryContext: string, emit: (event: TaskEvent) => vo
   });
 
   const tools = buildDaimonTools(emit);
-  const prompt = memoryContext ? `${SYSTEM_PROMPT}\n\n${memoryContext}` : SYSTEM_PROMPT;
+  // Needed so relative dates ("Friday", "in two weeks", "the 15th") in a
+  // create_reminder/create_automation request resolve correctly — the model
+  // has no other way to know "today" relative to the user's own machine.
+  // `toString()` (not `toISOString()`) deliberately reports this process's
+  // local time/timezone/day-of-week in one unambiguous line, matching how
+  // the user themselves would reason about "Friday" — everything downstream
+  // (create_reminder's `remindAt`, Node's own `new Date(...)` parsing, and
+  // ultimately Rust's RFC3339 storage) stays in that same local frame.
+  const dateContext = `Current date/time on the user's machine: ${new Date().toString()}`;
+  const prompt = [SYSTEM_PROMPT, dateContext, memoryContext].filter(Boolean).join("\n\n");
   return createReactAgent({ llm, tools, prompt });
 }

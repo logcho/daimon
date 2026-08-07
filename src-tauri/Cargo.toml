@@ -43,10 +43,22 @@ rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 tauri-plugin-log = "2"
+# Native macOS notifications for fired automations/reminders — see
+# automation.rs's `poll_and_fire`. Without this, a triggered automation was
+# completely silent unless the app window happened to already be open and
+# mounted at the exact moment it fired (the `session-status` event channel
+# it also streams over has no reach beyond a live webview).
+tauri-plugin-notification = "2"
 log = "0.4"
 cron = "0.17"
 chrono = { version = "0.4", features = ["clock"] }
 whisper-rs = "0.16.0"
+# Reads/writes the same `memory/daimon.db` SQLite file (WAL mode) the Node
+# agent already owns via better-sqlite3 — see skills.rs. Standard multi-
+# process WAL semantics make this safe to touch from both processes; no
+# feature flags needed beyond the "bundled" SQLite (avoids depending on a
+# system libsqlite3 being present/version-matched).
+rusqlite = { version = "0.32", features = ["bundled"] }
 cpal = "0.18.1"
 portable-pty = "0.9.0"
 # Native process-group/session supervision for the background workspace

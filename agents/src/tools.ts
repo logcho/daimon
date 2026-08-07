@@ -2,6 +2,8 @@ import { z } from "zod";
 import { tool } from "@langchain/core/tools";
 import * as automation from "./automation.js";
 import * as browser from "./browser.js";
+import * as documents from "./documents.js";
+import { playMusicByName } from "./spotify.js";
 import * as vault from "./vault.js";
 import { indexNote, saveSkill } from "./memory.js";
 import type { TaskEvent } from "./events.js";
@@ -323,6 +325,34 @@ export function buildDaimonTools(emit: (event: TaskEvent) => void) {
         }),
       },
     ),
+    tool(
+      async ({ name, instruction, remindAt }: { name: string; instruction: string; remindAt: string }) => {
+        await automation.requestReminder(name, instruction, remindAt);
+        const when = new Date(remindAt).toLocaleString();
+        return `Reminder "${name}" set for ${when}. Daimon will notify you then — it won't repeat.`;
+      },
+      {
+        name: "create_reminder",
+        description:
+          "Set a one-time reminder for a specific future date/time — e.g. 'remind me about the " +
+          "job posting on Friday' or 'put a reminder on my calendar for the 15th.' This does NOT " +
+          "write to a real calendar app; it's Daimon's own reminder, delivered as a native " +
+          "notification at that moment (it works even if the user isn't looking at Daimon right " +
+          "then). Use this instead of create_automation whenever the request is about a single " +
+          "specific date/time rather than something recurring — create_automation can only " +
+          "repeat, it has no way to fire 'just once.' `instruction` is what Daimon actually does " +
+          "when it fires (e.g. re-check something and summarize) — for a plain reminder with " +
+          "nothing to look up, make it something like 'Remind the user: <message>' so the result " +
+          "is exactly that message, not a generic acknowledgement.",
+        schema: z.object({
+          name: z.string().describe("Short human-readable name, e.g. 'Follow up on Tesla job posting'"),
+          instruction: z.string().describe("What Daimon does when this fires — becomes the notification body"),
+          remindAt: z
+            .string()
+            .describe("The exact date/time to fire, as an ISO 8601 datetime, e.g. '2026-08-15T09:00:00'"),
+        }),
+      },
+    ),
     // Deliberately "stage, don't execute" — the agent never presses Enter on
     // the user's behalf, matching the same principle already used for
     // voice-dictated text landing in an input without auto-submitting. The
@@ -349,6 +379,139 @@ export function buildDaimonTools(emit: (event: TaskEvent) => void) {
           "its own — it only stages text for the user to review and run themselves.",
         schema: z.object({
           command: z.string().describe("The shell command to type into the newly opened terminal — staged, not executed"),
+        }),
+      },
+    ),
+    // Unlike open_terminal_with_command above, this executes immediately —
+    // no staging, no confirmation step. Launching a named application is
+    // low-risk and trivially reversible (the user just quits it again), so
+    // there's no reason to slow down a voice command with a review step the
+    // way a shell command (which could do anything) warrants. The actual
+    // `open -a <name>` call happens in the Rust daemon, not here — this
+    // container has no direct access to the user's real desktop — see
+    // HostActionEvent's doc comment in events.ts.
+    tool(
+      async ({ name }: { name: string }) => {
+        emit({ type: "host_action", action: "open_application", name });
+        return `Opened ${name}.`;
+      },
+      {
+        name: "open_application",
+        description:
+          "Launch a native application on the user's Mac by name (e.g. 'Spotify', 'Calculator', " +
+          "'Notes', 'Xcode') — the real installed desktop app, not a website or a web version of " +
+          "it. Opens immediately with no confirmation needed. Use this whenever the user asks to " +
+          "open, launch, start, or switch to an app by name. If they specifically want a website " +
+          "instead (e.g. 'open Spotify in my browser'), use open_url, not this.",
+        schema: z.object({
+          name: z
+            .string()
+            .describe("The application's name exactly as it appears in Finder/Launchpad, e.g. 'Spotify'"),
+        }),
+      },
+    ),
+    // Same reasoning as open_application above (low-risk, reversible,
+    // immediate) — quits gracefully (lets the app save state / prompt for
+    // unsaved changes) rather than force-killing it.
+    tool(
+      async ({ name }: { name: string }) => {
+        emit({ type: "host_action", action: "close_application", name });
+        return `Closed ${name}.`;
+      },
+      {
+        name: "close_application",
+        description:
+          "Quit a native application on the user's Mac by name (e.g. 'Spotify', 'Calculator') — " +
+          "a graceful quit, same as choosing Quit from its menu, not a force-kill. Opens " +
+          "immediately with no confirmation needed. Use this whenever the user asks to close, " +
+          "quit, or exit an app by name.",
+        schema: z.object({
+          name: z
+            .string()
+            .describe("The application's name exactly as it appears in Finder/Launchpad, e.g. 'Spotify'"),
+        }),
+      },
+    ),
+    // Deliberately a short, fixed list of commands rather than a free-form
+    // AppleScript string — see HostActionEvent's doc comment in events.ts.
+    // Spotify/Music's real AppleScript dictionaries only support transport
+    // control and playing a *known* track URI, not "search for X and play
+    // it" — see play_music_by_name below for that (real Spotify Web API
+    // search + Connect device-targeted playback, landing on the user's
+    // actual desktop app). This tool's description says so explicitly so
+    // the model doesn't reach for it expecting search.
+    tool(
+      async ({ app, command }: { app: "Spotify" | "Music"; command: "play" | "pause" | "next" | "previous" }) => {
+        emit({ type: "host_action", action: "music_control", app, command });
+        return `Sent "${command}" to ${app}.`;
+      },
+      {
+        name: "music_control",
+        description:
+          "Control playback in Spotify or Apple Music — play/resume, pause, skip to the next " +
+          "track, or go back to the previous one. This only controls whatever is already loaded " +
+          "or queued in the app; it CANNOT search for a song, artist, or playlist by name — for " +
+          "'play <song>'/'play some jazz' type requests, use play_music_by_name instead. Opens " +
+          "immediately with no confirmation needed.",
+        schema: z.object({
+          app: z.enum(["Spotify", "Music"]).describe("Which app to control"),
+          command: z.enum(["play", "pause", "next", "previous"]).describe("The transport command to send"),
+        }),
+      },
+    ),
+    // Real search — Spotify's Web API, not AppleScript (which can't search)
+    // and not the web player (which wouldn't play through the user's real
+    // desktop app/output device). Requires a connected Spotify account
+    // (Settings) — see spotify.ts's own doc comment for the full mechanism.
+    tool(
+      async ({ query }: { query: string }) => {
+        return await playMusicByName(query);
+      },
+      {
+        name: "play_music_by_name",
+        description:
+          "Search for a specific song, artist, or track and start it playing on the user's real " +
+          "desktop Spotify app — use this for 'play <song>', 'play something by <artist>' type " +
+          "requests. Requires a Spotify account connected in Settings and the desktop app already " +
+          "open (open_application first if it's not). Use music_control instead for plain " +
+          "play/pause/skip on whatever's already playing.",
+        schema: z.object({
+          query: z.string().describe("What to search for, e.g. 'Blinding Lights The Weeknd'"),
+        }),
+      },
+    ),
+    // Writes a real .xlsx file directly rather than trying to drive a live
+    // Excel window — Excel's own AppleScript/scripting support on macOS is
+    // inconsistent/partial, a poor automation target compared to just
+    // producing the actual file. See documents.ts's own doc comment.
+    tool(
+      async ({
+        filename,
+        sheetName,
+        rows,
+      }: {
+        filename: string;
+        sheetName?: string;
+        rows: string[][];
+      }) => {
+        const destPath = await documents.writeSpreadsheet(filename, sheetName ?? "Sheet1", rows);
+        emit({ type: "host_action", action: "open_file", path: destPath });
+        return `Saved the spreadsheet to ${destPath} and opened it.`;
+      },
+      {
+        name: "write_spreadsheet",
+        description:
+          "Create a real .xlsx spreadsheet file with the given data and open it in the user's " +
+          "default spreadsheet app (Excel, Numbers, etc.) — use this for 'make/fill out a " +
+          "spreadsheet' type requests instead of trying to control a live Excel window, which " +
+          "isn't reliably scriptable. `rows` is the full grid, top to bottom — conventionally " +
+          "make the first row a header row (e.g. column titles).",
+        schema: z.object({
+          filename: z.string().describe("File name, e.g. 'job-applications.xlsx' (.xlsx added if missing)"),
+          sheetName: z.string().optional().describe("Sheet tab name, defaults to 'Sheet1'"),
+          rows: z
+            .array(z.array(z.string()))
+            .describe("Grid of cell values, row by row — first row conventionally a header"),
         }),
       },
     ),

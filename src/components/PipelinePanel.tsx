@@ -3,14 +3,16 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { activateAndFocusWindow } from "../lib/api";
 import { MAX_PANEL_SIZE, MIN_PANEL_SIZE } from "../lib/window";
-import type { DictationState, PendingDraft, PendingInput, Session, TaskStep, View } from "../types";
+import type { DictationState, PendingDraft, PendingInput, ReminderFiredEvent, Session, TaskStep, View } from "../types";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { Settings } from "./Settings";
 import { VaultPanel } from "./VaultPanel";
 import { AutomationsPanel } from "./AutomationsPanel";
+import { SkillsPanel } from "./SkillsPanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { ScreenPanel, type LiveScreen } from "./ScreenPanel";
 import { SoundWave } from "./SoundWave";
+import { ReminderAlert } from "./ReminderAlert";
 
 // Roughly 5-6 lines at text-sm before the input starts scrolling internally
 // instead of continuing to grow — enough room for a full dictated sentence
@@ -363,6 +365,8 @@ export function PipelinePanel({
   onConsumePendingTerminalInput,
   onDictateToTerminal,
   initialTerminalCommands,
+  firedReminders,
+  onDismissReminder,
 }: {
   sessions: Session[];
   activeSession: Session | null;
@@ -410,6 +414,12 @@ export function PipelinePanel({
   // that tab's PTY once ready but never auto-submitted. Lives in App.tsx for
   // the same collapse-survival reason as `terminalTabs` etc. above.
   initialTerminalCommands: Record<string, string>;
+  // Lives in App.tsx too, same reasoning — a fired reminder needs to stay
+  // visible (and dismissible) across a collapse/expand cycle and across
+  // switching tabs, not just for as long as this component happens to stay
+  // mounted on one particular view. See ReminderAlert.tsx.
+  firedReminders: ReminderFiredEvent[];
+  onDismissReminder: (id: string) => void;
 }) {
   const [draft, setDraft] = useState("");
   const historyRef = useRef<HTMLDivElement>(null);
@@ -663,6 +673,9 @@ export function PipelinePanel({
           <TabButton active={view === "automations"} onClick={() => onViewChange("automations")}>
             automations
           </TabButton>
+          <TabButton active={view === "skills"} onClick={() => onViewChange("skills")}>
+            skills
+          </TabButton>
           <TabButton
             active={view === "terminal"}
             onClick={() => {
@@ -689,6 +702,8 @@ export function PipelinePanel({
             collapse
           </button>
         </div>
+
+        <ReminderAlert reminders={firedReminders} onDismiss={onDismissReminder} />
 
         {showChipRow && (
           <div className="themed-scroll flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/[0.08] px-3 py-2">
@@ -755,6 +770,8 @@ export function PipelinePanel({
           <VaultPanel />
         ) : view === "automations" ? (
           <AutomationsPanel />
+        ) : view === "skills" ? (
+          <SkillsPanel />
         ) : view === "screen" ? (
           <ScreenPanel screens={liveScreens} recordingsRefreshSignal={completedTurnCount} />
         ) : view === "chat" ? (

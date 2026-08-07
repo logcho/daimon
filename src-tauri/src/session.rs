@@ -227,6 +227,40 @@ async fn run_and_stream<R: tauri::Runtime>(
                         .map(|s| s.to_string());
                 }
                 Some("error") => log::error!("session {session_id}: workspace reported error: {:?}", event.get("message")),
+                // Unlike `ui_action` events (forwarded as-is below for the
+                // *frontend* to react to — see UiActionEvent in
+                // agents/src/events.ts), `host_action` is something *this*
+                // process acts on directly, mid-stream, since it names a
+                // real action on the user's actual machine with no
+                // UI-visible component the frontend would otherwise need to
+                // render. Still forwarded on afterward too (harmless — the
+                // frontend ignores event types it doesn't recognize), so
+                // there's exactly one place events get parsed, not two.
+                Some("host_action") => match event.get("action").and_then(|a| a.as_str()) {
+                    Some("open_application") => {
+                        if let Some(name) = event.get("name").and_then(|n| n.as_str()) {
+                            open_application(session_id, name);
+                        }
+                    }
+                    Some("close_application") => {
+                        if let Some(name) = event.get("name").and_then(|n| n.as_str()) {
+                            close_application(session_id, name);
+                        }
+                    }
+                    Some("music_control") => {
+                        let app = event.get("app").and_then(|a| a.as_str());
+                        let command = event.get("command").and_then(|c| c.as_str());
+                        if let (Some(app), Some(command)) = (app, command) {
+                            music_control(session_id, app, command);
+                        }
+                    }
+                    Some("open_file") => {
+                        if let Some(path) = event.get("path").and_then(|p| p.as_str()) {
+                            open_file(session_id, path);
+                        }
+                    }
+                    other => log::warn!("session {session_id}: unrecognized host_action: {other:?}"),
+                },
                 _ => log::debug!("session {session_id}: event={event}"),
             }
 
@@ -235,6 +269,87 @@ async fn run_and_stream<R: tauri::Runtime>(
     }
 
     Ok(last_done_result)
+}
+
+/// Launches a real native app on the user's actual machine by name, via
+/// macOS's own `open -a` — deliberately *not* routed through any of
+/// `workspace.rs`'s process-group/session-scoped spawning (that machinery
+/// exists to supervise this session's own headless PinchTab+Chrome tree, an
+/// entirely different concern from a plain GUI app the user will manage
+/// themselves from here). No shell involved (`name` is passed as a single
+/// argv element to `open`, not interpolated into a shell string), so an
+/// unexpected/malicious `name` can at worst fail to match a real app — it
+/// can't inject an arbitrary command. Fire-and-forget: `open` itself exits
+/// almost immediately once it's handed the launch off to LaunchServices, and
+/// this container has no channel to report success/failure back through
+/// anyway (see `HostActionEvent`'s doc comment in agents/src/events.ts), so
+/// there's nothing meaningful to await here.
+fn open_application(session_id: &str, name: &str) {
+    match std::process::Command::new("open").arg("-a").arg(name).spawn() {
+        Ok(_) => log::info!("session {session_id}: launched application {name:?}"),
+        Err(e) => log::warn!("session {session_id}: failed to launch application {name:?}: {e}"),
+    }
+}
+
+/// Escapes a string for interpolation inside a double-quoted AppleScript
+/// string literal (backslash-escape backslashes, then quotes) — every
+/// `osascript -e "..."` call below builds its script by formatting a
+/// user/model-supplied name into a fixed, hardcoded script template (never a
+/// free-form script the model supplies directly — see `HostActionEvent`'s
+/// doc comment in agents/src/events.ts for why that boundary matters), so
+/// the only injection surface this needs to close is breaking out of that
+/// one string literal.
+fn escape_applescript_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Quits a real native app gracefully (same as choosing Quit from its own
+/// menu — lets it prompt for unsaved changes, unlike a force-kill), via
+/// AppleScript's own `quit` verb. Fire-and-forget, same reasoning as
+/// `open_application` above.
+fn close_application(session_id: &str, name: &str) {
+    let script = format!("tell application \"{}\" to quit", escape_applescript_string(name));
+    match std::process::Command::new("osascript").arg("-e").arg(&script).spawn() {
+        Ok(_) => log::info!("session {session_id}: closed application {name:?}"),
+        Err(e) => log::warn!("session {session_id}: failed to close application {name:?}: {e}"),
+    }
+}
+
+/// Sends a transport command to Spotify or Music via AppleScript — see
+/// `music_control`'s tool description (agents/src/tools.ts) for why this is
+/// deliberately limited to play/pause/next/previous and can't search for a
+/// song. `command` is expected to already be one of those four (validated by
+/// the tool's own Zod schema on the agent side before this event is ever
+/// emitted); an unrecognized value here just logs and does nothing rather
+/// than running something unintended.
+fn music_control(session_id: &str, app: &str, command: &str) {
+    let verb = match command {
+        "play" => "play",
+        "pause" => "pause",
+        "next" => "next track",
+        "previous" => "previous track",
+        other => {
+            log::warn!("session {session_id}: unrecognized music_control command: {other:?}");
+            return;
+        }
+    };
+    let script = format!("tell application \"{}\" to {verb}", escape_applescript_string(app));
+    match std::process::Command::new("osascript").arg("-e").arg(&script).spawn() {
+        Ok(_) => log::info!("session {session_id}: sent {command:?} to {app}"),
+        Err(e) => log::warn!("session {session_id}: failed to send {command:?} to {app}: {e}"),
+    }
+}
+
+/// Opens a real file (e.g. a spreadsheet `write_spreadsheet` just generated
+/// — agents/src/tools.ts) with whatever app macOS has registered as its
+/// default, via a bare `open <path>` (no `-a`, unlike `open_application`,
+/// which names an app rather than a file). Fire-and-forget, same reasoning
+/// as `open_application`.
+fn open_file(session_id: &str, path: &str) {
+    match std::process::Command::new("open").arg(path).spawn() {
+        Ok(_) => log::info!("session {session_id}: opened file {path:?}"),
+        Err(e) => log::warn!("session {session_id}: failed to open file {path:?}: {e}"),
+    }
 }
 
 /// `pub(crate)` (not private) so `workspace.rs`'s memory watchdog can emit

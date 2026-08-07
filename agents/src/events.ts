@@ -32,6 +32,37 @@ export interface UiActionEvent {
   command: string;
 }
 
+// Emitted by the open_application tool (tools.ts) — unlike UiActionEvent
+// above, this isn't something the *frontend* reacts to; it's a signal the
+// Rust daemon itself intercepts as this NDJSON stream passes through
+// `session.rs`'s `run_and_stream` and acts on directly (spawning a real
+// `open -a <name>` process on the user's actual machine), since launching a
+// native app has no UI-visible component the frontend would otherwise need
+// to render. Fire-and-forget from here same as UiActionEvent — this
+// container has no reverse channel to learn whether the launch actually
+// succeeded (see automation.rs's module doc for the same "no callback path"
+// constraint elsewhere in this architecture), so the tool's own return
+// value to the model is necessarily optimistic. A discriminated union (not
+// one flat interface with optional fields) so each action's exact payload
+// shape is checked at compile time on both the emitting (tools.ts) and
+// documenting (this file) side — `music_control`'s AppleScript surface is
+// deliberately a short, fixed list of commands (see tools.ts's own comment
+// on why), not a free-form string, to keep it from growing into a general
+// "run arbitrary script" capability.
+export type HostActionEvent =
+  | { type: "host_action"; action: "open_application"; name: string }
+  | { type: "host_action"; action: "close_application"; name: string }
+  | {
+      type: "host_action";
+      action: "music_control";
+      app: "Spotify" | "Music";
+      command: "play" | "pause" | "next" | "previous";
+    }
+  // Opens a real file (e.g. one write_spreadsheet just generated) with
+  // whatever app macOS has registered as the default for it — unlike
+  // open_application, `path` names a file, not an app.
+  | { type: "host_action"; action: "open_file"; path: string };
+
 // Emitted periodically (see run.ts's LIVE_FRAME_INTERVAL_MS) for the
 // duration of a turn — a base64-encoded PNG screenshot of whatever the
 // background browser's content page currently shows, so the frontend can
@@ -43,4 +74,4 @@ export interface LiveFrameEvent {
   data: string;
 }
 
-export type TaskEvent = StepEvent | DoneEvent | ErrorEvent | UiActionEvent | LiveFrameEvent;
+export type TaskEvent = StepEvent | DoneEvent | ErrorEvent | UiActionEvent | HostActionEvent | LiveFrameEvent;

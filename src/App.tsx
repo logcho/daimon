@@ -8,6 +8,7 @@ import {
   closeTerminal,
   endSession,
   onDictationStatus,
+  onReminderFired,
   onSessionStatus,
   sendMessage,
   setWindowVibrancy,
@@ -16,7 +17,7 @@ import {
 } from "./lib/api";
 import { applySessionEvent } from "./lib/sessionEvents";
 import { playLockEngagedSound, playRecordingStartSound, playRecordingStopSound } from "./lib/sound";
-import type { DictationState, PendingDraft, PendingInput, Session, View } from "./types";
+import type { DictationState, PendingDraft, PendingInput, ReminderFiredEvent, Session, View } from "./types";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 function App() {
@@ -27,6 +28,9 @@ function App() {
   const [dictationLocked, setDictationLocked] = useState(false);
   const [dictationMessage, setDictationMessage] = useState("");
   const [pendingDraft, setPendingDraft] = useState<PendingDraft | null>(null);
+  // Fired-but-not-yet-dismissed reminders — see ReminderAlert.tsx and the
+  // onReminderFired effect below.
+  const [firedReminders, setFiredReminders] = useState<ReminderFiredEvent[]>([]);
 
   // Which PipelinePanel tab is showing — lives here rather than as a
   // PipelinePanel-local useState for the same reason `terminalTabs` etc. do
@@ -125,6 +129,41 @@ function App() {
       cancelled = true;
       unlisten?.();
     };
+  }, []);
+
+  // Registered once for the app's lifetime, same reasoning as
+  // onSessionStatus above — a reminder can fire while the panel is
+  // collapsed or the user is off on some other tab, so this can't be a
+  // listener owned by a component that only mounts under specific
+  // conditions. Lives here (not inside PipelinePanel) so the fired-but-
+  // undismissed list survives a collapse-to-pill/expand cycle, same
+  // reasoning as `terminalTabs` above.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+
+    onReminderFired((event) => {
+      setFiredReminders((prev) => [...prev, event]);
+      // Force the panel open and give it real OS focus — a fired reminder
+      // landing silently in the background (previously indistinguishable
+      // from any other completed session) was the exact complaint this
+      // exists to fix. Same call other "something just happened, the user
+      // should see it now" moments already use (dictation result, an
+      // agent-triggered terminal command).
+      expand();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const dismissReminder = useCallback((id: string) => {
+    setFiredReminders((prev) => prev.filter((r) => r.id !== id));
   }, []);
 
   const expand = useCallback(() => {
@@ -363,6 +402,8 @@ function App() {
           onConsumePendingTerminalInput={consumePendingTerminalInput}
           onDictateToTerminal={setPendingTerminalInput}
           initialTerminalCommands={initialTerminalCommands}
+          firedReminders={firedReminders}
+          onDismissReminder={dismissReminder}
         />
       ) : (
         <Pill
@@ -371,6 +412,7 @@ function App() {
           dictationState={dictationState}
           dictationLocked={dictationLocked}
           dictationMessage={dictationMessage}
+          hasFiredReminders={firedReminders.length > 0}
         />
       )}
     </main>

@@ -24,6 +24,23 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+// A one-shot reminder (`onceAt` set) shows its actual fire date/time instead
+// of a raw cron expression, since there isn't one — see
+// `Automation.onceAt`'s doc comment in types.ts.
+function ScheduleLine({ automation }: { automation: Automation }) {
+  if (automation.onceAt) {
+    const date = new Date(automation.onceAt);
+    const when = Number.isNaN(date.getTime()) ? automation.onceAt : date.toLocaleString();
+    const fired = Boolean(automation.lastRunAt);
+    return (
+      <p className="mt-1 truncate text-xs text-neutral-500">
+        {fired ? `reminded once — was set for ${when}` : `reminds you once — ${when}`}
+      </p>
+    );
+  }
+  return <p className="mt-1 truncate font-mono text-xs text-neutral-500">{automation.schedule}</p>;
+}
+
 function LastRunLine({ automation }: { automation: Automation }) {
   if (!automation.lastRunAt) return null;
   const when = formatRelativeTime(automation.lastRunAt);
@@ -88,7 +105,7 @@ function AutomationRow({
             />
             <span className="truncate text-sm font-medium text-neutral-100">{automation.name}</span>
           </div>
-          <p className="mt-1 truncate font-mono text-xs text-neutral-500">{automation.schedule}</p>
+          <ScheduleLine automation={automation} />
           <LastRunLine automation={automation} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -191,7 +208,8 @@ export function AutomationsPanel() {
       )}
       {listState === "ready" && automations.length === 0 && (
         <p className="mt-3 text-xs text-neutral-500">
-          ○ no automations yet — ask daimon to schedule something recurring, or add one below.
+          ○ no automations yet — ask daimon to schedule something recurring or remind you about
+          something on a specific date, or add a recurring one below.
         </p>
       )}
       {listState === "ready" && automations.length > 0 && (

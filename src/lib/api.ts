@@ -5,6 +5,8 @@ import type {
   ConnectedAccount,
   DictationEvent,
   RecordingFile,
+  ReminderFiredEvent,
+  Skill,
   StepStatus,
   VaultFile,
   VaultPathStatus,
@@ -75,6 +77,26 @@ export function disconnectGmailAccount(): Promise<void> {
   return invoke<void>("disconnect_gmail_account");
 }
 
+export function getSpotifyClientIdStatus(): Promise<boolean> {
+  return invoke<boolean>("get_spotify_client_id_status");
+}
+
+export function setSpotifyClientId(clientId: string): Promise<void> {
+  return invoke<void>("set_spotify_client_id", { clientId });
+}
+
+export function connectSpotifyAccount(): Promise<ConnectedAccount> {
+  return invoke<ConnectedAccount>("connect_spotify_account");
+}
+
+export function getSpotifyAccount(): Promise<ConnectedAccount | null> {
+  return invoke<ConnectedAccount | null>("get_spotify_account");
+}
+
+export function disconnectSpotifyAccount(): Promise<void> {
+  return invoke<void>("disconnect_spotify_account");
+}
+
 export function getVaultPathStatus(): Promise<VaultPathStatus> {
   return invoke<VaultPathStatus>("get_vault_path_status");
 }
@@ -110,12 +132,38 @@ export function createAutomation(name: string, instruction: string, schedule: st
   return invoke<Automation>("create_automation", { name, instruction, schedule });
 }
 
+// A one-time reminder instead of a recurring automation — see
+// `Automation.onceAt`'s doc comment. `remindAt` is an ISO datetime string.
+export function createReminder(name: string, instruction: string, remindAt: string): Promise<Automation> {
+  return invoke<Automation>("create_reminder", { name, instruction, remindAt });
+}
+
+// See `ReminderFiredEvent`'s doc comment — a dedicated channel, separate
+// from `onSessionStatus`, specifically so a fired reminder can be surfaced
+// as its own attention-grabbing alert rather than folded into the ordinary
+// session/chat list.
+export function onReminderFired(handler: (event: ReminderFiredEvent) => void): Promise<UnlistenFn> {
+  return listen<ReminderFiredEvent>("reminder-fired", (e) => handler(e.payload));
+}
+
 export function setAutomationEnabled(id: string, enabled: boolean): Promise<void> {
   return invoke<void>("set_automation_enabled", { id, enabled });
 }
 
 export function deleteAutomation(id: string): Promise<void> {
   return invoke<void>("delete_automation", { id });
+}
+
+export function listSkills(): Promise<Skill[]> {
+  return invoke<Skill[]>("list_skills");
+}
+
+export function createSkill(name: string, description: string): Promise<Skill> {
+  return invoke<Skill>("create_skill", { name, description });
+}
+
+export function deleteSkill(id: string): Promise<void> {
+  return invoke<void>("delete_skill", { id });
 }
 
 export function getVoiceModelStatus(): Promise<VoiceModelStatus> {
@@ -223,4 +271,27 @@ export function activateAndFocusWindow(): Promise<void> {
 // Called once on mount; a no-op on non-macOS platforms.
 export function setWindowVibrancy(radius: number): Promise<void> {
   return invoke<void>("set_window_vibrancy", { radius });
+}
+
+// Opens a real, visible Chrome window against Daimon's canonical browser
+// profile — the one deliberate exception to "never shows a window"
+// anywhere in this app, only ever triggered by the user themselves from
+// Settings. Log into whatever sites you want by hand, then call
+// finishBrowserLogin. See `src-tauri/src/workspace.rs`'s
+// `login_browser_profile` doc comment for the full reasoning and how that
+// login later carries into every future (invisible) session.
+export function loginBrowserProfile(): Promise<void> {
+  return invoke<void>("login_browser_profile");
+}
+
+// Closes the login window and flushes its cookies/storage to disk so
+// future sessions can actually pick them up.
+export function finishBrowserLogin(): Promise<void> {
+  return invoke<void>("finish_browser_login");
+}
+
+// Whether the canonical profile has ever captured a real login (a non-empty
+// cookie jar) — not just whether the user has opened the login flow before.
+export function getBrowserLoginStatus(): Promise<boolean> {
+  return invoke<boolean>("get_browser_login_status");
 }

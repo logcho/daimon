@@ -152,6 +152,16 @@ fn pinchtab_profiles_dir() -> PathBuf {
     data_dir().join("pinchtab-profiles")
 }
 
+/// Where `write_spreadsheet` (agents/src/tools.ts) saves real document files
+/// it generates — same "plain host directory passed as an env var" shape as
+/// `vault_dir`/`recordings_dir` below, not a bind mount (native processes
+/// have no mount namespace to rely on).
+fn documents_dir() -> PathBuf {
+    let dir = data_dir().join("documents");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn run_dir() -> PathBuf {
     let dir = data_dir().join("run");
     let _ = std::fs::create_dir_all(&dir);
@@ -864,6 +874,220 @@ async fn kill_pinchtab_tree(profile_dir: &Path, leader_pid: u32) {
 }
 
 // ---------------------------------------------------------------------
+// One-time browser login — a persistent, authenticated profile every
+// session's own fresh, per-session profile can borrow cookies/storage
+// from (see `copy_login_profile_into` below), instead of every session
+// starting from a completely blank, logged-out browser. This is the one
+// deliberate exception to "Daimon never shows a window" anywhere in this
+// codebase — it only ever runs because the user explicitly clicked "log
+// in" in Settings, is a real, visible Chrome window they interact with
+// directly (typing a URL, entering credentials, solving a CAPTCHA — same
+// as using any other browser), and tears back down the moment they say
+// they're done.
+// ---------------------------------------------------------------------
+
+fn canonical_browser_profile_dir() -> PathBuf {
+    data_dir().join("canonical-browser-profile")
+}
+
+struct LoginProcessHandle {
+    child: Box<dyn ChildWrapper>,
+    profile_dir: PathBuf,
+}
+
+static LOGIN_PROCESS: LazyLock<Mutex<Option<LoginProcessHandle>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Starts a real, visible Chrome window (PinchTab in `headed` mode) pointed
+/// at the canonical login profile. Idempotent: a no-op (not an error) if a
+/// login window is already open, so double-clicking the Settings button
+/// doesn't spawn a second one.
+#[tauri::command]
+pub async fn login_browser_profile() -> Result<(), String> {
+    {
+        let existing = LOGIN_PROCESS.lock().await;
+        if existing.is_some() {
+            return Ok(());
+        }
+    }
+
+    if resolve_chrome_binary().is_none() {
+        return Err("Chromium isn't downloaded yet — start a regular session first so it can download.".to_string());
+    }
+
+    let profile_dir = canonical_browser_profile_dir();
+    let port = allocate_port()?;
+    let token = uuid::Uuid::new_v4().to_string();
+
+    configure_pinchtab(&profile_dir, port, &token).await?;
+    // The one config key `configure_pinchtab` itself never sets (every
+    // other caller wants its default, `headless`) — see this section's own
+    // doc comment for why a real visible window is correct here
+    // specifically.
+    pinchtab_config_set(&profile_dir, "instanceDefaults.mode", "headed").await?;
+
+    let child = spawn_pinchtab_server("browser-login", &profile_dir)?;
+    if let Err(e) = wait_for_pinchtab_health(&profile_dir).await {
+        let pid = child.id();
+        drop(child);
+        if let Some(pid) = pid {
+            kill_pinchtab_tree(&profile_dir, pid).await;
+        }
+        return Err(e);
+    }
+
+    *LOGIN_PROCESS.lock().await = Some(LoginProcessHandle { child, profile_dir });
+    Ok(())
+}
+
+/// Ends the login window — critically, this waits for PinchTab's own
+/// graceful `server stop` (inside `kill_pinchtab_tree`) to actually flush
+/// cookies/storage to disk before returning, since the whole point of this
+/// flow is that `copy_login_profile_into` below can trust the canonical
+/// profile's files are complete and quiescent by the time a future session
+/// reads them. A no-op if no login window is currently open.
+#[tauri::command]
+pub async fn finish_browser_login() -> Result<(), String> {
+    let handle = LOGIN_PROCESS.lock().await.take();
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+    let pid = handle.child.id();
+    drop(handle.child);
+    if let Some(pid) = pid {
+        kill_pinchtab_tree(&handle.profile_dir, pid).await;
+    }
+    // Without this, only a session started *after* this point would ever
+    // see the new login — any chat already open would silently keep
+    // browsing logged out, indefinitely, until it happened to get recycled
+    // for an unrelated reason (the memory watchdog) or the user thought to
+    // start a fresh session. Recycling every live session now (reusing the
+    // exact same respawn `recycle_pinchtab` already does for the watchdog)
+    // makes an already-open chat pick up the login within moments instead.
+    recycle_all_sessions_for_login().await;
+    Ok(())
+}
+
+/// Snapshots every currently-active session's (id, profile_dir, port), then
+/// recycles each one's PinchTab tree — see `finish_browser_login`'s call
+/// site for why. The snapshot exists so this never holds `SESSIONS` locked
+/// across the slow per-session teardown/respawn work `recycle_pinchtab`
+/// itself does internally (it takes the same lock again per session); doing
+/// that here would otherwise serialize against any concurrent
+/// `send_message` trying to use one of these sessions in the meantime.
+async fn recycle_all_sessions_for_login() {
+    let targets: Vec<(String, PathBuf, u16)> = {
+        let sessions = SESSIONS.lock().await;
+        sessions
+            .iter()
+            .map(|(id, s)| (id.clone(), s.profile_dir.clone(), s.pinchtab_port))
+            .collect()
+    };
+
+    for (session_id, profile_dir, pinchtab_port) in targets {
+        log::info!("session {session_id}: recycling to pick up a newly-logged-in browser profile");
+        if let Err(e) = recycle_pinchtab(&session_id, &profile_dir, pinchtab_port).await {
+            log::warn!("session {session_id}: failed to recycle after browser login: {e}");
+        }
+    }
+}
+
+/// Whether the canonical profile has ever actually captured a real login —
+/// checked by looking for a non-empty cookie jar, not just whether the
+/// directory exists (which `configure_pinchtab`/`pinchtab config init`
+/// alone would already create even before the user logs into anything).
+/// Drives Settings' own "logged in" vs. "not logged in yet" display.
+#[tauri::command]
+pub async fn get_browser_login_status() -> Result<bool, String> {
+    let cookies = canonical_browser_profile_dir()
+        .join(".pinchtab")
+        .join("profiles")
+        .join("default")
+        .join("Default")
+        .join("Cookies");
+    Ok(cookies.metadata().map(|m| m.len() > 0).unwrap_or(false))
+}
+
+/// The safe, durable-state subset of a Chrome profile to carry from the
+/// canonical login profile into a fresh session's own profile. Paths below
+/// are relative to a profile's `Default/` subdirectory.
+///
+/// Copy: `Cookies`/`Cookies-journal` (the cookie jar), `Local Storage` and
+/// `IndexedDB` (where most modern SPA auth actually lives — confirmed
+/// against PinchTab's own `profiles_crud.go` reset logic, which spares
+/// exactly these two while nuking everything else as pure cache/history),
+/// `Session Storage` (low value but harmless), `Preferences` (site
+/// permissions).
+///
+/// Never copy: `SingletonLock`/`SingletonCookie`/`SingletonSocket` (PID/
+/// socket-bound — copying these into a fresh profile would make Chrome
+/// think another live process already owns it), `pinchtab.pid`/
+/// `.pinchtab-state/` (this orchestrator's own per-instance state),
+/// `Cache`/`Code Cache`/`GPUCache`/`ShaderCache` (pure bloat, regenerates
+/// on its own), `Sessions` (tab-restore — would try to reopen the login
+/// window's own old tabs), `History`/`Visited Links`/`Favicons` (irrelevant
+/// to login, a privacy leak into every session if copied), `Login Data`
+/// (saved passwords/autofill — carrying cookies, not autofill).
+const LOGIN_PROFILE_COPY_FILES: &[&str] = &["Cookies", "Cookies-journal", "Preferences"];
+const LOGIN_PROFILE_COPY_DIRS: &[&str] = &["Local Storage", "IndexedDB", "Session Storage"];
+
+/// Copies the canonical login profile's cookies/storage into a fresh
+/// session's own profile directory — called from `ensure_session_workspace`
+/// after `configure_pinchtab` (directory + PinchTab config exist) but
+/// before `spawn_pinchtab_server` (Chrome hasn't launched against it yet).
+/// A no-op, not an error, if the user has never logged in (no canonical
+/// profile yet) — sessions behave exactly as they did before this feature
+/// existed. Each session gets its own independent copy rather than sharing
+/// one profile directory: Chrome locks a `--user-data-dir` to one running
+/// process, and Daimon supports multiple concurrent sessions each with
+/// their own Chrome instance, so literally pointing them at the same
+/// directory would break the moment a second session started.
+async fn copy_login_profile_into(session_profile_dir: &Path) -> Result<(), String> {
+    let source_default = canonical_browser_profile_dir()
+        .join(".pinchtab")
+        .join("profiles")
+        .join("default")
+        .join("Default");
+    if !source_default.is_dir() {
+        return Ok(());
+    }
+
+    let dest_default = session_profile_dir.join(".pinchtab").join("profiles").join("default").join("Default");
+    std::fs::create_dir_all(&dest_default).map_err(|e| format!("failed to create profile directory: {e}"))?;
+
+    for name in LOGIN_PROFILE_COPY_FILES {
+        let src = source_default.join(name);
+        if src.is_file() {
+            if let Err(e) = std::fs::copy(&src, dest_default.join(name)) {
+                log::warn!("failed to copy login profile file {name}: {e}");
+            }
+        }
+    }
+    for name in LOGIN_PROFILE_COPY_DIRS {
+        let src = source_default.join(name);
+        if src.is_dir() {
+            if let Err(e) = copy_dir_recursive(&src, &dest_default.join(name)) {
+                log::warn!("failed to copy login profile directory {name}: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dest_path = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), dest_path)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
 // Node agent process
 // ---------------------------------------------------------------------
 
@@ -924,6 +1148,7 @@ fn spawn_node_agent(
     node_port: u16,
     pinchtab_port: u16,
     pinchtab_token: &str,
+    spotify_access_token: Option<&str>,
 ) -> Result<Box<dyn ChildWrapper>, String> {
     let (program, args, cwd) = resolve_node_agent_launch();
     let (stdout, stderr) = log_file_stdio(session_id, "node");
@@ -935,6 +1160,7 @@ fn spawn_node_agent(
     let vault_dir = crate::vault::vault_path();
     let automations_dir = crate::automation::automations_dir();
     let recordings_dir = crate::recordings::recordings_dir();
+    let documents_dir = documents_dir();
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
@@ -948,10 +1174,20 @@ fn spawn_node_agent(
             .env("DAIMON_AUTOMATIONS_DIR", &automations_dir)
             .env("DAIMON_MEMORY_DB", &memory_db)
             .env("DAIMON_RECORDINGS_DIR", &recordings_dir)
+            .env("DAIMON_DOCUMENTS_DIR", &documents_dir)
             .stdout(stdout)
             .stderr(stderr);
         if let Some(key) = &api_key {
             cmd.env("ANTHROPIC_API_KEY", key);
+        }
+        // Short-lived by design — fetched fresh (via the stored refresh
+        // token) right before every spawn rather than ever handing the
+        // long-lived refresh token itself to the agent process. Absent
+        // entirely (not an empty string) if no Spotify account is
+        // connected, so `agents/src/spotify.ts` can treat "not set" as "not
+        // connected" without a separate status check.
+        if let Some(token) = spotify_access_token {
+            cmd.env("SPOTIFY_ACCESS_TOKEN", token);
         }
     });
     command.wrap(ProcessGroup::leader());
@@ -1129,6 +1365,14 @@ async fn recycle_pinchtab(session_id: &str, profile_dir: &Path, pinchtab_port: u
     if let Some(pid) = old_pid {
         kill_pinchtab_tree(profile_dir, pid).await;
     }
+
+    // Re-check the canonical login profile on every recycle, not just a
+    // session's first spawn — this is what actually makes "log in via
+    // Settings while a chat is already open" take effect for that chat,
+    // rather than only ever benefiting a session started *after* the login.
+    // See `copy_login_profile_into`'s own doc comment; a no-op if nothing's
+    // changed there since the last spawn/recycle.
+    copy_login_profile_into(profile_dir).await?;
 
     let new_child = spawn_pinchtab_server(session_id, profile_dir)?;
     if let Err(e) = wait_for_pinchtab_health(profile_dir).await {
@@ -1363,6 +1607,9 @@ pub async fn ensure_session_workspace<R: tauri::Runtime>(
     let pinchtab_token = uuid::Uuid::new_v4().to_string();
 
     configure_pinchtab(&profile_dir, pinchtab_port, &pinchtab_token).await?;
+    // See `copy_login_profile_into`'s doc comment — no-ops if the user has
+    // never done the one-time browser login in Settings.
+    copy_login_profile_into(&profile_dir).await?;
 
     let pinchtab_child = spawn_pinchtab_server(session_id, &profile_dir)?;
     let pinchtab_pid = pinchtab_child.id();
@@ -1373,7 +1620,23 @@ pub async fn ensure_session_workspace<R: tauri::Runtime>(
         return Err(e);
     }
 
-    let node_child = match spawn_node_agent(session_id, node_port, pinchtab_port, &pinchtab_token) {
+    // Best-effort: a failure to refresh (no account connected, or a real
+    // network/API error) should never block a session from starting over
+    // something as secondary as music playback — just start without it, so
+    // `SPOTIFY_ACCESS_TOKEN` ends up absent and `play_music_by_name` fails
+    // with a clear "not connected" message if the model tries to use it.
+    let spotify_access_token = crate::spotify_oauth::fresh_access_token().await.unwrap_or_else(|e| {
+        log::warn!("session {session_id}: failed to refresh Spotify access token: {e}");
+        None
+    });
+
+    let node_child = match spawn_node_agent(
+        session_id,
+        node_port,
+        pinchtab_port,
+        &pinchtab_token,
+        spotify_access_token.as_deref(),
+    ) {
         Ok(child) => child,
         Err(e) => {
             if let Some(pid) = pinchtab_pid {

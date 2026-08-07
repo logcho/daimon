@@ -32,6 +32,7 @@ use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 use tokio::sync::Mutex;
 
 use crate::session;
@@ -46,8 +47,20 @@ pub struct Automation {
     /// Standard 5-field cron expression (minute hour day month weekday),
     /// e.g. `"0 8 * * *"` for daily at 8am. Stored exactly as given —
     /// `cron_schedule` below is what turns it into something we can
-    /// actually evaluate.
+    /// actually evaluate. Empty/unused when `once_at` is set — the two are
+    /// mutually exclusive (see `once_at`'s own doc comment).
     schedule: String,
+    /// If set, this is a one-shot reminder rather than a recurring
+    /// automation: an RFC3339 instant to fire at exactly once, not a cron
+    /// expression. Added for the "remind me about X on this date" case,
+    /// which a plain cron schedule can't represent (every cron field is
+    /// modulo-recurring by construction — there's no "just this once").
+    /// `is_due` branches on whether this is `Some`; after a one-shot fires,
+    /// `record_run_outcome` sets `enabled = false` rather than deleting it,
+    /// so it stays visible in the automations list as "fired" history
+    /// instead of silently disappearing.
+    #[serde(default)]
+    once_at: Option<String>,
     enabled: bool,
     created_at: String,
     last_run_at: Option<String>,
@@ -119,6 +132,17 @@ fn parse_cron(schedule: &str) -> Result<cron::Schedule, String> {
 /// creation, if it's never run) has already passed. `enabled` is checked by
 /// the caller, not here.
 fn is_due(automation: &Automation, now: DateTime<Utc>) -> bool {
+    if let Some(once_at) = &automation.once_at {
+        // One-shot: due once, at exactly `once_at`, and never again — a
+        // one-shot that has already run is disabled by `record_run_outcome`
+        // (see that function), but this guard is kept here too so `is_due`
+        // stays correct on its own even before that write lands.
+        if automation.last_run_at.is_some() {
+            return false;
+        }
+        return DateTime::parse_from_rfc3339(once_at).is_ok_and(|dt| dt.with_timezone(&Utc) <= now);
+    }
+
     let Ok(schedule) = parse_cron(&automation.schedule) else {
         // Shouldn't happen for anything that made it into the store (both
         // `create_automation` and the pending-request promotion below
@@ -162,6 +186,32 @@ pub async fn create_automation(name: String, instruction: String, schedule: Stri
         name,
         instruction,
         schedule,
+        once_at: None,
+        enabled: true,
+        created_at: now_rfc3339(),
+        last_run_at: None,
+        last_run_status: None,
+        last_run_result: None,
+    };
+    add_automation(automation.clone()).await;
+    Ok(automation)
+}
+
+/// Same shape as `create_automation` but for a single, non-repeating
+/// reminder — see `Automation::once_at`'s doc comment for why this needs a
+/// distinct field/command rather than trying to shoehorn "just once" into a
+/// cron expression. `remind_at` must be an RFC3339 instant; validated here
+/// the same way `create_automation` validates its cron string.
+#[tauri::command]
+pub async fn create_reminder(name: String, instruction: String, remind_at: String) -> Result<Automation, String> {
+    DateTime::parse_from_rfc3339(&remind_at).map_err(|e| format!("invalid reminder time \"{remind_at}\": {e}"))?;
+
+    let automation = Automation {
+        id: uuid::Uuid::new_v4().to_string(),
+        name,
+        instruction,
+        schedule: String::new(),
+        once_at: Some(remind_at),
         enabled: true,
         created_at: now_rfc3339(),
         last_run_at: None,
@@ -197,19 +247,29 @@ pub async fn delete_automation(id: String) -> Result<(), String> {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PendingAutomationRequest {
     name: String,
     instruction: String,
-    schedule: String,
+    /// Exactly one of `schedule`/`once_at` (`onceAt` on the wire, matching
+    /// `agents/src/automation.ts`'s JSON) is set — mirrors the same
+    /// mutual-exclusivity as `Automation` itself (see that struct's
+    /// `once_at` doc comment). Written by either `agents/src/automation.ts`'s
+    /// `requestAutomation` (recurring) or `requestReminder` (one-shot).
+    #[serde(default)]
+    schedule: Option<String>,
+    #[serde(default)]
+    once_at: Option<String>,
 }
 
 /// Scans `automations_dir()` for `pending-*.json` files left by the agent's
-/// `create_automation` tool (`agents/src/automation.ts`). Each one is
-/// re-validated here — the container's claim that its cron string parses
-/// isn't trusted as-is, this is the authoritative check — and either
-/// promoted into the real store (fresh id, `enabled: true`, run fields
-/// unset) or discarded with a logged warning. Either way the pending file is
-/// removed: a malformed request is not retried forever.
+/// `create_automation`/`create_reminder` tools (`agents/src/automation.ts`).
+/// Each one is re-validated here — the container's claim that its cron
+/// string or reminder time parses isn't trusted as-is, this is the
+/// authoritative check — and either promoted into the real store (fresh id,
+/// `enabled: true`, run fields unset) or discarded with a logged warning.
+/// Either way the pending file is removed: a malformed request is not
+/// retried forever.
 async fn promote_pending_requests() {
     let dir = automations_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -244,13 +304,26 @@ async fn promote_one(path: &std::path::Path) -> Result<Automation, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("failed to read: {e}"))?;
     let request: PendingAutomationRequest =
         serde_json::from_str(&content).map_err(|e| format!("failed to parse: {e}"))?;
-    parse_cron(&request.schedule)?;
+
+    let (schedule, once_at) = match (request.schedule, request.once_at) {
+        (Some(schedule), None) => {
+            parse_cron(&schedule)?;
+            (schedule, None)
+        }
+        (None, Some(once_at)) => {
+            DateTime::parse_from_rfc3339(&once_at)
+                .map_err(|e| format!("invalid reminder time \"{once_at}\": {e}"))?;
+            (String::new(), Some(once_at))
+        }
+        _ => return Err("pending request must set exactly one of schedule/onceAt".to_string()),
+    };
 
     let automation = Automation {
         id: uuid::Uuid::new_v4().to_string(),
         name: request.name,
         instruction: request.instruction,
-        schedule: request.schedule,
+        schedule,
+        once_at,
         enabled: true,
         created_at: now_rfc3339(),
         last_run_at: None,
@@ -267,6 +340,14 @@ async fn record_run_outcome(id: &str, outcome: session::EphemeralOutcome) {
         automation.last_run_at = Some(now_rfc3339());
         automation.last_run_status = Some(outcome.status);
         automation.last_run_result = outcome.result;
+        // A one-shot reminder only ever fires once by definition — disable
+        // it rather than delete it, so it stays visible in the automations
+        // list as "fired" history (with its result) instead of silently
+        // vanishing. `is_due` would also refuse to re-fire it (guarded on
+        // `last_run_at`), but disabling makes that explicit in the UI too.
+        if automation.once_at.is_some() {
+            automation.enabled = false;
+        }
     }
     save_automations(&automations);
 }
@@ -287,14 +368,104 @@ pub(crate) async fn poll_and_fire<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
 
     for automation in due {
         log::info!("automation {} ({:?}): due, firing", automation.id, automation.name);
-        let outcome = session::run_ephemeral(app, automation.instruction.clone()).await;
+        // Confirmed empirically as a real, live bug, not a hypothetical: an
+        // ephemeral run has zero memory of the original conversation that
+        // scheduled it, so an instruction like "Remind the user: X" — sound
+        // advice for how to *phrase* a reminder — got taken completely
+        // literally and the model called create_reminder *again*, recursively
+        // rescheduling something that had just fired instead of just stating
+        // X. This prefix runs only for the actual firing, not for
+        // create_automation/create_reminder's own preview text anywhere else,
+        // and makes explicit what the instruction text alone couldn't:
+        // this IS the scheduled execution, not a request to schedule one.
+        let effective_instruction = format!(
+            "(This instruction is firing automatically on its own schedule — it already IS the \
+             scheduled reminder/automation running, not a request to set one up. Just do what it \
+             says, or state its message directly as your result. Do not call create_reminder or \
+             create_automation in response to this unless the instruction below explicitly asks \
+             you to schedule something else, separate from itself.)\n\n{}",
+            automation.instruction
+        );
+        let outcome = session::run_ephemeral(app, effective_instruction).await;
         log::info!(
             "automation {} ({:?}): run finished, status={}",
             automation.id,
             automation.name,
             outcome.status
         );
+        notify_run_outcome(app, &automation, &outcome);
+        if automation.once_at.is_some() {
+            emit_reminder_fired(app, &automation, &outcome);
+        }
         record_run_outcome(&automation.id, outcome).await;
+    }
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ReminderFiredPayload {
+    id: String,
+    name: String,
+    status: String,
+    result: Option<String>,
+}
+
+/// A dedicated event, separate from the generic `session-status` channel a
+/// fired reminder's ephemeral run also streams over (`session::run_ephemeral`
+/// → `run_and_stream`) — landing a reminder as just another entry in the
+/// ordinary session list is exactly what the user reported as too easy to
+/// miss. The frontend's `onReminderFired` listener (see `src/lib/api.ts`)
+/// reacts to this by force-expanding the panel and showing a dedicated,
+/// dismiss-until-acknowledged alert, regardless of whichever tab/session is
+/// currently showing. Only emitted for actual one-shot reminders
+/// (`once_at.is_some()`) — a recurring `create_automation` firing doesn't
+/// get this treatment, matching the user's specific complaint about
+/// reminders, not automations generally.
+fn emit_reminder_fired<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    automation: &Automation,
+    outcome: &session::EphemeralOutcome,
+) {
+    let payload = ReminderFiredPayload {
+        id: automation.id.clone(),
+        name: automation.name.clone(),
+        status: outcome.status.clone(),
+        result: outcome.result.clone(),
+    };
+    let _ = app.emit("reminder-fired", payload);
+}
+
+/// A fired automation was previously completely silent unless the app
+/// window happened to already be open and mounted at the exact moment it
+/// ran — the `session-status` channel it also streams over has no reach
+/// beyond a live webview. This is what makes "remind me about X on this
+/// date" an actual reminder rather than a line in a JSON file nobody's
+/// looking at: a real macOS notification, fired regardless of whether the
+/// app window is open. Best-effort — a failure to show a notification (e.g.
+/// the user has never granted notification permission) should never be
+/// treated as the automation run itself having failed.
+fn notify_run_outcome<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    automation: &Automation,
+    outcome: &session::EphemeralOutcome,
+) {
+    use tauri_plugin_notification::NotificationExt;
+
+    let title = if automation.once_at.is_some() {
+        format!("Reminder: {}", automation.name)
+    } else {
+        automation.name.clone()
+    };
+    let body = match outcome.status.as_str() {
+        "error" => outcome.result.clone().unwrap_or_else(|| "Something went wrong.".to_string()),
+        _ => outcome
+            .result
+            .clone()
+            .unwrap_or_else(|| "Done — no summary was returned.".to_string()),
+    };
+
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        log::warn!("automation {} ({:?}): failed to show notification: {e}", automation.id, automation.name);
     }
 }
 
@@ -348,6 +519,7 @@ mod tests {
             name: "test".into(),
             instruction: "noop".into(),
             schedule: "* * * * *".into(), // every minute
+            once_at: None,
             enabled: true,
             created_at: "2020-01-01T00:00:00Z".into(),
             last_run_at: Some("2020-01-01T00:00:00Z".into()),
@@ -364,6 +536,7 @@ mod tests {
             name: "test".into(),
             instruction: "noop".into(),
             schedule: "0 8 * * *".into(),
+            once_at: None,
             enabled: true,
             created_at: "2020-01-01T00:00:00Z".into(),
             last_run_at: Some(Utc::now().to_rfc3339()),
@@ -443,7 +616,15 @@ mod tests {
     /// Phase 10 brief.
     #[tokio::test(flavor = "multi_thread")]
     async fn poll_and_fire_runs_a_due_automation_and_tears_down_its_workspace() {
-        let app = crate::build_app(mock_builder());
+        // `notify_run_outcome` calls `app.notification()`, which needs the
+        // plugin's state `.manage()`d — in the real app this happens because
+        // `run()` puts `tauri_plugin_notification::init()` on the builder
+        // before it ever reaches `build_app` (see `run()`'s own comment on
+        // why `log`/`global_shortcut` are registered there and not inside
+        // `build_app` itself); a bare `mock_builder()` skips that, so this
+        // test has to add it back itself or `app.notification()` panics with
+        // "state() called before manage()".
+        let app = crate::build_app(mock_builder().plugin(tauri_plugin_notification::init()));
 
         let events: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let events_for_listener = events.clone();
@@ -458,6 +639,7 @@ mod tests {
             name: "automation test".into(),
             instruction: "say hello".into(),
             schedule: "* * * * *".into(),
+            once_at: None,
             enabled: true,
             created_at: "2020-01-01T00:00:00Z".into(),
             last_run_at: Some("2020-01-01T00:00:00Z".into()),

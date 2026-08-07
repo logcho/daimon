@@ -15,9 +15,12 @@ dist-ssr
 # Secrets — see .env.example
 .env
 
-# Local persistent memory/skills DB — bind-mounted into the workspace
-# container, not source (see workspace.rs)
+# Local persistent memory/skills DB — passed to the agent process as
+# DAIMON_MEMORY_DB, not source (see workspace.rs). The second path catches the
+# copy that lands here when the agent server is run directly out of agents/
+# (npm start) with no DAIMON_MEMORY_DB set, rather than spawned by the daemon.
 /memory/
+/agents/memory/
 
 # Daimon-managed default notes vault (falls back to this when no Obsidian
 # vault path is configured) — bind-mounted into the workspace container,

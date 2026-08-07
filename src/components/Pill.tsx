@@ -45,6 +45,7 @@ export function Pill({
   dictationState = "idle",
   dictationLocked = false,
   dictationMessage,
+  hasFiredReminders = false,
 }: {
   sessions: Session[];
   onExpand: () => void;
@@ -54,6 +55,13 @@ export function Pill({
    * meaningful while `dictationState === "recording"`. */
   dictationLocked?: boolean;
   dictationMessage?: string;
+  /** A reminder fired while the panel was collapsed and hasn't been
+   * dismissed yet — expanding already happens automatically the moment it
+   * fires (see App.tsx's onReminderFired handler), so this only matters if
+   * the user collapses again before reading it; without it there'd be no
+   * sign anything's still waiting. See ReminderAlert.tsx for where it's
+   * actually shown once expanded. */
+  hasFiredReminders?: boolean;
 }) {
   const [cycleIndex, setCycleIndex] = useState(0);
   const mouseDownAt = useRef<{ x: number; y: number } | null>(null);
@@ -176,6 +184,16 @@ export function Pill({
           // dot is only still needed for the error state, which doesn't
           // replace the logo.
           <span className="absolute left-0.5 top-0.5 h-2.5 w-2.5 rounded-full border border-neutral-950 bg-red-400" />
+        )}
+        {hasFiredReminders && (
+          // Opposite corner from the dictation-error dot above, so the two
+          // can coexist without overlapping — same size/border/static
+          // treatment (no pulse: the pill's own status dot may already be
+          // pulsing for a running session, and this project caps
+          // continuous motion at one animating element per screen), just
+          // the system's one accent color instead of red, since this isn't
+          // an error.
+          <span className="absolute right-0.5 top-0.5 h-2.5 w-2.5 rounded-full border border-neutral-950 bg-[#4f8dff]" />
         )}
       </button>
     </div>

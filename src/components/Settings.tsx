@@ -2,17 +2,25 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   connectGmailAccount,
+  connectSpotifyAccount,
   disconnectGmailAccount,
+  disconnectSpotifyAccount,
   downloadVoiceModel,
+  finishBrowserLogin,
   getAccessibilityTrustStatus,
   getApiKeyStatus,
+  getBrowserLoginStatus,
   getClaudeCliStatus,
   getGmailAccount,
   getGoogleClientIdStatus,
+  getSpotifyAccount,
+  getSpotifyClientIdStatus,
   getVaultPathStatus,
   getVoiceModelStatus,
+  loginBrowserProfile,
   setApiKey,
   setGoogleClientId,
+  setSpotifyClientId,
   setVaultPath,
 } from "../lib/api";
 import type { ConnectedAccount, VaultPathStatus, VoiceModelStatus } from "../types";
@@ -37,6 +45,23 @@ export function Settings() {
   const [connectState, setConnectState] = useState<ConnectState>("idle");
   const [connectErrorMessage, setConnectErrorMessage] = useState("");
   const [disconnecting, setDisconnecting] = useState(false);
+
+  // Same shape as the Google client id / Gmail account state above.
+  const [hasSpotifyClientId, setHasSpotifyClientId] = useState<boolean | null>(null);
+  const [spotifyClientIdDraft, setSpotifyClientIdDraft] = useState("");
+  const [spotifyClientIdSaveState, setSpotifyClientIdSaveState] = useState<SaveState>("idle");
+  const [spotifyClientIdErrorMessage, setSpotifyClientIdErrorMessage] = useState("");
+  const [spotifyAccount, setSpotifyAccount] = useState<ConnectedAccount | null | undefined>(undefined);
+  const [spotifyConnectState, setSpotifyConnectState] = useState<ConnectState>("idle");
+  const [spotifyConnectErrorMessage, setSpotifyConnectErrorMessage] = useState("");
+  const [spotifyDisconnecting, setSpotifyDisconnecting] = useState(false);
+
+  // null = still checking. true only once a real login has actually been
+  // captured (a non-empty cookie jar), not just whether the flow's been
+  // opened before — see get_browser_login_status's own doc comment.
+  const [loginStatus, setLoginStatus] = useState<boolean | null>(null);
+  const [loginState, setLoginState] = useState<"idle" | "opening" | "open" | "finishing" | "error">("idle");
+  const [loginErrorMessage, setLoginErrorMessage] = useState("");
 
   const [vaultStatus, setVaultStatus] = useState<VaultPathStatus | null>(null);
   const [vaultPathDraft, setVaultPathDraft] = useState("");
@@ -70,6 +95,12 @@ export function Settings() {
   }, []);
 
   useEffect(() => {
+    getBrowserLoginStatus()
+      .then(setLoginStatus)
+      .catch(() => setLoginStatus(false));
+  }, []);
+
+  useEffect(() => {
     getApiKeyStatus()
       .then(setHasKey)
       .catch(() => setHasKey(false));
@@ -87,6 +118,19 @@ export function Settings() {
       .then(setGmailAccount)
       .catch(() => setGmailAccount(null));
   }, [hasGoogleClientId]);
+
+  useEffect(() => {
+    getSpotifyClientIdStatus()
+      .then(setHasSpotifyClientId)
+      .catch(() => setHasSpotifyClientId(false));
+  }, []);
+
+  useEffect(() => {
+    if (!hasSpotifyClientId) return;
+    getSpotifyAccount()
+      .then(setSpotifyAccount)
+      .catch(() => setSpotifyAccount(null));
+  }, [hasSpotifyClientId]);
 
   useEffect(() => {
     getVoiceModelStatus()
@@ -174,6 +218,77 @@ export function Settings() {
       setConnectState("error");
     } finally {
       setDisconnecting(false);
+    }
+  }
+
+  async function handleSaveSpotifyClientId(e: React.FormEvent) {
+    e.preventDefault();
+    const clientId = spotifyClientIdDraft.trim();
+    if (!clientId) return;
+
+    setSpotifyClientIdSaveState("saving");
+    try {
+      await setSpotifyClientId(clientId);
+      setHasSpotifyClientId(true);
+      setSpotifyClientIdDraft("");
+      setSpotifyClientIdSaveState("saved");
+      setTimeout(() => setSpotifyClientIdSaveState("idle"), 2500);
+    } catch (err) {
+      setSpotifyClientIdErrorMessage(err instanceof Error ? err.message : String(err));
+      setSpotifyClientIdSaveState("error");
+    }
+  }
+
+  async function handleConnectSpotify() {
+    setSpotifyConnectState("connecting");
+    setSpotifyConnectErrorMessage("");
+    try {
+      const account = await connectSpotifyAccount();
+      setSpotifyAccount(account);
+      setSpotifyConnectState("idle");
+    } catch (err) {
+      setSpotifyConnectErrorMessage(err instanceof Error ? err.message : String(err));
+      setSpotifyConnectState("error");
+    }
+  }
+
+  async function handleDisconnectSpotify() {
+    setSpotifyDisconnecting(true);
+    try {
+      await disconnectSpotifyAccount();
+      setSpotifyAccount(null);
+      setSpotifyConnectState("idle");
+      setSpotifyConnectErrorMessage("");
+    } catch (err) {
+      setSpotifyConnectErrorMessage(err instanceof Error ? err.message : String(err));
+      setSpotifyConnectState("error");
+    } finally {
+      setSpotifyDisconnecting(false);
+    }
+  }
+
+  async function handleStartLogin() {
+    setLoginState("opening");
+    setLoginErrorMessage("");
+    try {
+      await loginBrowserProfile();
+      setLoginState("open");
+    } catch (err) {
+      setLoginErrorMessage(err instanceof Error ? err.message : String(err));
+      setLoginState("error");
+    }
+  }
+
+  async function handleFinishLogin() {
+    setLoginState("finishing");
+    try {
+      await finishBrowserLogin();
+      const status = await getBrowserLoginStatus();
+      setLoginStatus(status);
+      setLoginState("idle");
+    } catch (err) {
+      setLoginErrorMessage(err instanceof Error ? err.message : String(err));
+      setLoginState("error");
     }
   }
 
@@ -348,6 +463,150 @@ export function Settings() {
             )}
           </div>
         )}
+
+        {hasSpotifyClientId === false && (
+          <>
+            <p className="mt-4 text-xs text-neutral-500">
+              ○ no spotify client id configured — needed before connecting spotify (used by
+              play_music_by_name to search and play a specific song/artist through your real
+              desktop app)
+            </p>
+            <form onSubmit={handleSaveSpotifyClientId} className="mt-4 space-y-2">
+              <input
+                type="text"
+                value={spotifyClientIdDraft}
+                onChange={(e) => setSpotifyClientIdDraft(e.target.value)}
+                placeholder="spotify client id"
+                className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 font-mono text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-[#4f8dff]/60 focus:outline-none focus:ring-2 focus:ring-[#4f8dff]/20"
+              />
+              <div className="flex items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={!spotifyClientIdDraft.trim() || spotifyClientIdSaveState === "saving"}
+                  className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
+                >
+                  {spotifyClientIdSaveState === "saving" ? "saving…" : "save"}
+                </button>
+                {spotifyClientIdSaveState === "saved" && (
+                  <span className="text-xs text-emerald-400">saved</span>
+                )}
+                {spotifyClientIdSaveState === "error" && (
+                  <span className="text-xs text-red-400">{spotifyClientIdErrorMessage}</span>
+                )}
+              </div>
+            </form>
+            <p className="mt-3 text-xs leading-relaxed text-neutral-600">
+              create one in{" "}
+              <button
+                type="button"
+                onClick={() => openUrl("https://developer.spotify.com/dashboard")}
+                className="text-[#4f8dff] hover:underline"
+              >
+                developer.spotify.com/dashboard
+              </button>{" "}
+              → create app → add this exact redirect URI (Spotify requires an exact match, unlike
+              Google):{" "}
+              <code className="text-neutral-400">http://127.0.0.1:38214/callback</code>
+            </p>
+          </>
+        )}
+
+        {hasSpotifyClientId === null && (
+          <p className="mt-4 text-xs text-neutral-500">checking…</p>
+        )}
+
+        {hasSpotifyClientId === true && (
+          <div className="mt-3 flex items-center justify-between liquid-glass-subtle rounded-xl px-3 py-2.5">
+            <div>
+              <p className="text-sm font-medium text-neutral-100">spotify</p>
+              {spotifyAccount === undefined && (
+                <p className="text-xs text-neutral-500">checking…</p>
+              )}
+              {spotifyAccount === null && (
+                <p className="text-xs text-neutral-500">○ not connected</p>
+              )}
+              {spotifyAccount && (
+                <p className="text-xs text-emerald-400">● {spotifyAccount.email}</p>
+              )}
+              {spotifyConnectState === "error" && (
+                <p className="mt-1 text-xs text-red-400">{spotifyConnectErrorMessage}</p>
+              )}
+            </div>
+
+            {spotifyAccount ? (
+              <button
+                type="button"
+                onClick={handleDisconnectSpotify}
+                disabled={spotifyDisconnecting}
+                className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
+              >
+                {spotifyDisconnecting ? "disconnecting…" : "disconnect"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleConnectSpotify}
+                disabled={spotifyConnectState === "connecting" || spotifyAccount === undefined}
+                className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
+              >
+                {spotifyConnectState === "connecting" ? "waiting for spotify sign-in…" : "connect spotify"}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-8 border-t border-white/5 pt-6">
+        <h3 className="text-sm font-semibold tracking-tight text-neutral-100">browser_login</h3>
+        <p className="mt-1 text-xs leading-relaxed text-neutral-500">
+          log in once in a real browser window, and daimon's own background browser reuses that
+          login (cookies, session) for every task after — without this, every task starts logged
+          out, e.g. daimon can't act on linkedin as you until you do this.
+        </p>
+
+        <div className="mt-3 flex items-center justify-between liquid-glass-subtle rounded-xl px-3 py-2.5">
+          <div>
+            <p className="text-sm font-medium text-neutral-100">websites</p>
+            {loginStatus === null && loginState === "idle" && (
+              <p className="text-xs text-neutral-500">checking…</p>
+            )}
+            {loginStatus === false && loginState === "idle" && (
+              <p className="text-xs text-neutral-500">○ not logged in anywhere yet</p>
+            )}
+            {loginStatus === true && loginState === "idle" && (
+              <p className="text-xs text-emerald-400">● logged in</p>
+            )}
+            {loginState === "open" && (
+              <p className="text-xs text-[#4f8dff]">a real browser window is open — log in, then click done</p>
+            )}
+            {loginState === "error" && <p className="mt-1 text-xs text-red-400">{loginErrorMessage}</p>}
+          </div>
+
+          {loginState === "open" ? (
+            <button
+              type="button"
+              onClick={handleFinishLogin}
+              className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95"
+            >
+              done
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleStartLogin}
+              disabled={loginState === "opening" || loginState === "finishing"}
+              className="liquid-glass-subtle rounded-full px-4 py-1.5 text-xs font-medium text-neutral-100 transition duration-200 hover:text-white hover:[border-color:rgba(255,255,255,0.25)] active:scale-95 disabled:opacity-40"
+            >
+              {loginState === "opening"
+                ? "opening…"
+                : loginState === "finishing"
+                  ? "saving…"
+                  : loginStatus
+                    ? "log in again"
+                    : "log in"}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="mt-8 border-t border-white/5 pt-6">

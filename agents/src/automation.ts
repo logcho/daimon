@@ -36,3 +36,23 @@ export async function requestAutomation(name: string, instruction: string, sched
   const file = path.join(AUTOMATIONS_DIR, `pending-${randomUUID()}.json`);
   await fs.writeFile(file, JSON.stringify({ name, instruction, schedule }), "utf-8");
 }
+
+/**
+ * Same shape as `requestAutomation`, but for a single, non-repeating
+ * reminder — `remindAt` is an RFC3339 instant to fire at exactly once, not
+ * a cron expression (a cron field is modulo-recurring by construction,
+ * there's no "just this once" — see `Automation::once_at`'s doc comment in
+ * `src-tauri/src/automation.rs`). Validated the same "fast in-conversation
+ * feedback, not the authoritative check" way as `requestAutomation` — the
+ * daemon re-validates when it promotes the pending request.
+ */
+export async function requestReminder(name: string, instruction: string, remindAt: string): Promise<void> {
+  const parsed = new Date(remindAt);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`"${remindAt}" is not a valid date/time`);
+  }
+
+  await fs.mkdir(AUTOMATIONS_DIR, { recursive: true });
+  const file = path.join(AUTOMATIONS_DIR, `pending-${randomUUID()}.json`);
+  await fs.writeFile(file, JSON.stringify({ name, instruction, onceAt: parsed.toISOString() }), "utf-8");
+}

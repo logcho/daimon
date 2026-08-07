@@ -4,6 +4,8 @@ mod oauth;
 mod recordings;
 mod session;
 mod settings;
+mod skills;
+mod spotify_oauth;
 mod terminal;
 mod vault;
 mod vibrancy;
@@ -99,12 +101,21 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             oauth::connect_gmail_account,
             oauth::get_gmail_account,
             oauth::disconnect_gmail_account,
+            spotify_oauth::get_spotify_client_id_status,
+            spotify_oauth::set_spotify_client_id,
+            spotify_oauth::connect_spotify_account,
+            spotify_oauth::get_spotify_account,
+            spotify_oauth::disconnect_spotify_account,
+            skills::list_skills,
+            skills::create_skill,
+            skills::delete_skill,
             vault::get_vault_path_status,
             vault::set_vault_path,
             vault::list_vault_files,
             vault::read_vault_file,
             automation::list_automations,
             automation::create_automation,
+            automation::create_reminder,
             automation::set_automation_enabled,
             automation::delete_automation,
             voice::get_voice_model_status,
@@ -112,6 +123,9 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             voice::toggle_dictation,
             workspace::get_chromium_status,
             workspace::download_chromium,
+            workspace::login_browser_profile,
+            workspace::finish_browser_login,
+            workspace::get_browser_login_status,
             terminal::start_terminal,
             terminal::write_to_terminal,
             terminal::resize_terminal,
@@ -137,7 +151,8 @@ pub fn run() {
     // task after the fact.
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build());
+        .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())
+        .plugin(tauri_plugin_notification::init());
 
     #[allow(unused_mut)]
     let mut app = build_app(builder);
