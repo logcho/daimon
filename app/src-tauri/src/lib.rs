@@ -14,8 +14,12 @@ pub(crate) struct SessionStatusPayload {
 }
 
 #[tauri::command]
-async fn agent_status(state: tauri::State<'_, AgentManager>) -> Result<AgentStatus, String> {
-    Ok(state.status().await)
+async fn agent_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<AgentStatus, String> {
+    // The app owns its server: mounting the chat window brings the agent up.
+    Ok(state.ensure(&app).await?)
 }
 
 #[tauri::command]
@@ -50,6 +54,25 @@ pub fn run() {
             send_message,
             close_agent
         ])
+        .setup(|app| {
+            // SIGTERM (e.g. `kill` from a terminal, or the dev watcher) does
+            // not fire RunEvent::Exit on its own — exit cleanly instead so
+            // the Exit handler sweeps the agent server.
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut term = match signal(SignalKind::terminate()) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    term.recv().await;
+                    handle.exit(0);
+                });
+            }
+            Ok(())
+        })
         .build(tauri::generate_context!())
         .expect("error while building daimon app")
         .run(|app_handle, event| {

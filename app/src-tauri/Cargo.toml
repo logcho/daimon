@@ -16,7 +16,7 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-tokio = { version = "1", features = ["process", "time", "sync", "rt", "fs", "io-util"] }
+tokio = { version = "1", features = ["process", "time", "sync", "rt", "fs", "io-util", "signal"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 # kill(-pgid) — the agent spawns ipykernel children, so a plain child-kill

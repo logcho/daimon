@@ -39,6 +39,9 @@ enum ChildState {
 
 pub struct AgentManager {
     inner: Mutex<Option<ChildState>>,
+    /// Serializes ensure() — two concurrent calls (e.g. the mount effect
+    /// double-firing in dev) must collapse into one spawn, not leak two.
+    ensure_lock: tokio::sync::Mutex<()>,
     /// Preferred port — the adoption-probe target.
     port: u16,
     agents_dir: PathBuf,
@@ -55,55 +58,43 @@ impl AgentManager {
             .unwrap_or(DEFAULT_PORT);
         Self {
             inner: Mutex::new(None),
+            ensure_lock: tokio::sync::Mutex::new(()),
             port,
             agents_dir,
         }
     }
 
-    /// Report status, self-healing the cached state: a server that no longer
-    /// answers /health is dropped (the next ensure() will spawn a fresh one).
-    /// The mutex is never held across an await (Tauri commands must be Send).
-    pub async fn status(&self) -> AgentStatus {
-        let cached: Option<(bool, u16)> = {
-            let guard = self.inner.lock().unwrap();
-            match &*guard {
-                Some(ChildState::Managed { port, .. }) => Some((false, *port)),
-                Some(ChildState::Adopted { port }) => Some((true, *port)),
-                None => None,
-            }
-        };
-        match cached {
-            Some((adopted, port)) => {
-                if health(port).await.is_ok() {
-                    AgentStatus { running: true, adopted, port }
-                } else {
-                    *self.inner.lock().unwrap() = None;
-                    AgentStatus { running: false, adopted: false, port }
-                }
-            }
-            None => {
-                if health(self.port).await.is_ok() {
-                    *self.inner.lock().unwrap() = Some(ChildState::Adopted { port: self.port });
-                    AgentStatus { running: true, adopted: true, port: self.port }
-                } else {
-                    AgentStatus { running: false, adopted: false, port: self.port }
-                }
-            }
-        }
-    }
-
-    /// Make sure a server is up, then report its address. Idempotent.
+    /// Make sure a server is up, then report its address. Idempotent and
+    /// self-healing: a cached child that no longer answers /health is dropped
+    /// and a fresh one is spawned. The mutex is never held across an await.
     pub async fn ensure(&self, app: &AppHandle) -> Result<AgentStatus, String> {
+        // Serialized: a concurrent caller waits for the in-flight spawn, then
+        // sees the healthy cached child and returns instead of spawning its
+        // own (which would leak the first server).
+        let _guard = self.ensure_lock.lock().await;
+        // Sweep a server left behind by an abruptly-killed previous run (the
+        // pid file is kept after a successful spawn for exactly this) before
+        // probing or spawning.
+        let run_dir = app
+            .path()
+            .app_data_dir()
+            .map(|d| d.join("run"))
+            .map_err(|e| format!("no app data dir: {e}"))?;
+        self.reconcile_orphans(&run_dir);
         {
-            let guard = self.inner.lock().unwrap();
-            match &*guard {
-                Some(ChildState::Managed { port, .. }) => {
-                    return Ok(AgentStatus { running: true, adopted: false, port: *port });
+            let cached: Option<(bool, u16)> = {
+                let guard = self.inner.lock().unwrap();
+                match &*guard {
+                    Some(ChildState::Managed { port, .. }) => Some((false, *port)),
+                    Some(ChildState::Adopted { port }) => Some((true, *port)),
+                    None => None,
                 }
-                Some(ChildState::Adopted { port }) => {
-                    return Ok(AgentStatus { running: true, adopted: true, port: *port });
+            };
+            if let Some((adopted, port)) = cached {
+                if health(port).await.is_ok() {
+                    return Ok(AgentStatus { running: true, adopted, port });
                 }
-                None => {}
+                *self.inner.lock().unwrap() = None; // dead — respawn below
             }
         }
         // Nothing cached — probe the fixed port and adopt an external server.
@@ -111,17 +102,11 @@ impl AgentManager {
             *self.inner.lock().unwrap() = Some(ChildState::Adopted { port: self.port });
             return Ok(AgentStatus { running: true, adopted: true, port: self.port });
         }
-        self.spawn(app).await
+        self.spawn(app, &run_dir).await
     }
 
-    async fn spawn(&self, app: &AppHandle) -> Result<AgentStatus, String> {
-        let run_dir = app
-            .path()
-            .app_data_dir()
-            .map(|d| d.join("run"))
-            .map_err(|e| format!("no app data dir: {e}"))?;
-        std::fs::create_dir_all(&run_dir).map_err(|e| format!("cannot create run dir: {e}"))?;
-        self.reconcile_orphans(&run_dir);
+    async fn spawn(&self, _app: &AppHandle, run_dir: &std::path::Path) -> Result<AgentStatus, String> {
+        std::fs::create_dir_all(run_dir).map_err(|e| format!("cannot create run dir: {e}"))?;
 
         let out_path = run_dir.join("daimon-agent.out.log");
         let err_path = run_dir.join("daimon-agent.err.log");
@@ -141,6 +126,10 @@ impl AgentManager {
             .spawn()
             .map_err(|e| format!("failed to spawn the agent server (is uv on PATH?): {e}"))?;
         let pid = child.id().ok_or_else(|| "spawned process has no pid".to_string())?;
+        // Deliberately kept after a successful spawn: reconcile_orphans reads
+        // it on the next launch so an abruptly-killed parent (SIGKILL, crash)
+        // still sweeps its server. A dead or recycled pid fails the comm
+        // check and is ignored.
         let pid_path = run_dir.join("daimon-agent.pid");
         let _ = std::fs::write(&pid_path, pid.to_string());
 
@@ -153,7 +142,6 @@ impl AgentManager {
                     _log_out: log_out,
                     _log_err: log_err,
                 });
-                let _ = std::fs::remove_file(&pid_path);
                 return Ok(AgentStatus { running: true, adopted: false, port });
             }
             tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
@@ -165,9 +153,11 @@ impl AgentManager {
         ))
     }
 
-    /// Kill a server left behind by a crashed previous run (recorded in the
-    /// pid file). Checks the command name first so a recycled pid is never
-    /// killed blind.
+    /// Kill a server whose parent app is gone but that is still alive — an
+    /// abruptly-killed run (SIGKILL, crash) or a previous app instance that
+    /// the dev watcher replaced. The pid file survives a successful spawn
+    /// precisely so this works. Checks the command name first so a recycled
+    /// pid is never killed blind.
     fn reconcile_orphans(&self, run_dir: &std::path::Path) {
         let pid_path = run_dir.join("daimon-agent.pid");
         let Ok(pid_text) = std::fs::read_to_string(&pid_path) else { return };
