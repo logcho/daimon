@@ -1,0 +1,11 @@
+.venv/
+.env
+memory/
+vault/
+.daimon/
+__pycache__/
+.pytest_cache/
+*.db
+*.pyc
+dist/
+build/
