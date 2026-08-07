@@ -1,0 +1,24 @@
+[package]
+name = "daimon-app"
+version = "0.1.0"
+description = "Daimon chat app"
+edition = "2021"
+
+[lib]
+name = "daimon_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["process", "time", "sync", "rt", "fs", "io-util"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+# kill(-pgid) — the agent spawns ipykernel children, so a plain child-kill
+# would orphan the kernel; group-kill takes them all down with the leader.
+libc = "0.2"
