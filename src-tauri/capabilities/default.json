@@ -25,6 +25,8 @@
     "allow-start-session",
     "allow-send-message",
     "allow-end-session",
+    "allow-get-agent-auth-mode",
+    "allow-set-agent-auth-mode",
     "allow-get-api-key-status",
     "allow-set-api-key",
     "allow-get-google-client-id-status",

@@ -9,6 +9,8 @@ fn main() {
             "start_session",
             "send_message",
             "end_session",
+            "get_agent_auth_mode",
+            "set_agent_auth_mode",
             "get_api_key_status",
             "set_api_key",
             "get_google_client_id_status",

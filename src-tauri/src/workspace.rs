@@ -1162,6 +1162,7 @@ fn spawn_node_agent(
     let recordings_dir = crate::recordings::recordings_dir();
     let documents_dir = documents_dir();
 
+    let auth_mode = crate::settings::agent_auth_mode();
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     let mut command = CommandWrap::with_new(program, |cmd| {
@@ -1175,10 +1176,27 @@ fn spawn_node_agent(
             .env("DAIMON_MEMORY_DB", &memory_db)
             .env("DAIMON_RECORDINGS_DIR", &recordings_dir)
             .env("DAIMON_DOCUMENTS_DIR", &documents_dir)
+            .env("DAIMON_AUTH_MODE", auth_mode.as_str())
             .stdout(stdout)
             .stderr(stderr);
-        if let Some(key) = &api_key {
-            cmd.env("ANTHROPIC_API_KEY", key);
+        match auth_mode {
+            // `env_remove`, not merely "don't call .env()". The child inherits
+            // this process's environment, and ANTHROPIC_API_KEY is *in* it —
+            // `set_env_var` mirrors every stored key into the live process and
+            // dotenvy loads `.env` at startup. An inherited key would shadow
+            // the user's Claude Code OAuth login inside the harness, silently
+            // billing their API account for every turn while the UI reports
+            // that their subscription is in use. The agent process strips it a
+            // second time on its own (see `buildOptions` in agents/src/agent.ts)
+            // because the cost of getting this wrong is money, quietly.
+            crate::settings::AuthMode::Subscription => {
+                cmd.env_remove("ANTHROPIC_API_KEY");
+            }
+            crate::settings::AuthMode::ApiKey => {
+                if let Some(key) = &api_key {
+                    cmd.env("ANTHROPIC_API_KEY", key);
+                }
+            }
         }
         // Short-lived by design — fetched fresh (via the stored refresh
         // token) right before every spawn rather than ever handing the

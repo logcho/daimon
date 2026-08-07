@@ -49,6 +49,21 @@ export function onSessionStatus(handler: (sessionId: string, event: WorkspaceEve
   return listen<SessionStatusPayload>("session-status", (e) => handler(e.payload.session_id, e.payload.event));
 }
 
+/// How the agent authenticates to Anthropic: "subscription" runs the Claude
+/// Code harness under the user's own `claude login` (billed against their
+/// Claude subscription, no API key involved), "api_key" uses the stored key.
+/// Only takes effect for newly started sessions — a session's workspace keeps
+/// whatever it launched with.
+export type AgentAuthMode = "subscription" | "api_key";
+
+export function getAgentAuthMode(): Promise<AgentAuthMode> {
+  return invoke<AgentAuthMode>("get_agent_auth_mode");
+}
+
+export function setAgentAuthMode(mode: AgentAuthMode): Promise<void> {
+  return invoke<void>("set_agent_auth_mode", { mode });
+}
+
 export function getApiKeyStatus(): Promise<boolean> {
   return invoke<boolean>("get_api_key_status");
 }

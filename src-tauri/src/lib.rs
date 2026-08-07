@@ -94,6 +94,8 @@ pub(crate) fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             session::start_session,
             session::send_message,
             session::end_session,
+            settings::get_agent_auth_mode,
+            settings::set_agent_auth_mode,
             settings::get_api_key_status,
             settings::set_api_key,
             oauth::get_google_client_id_status,

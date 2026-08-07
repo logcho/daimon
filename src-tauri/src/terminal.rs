@@ -328,13 +328,22 @@ pub async fn close_terminal(id: String) -> Result<(), String> {
 /// terminal tab likes). Spawning `claude --version` is the simplest thing
 /// that's actually correct here: it's fast, already installed if it's going
 /// to be, and sidesteps re-implementing `PATH` resolution by hand.
-#[tauri::command]
-pub async fn get_claude_cli_status() -> bool {
-    std::process::Command::new("claude")
+///
+/// `tokio`'s Command rather than `std`'s: this is awaited from async command
+/// handlers, and the blocking version parked a runtime worker thread for the
+/// duration of a process spawn on every Settings mount.
+pub(crate) async fn claude_cli_available() -> bool {
+    tokio::process::Command::new("claude")
         .arg("--version")
         .output()
+        .await
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn get_claude_cli_status() -> bool {
+    claude_cli_available().await
 }
 
 /// Best-effort cleanup for the `tauri::RunEvent::Exit` handler in `lib.rs` —
