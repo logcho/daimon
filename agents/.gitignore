@@ -3,6 +3,7 @@
 memory/
 vault/
 .daimon/
+logs/
 __pycache__/
 .pytest_cache/
 *.db

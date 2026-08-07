@@ -10,6 +10,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Repo root is one level above the agents tree (legacy/ lives there).
+ROOT="$(dirname "$REPO_ROOT")"
 DAIMON_DIR="$REPO_ROOT/.daimon"
 BIN_DIR="$DAIMON_DIR/bin"
 PROFILE_DIR="$DAIMON_DIR/pinchtab-profiles/dev"
@@ -23,8 +25,8 @@ if [[ -n "${PINCHTAB_BIN:-}" ]]; then
     PINCHTAB="$PINCHTAB_BIN"
 elif [[ -f "$BIN_DIR/pinchtab" ]]; then
     PINCHTAB="$BIN_DIR/pinchtab"
-elif [[ -f "$REPO_ROOT/legacy/src-tauri/binaries/pinchtab-aarch64-apple-darwin" ]]; then
-    cp "$REPO_ROOT/legacy/src-tauri/binaries/pinchtab-aarch64-apple-darwin" "$BIN_DIR/pinchtab"
+elif [[ -f "$ROOT/legacy/src-tauri/binaries/pinchtab-aarch64-apple-darwin" ]]; then
+    cp "$ROOT/legacy/src-tauri/binaries/pinchtab-aarch64-apple-darwin" "$BIN_DIR/pinchtab"
     chmod +x "$BIN_DIR/pinchtab"
     PINCHTAB="$BIN_DIR/pinchtab"
 else
