@@ -101,6 +101,13 @@ class CommandArgs(BaseModel):
     command: str = Field(description="Shell command to stage in the new terminal — typed, not executed")
 
 
+class ResearchArgs(BaseModel):
+    queries: str = Field(
+        description="One research question per line. Each line is delegated to a separate "
+        "research subagent running in parallel with a research-only tool set."
+    )
+
+
 def _tool(name: str, description: str, args_model: type[BaseModel], fn) -> StructuredTool:
     return StructuredTool.from_function(name=name, description=description, args_schema=args_model, func=fn)
 
@@ -376,5 +383,15 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
             "than once for the same request. This never executes anything on its own.",
             CommandArgs,
             stage_terminal_command,
+        ),
+        _tool(
+            "research",
+            "Research a set of questions by fanning each out to a parallel research subagent "
+            "(flash model, research-only tools, its own step budget). Put one research question "
+            "per line — each line is delegated separately, so split independent questions apart "
+            "to parallelize. The combined findings return as tool results. Use this for "
+            "multi-part or open-ended investigation instead of a long single-query search.",
+            ResearchArgs,
+            lambda queries: "research is handled by the graph's subagent fan-out",
         ),
     ]

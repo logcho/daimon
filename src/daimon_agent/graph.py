@@ -23,6 +23,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from .compaction import compact_if_needed
 from .emitter import emit
 from .events import step_event
 from .guardrails import (
@@ -38,6 +39,12 @@ from .state import AgentState
 
 # Era-1 value, kept.
 RECURSION_LIMIT = 40
+# Subagents get their own, tighter budget — a research fan-out is bounded
+# work, not a second full agent run.
+SUBAGENT_RECURSION_LIMIT = 15
+MAX_RESEARCH_FAN_OUT = 3
+# The research-only tool set delegated to each subagent (no nested research).
+RESEARCH_SUBAGENT_TOOLS = frozenset({"web_search", "open_url", "read_page", "extract_text"})
 
 
 def _tool_result_text(content: Any) -> str:
@@ -79,20 +86,34 @@ def build_graph(
     *,
     memory: Any = None,
     checkpointer: Any = None,
+    role: str = "pro",
 ) -> CompiledStateGraph:
     """Build the compiled graph. `checkpointer` defaults to an
     AsyncSqliteSaver on settings.checkpoints_db; the caller owns its lifetime
-    (one per process)."""
+    (one per process). `role` selects the model: "pro" (main agent, hybrid
+    routing's primary role) or "flash" (research subagents — cheap, bounded
+    work where a missed call is cheap to retry)."""
 
     tool_by_name = {t.name: t for t in tools}
+    subgraph = None
+    if role == "pro":
+        research_tools = [t for t in tools if t.name in RESEARCH_SUBAGENT_TOOLS]
+        subgraph = build_graph(settings, router, research_tools, role="flash")
 
     async def agent_node(state: AgentState) -> dict:
         # Lazy: the model is constructed on the first call, not at graph-build
         # time, so a keyless process can still boot and serve /health. The
         # router caches instances; bind_tools per node call is cheap.
-        model = router.pro().bind_tools(tools)
+        model = (router.pro() if role == "pro" else router.flash()).bind_tools(tools)
         system_prompt = build_system_prompt(settings, skills_block=state.get("skills_block", ""))
-        messages: list[AnyMessage] = [SystemMessage(content=system_prompt), *state["messages"]]
+        # Compaction (token-threshold summarization via flash) applies only to
+        # the main agent — subgraph turns are bounded by their own recursion.
+        messages = (
+            await compact_if_needed(settings, router, state["messages"])
+            if role == "pro"
+            else list(state["messages"])
+        )
+        messages = [SystemMessage(content=system_prompt), *messages]
         response = await model.ainvoke(messages)
         for call in response.tool_calls:
             name = call.get("name", "tool")
@@ -102,6 +123,7 @@ def build_graph(
     async def tools_node(state: AgentState) -> dict:
         last: AIMessage = state["messages"][-1]
         results: list[ToolMessage] = []
+        pending: list[tuple[str, str, str]] = list(state.get("research_pending", []))
         research_used = state.get("research_used", 0)
         call_log = list(state.get("call_log", []))
         last_sig = state.get("last_read_signature")
@@ -124,6 +146,30 @@ def build_graph(
                     results.append(ToolMessage(content=warning, tool_call_id=call_id, name=name))
                     emit(step_event(call_id, name, "done", name))
                     continue
+
+            # --- research fan-out: delegated to subagents, not executed here -
+            if name == "research":
+                queries = [
+                    q.strip()
+                    for q in str(args.get("queries", "")).splitlines()
+                    if q.strip()
+                ][:MAX_RESEARCH_FAN_OUT]
+                if not queries:
+                    results.append(
+                        ToolMessage(
+                            content="research: no queries found — put one research question per line.",
+                            tool_call_id=call_id,
+                            name=name,
+                        )
+                    )
+                    emit(step_event(call_id, name, "done", name))
+                    continue
+                for query in queries:
+                    pending.append((call_id, name, query))
+                # One budget slot for the fan-out, like any other research call.
+                research_used += 1
+                call_log.append((name, json.dumps(args, sort_keys=True, default=str)))
+                continue
 
             if tool is None:
                 message = f'Tool "{name}" is not available in this session.'
@@ -162,7 +208,29 @@ def build_graph(
             "research_used": research_used,
             "call_log": call_log,
             "last_read_signature": last_sig,
+            "research_pending": pending,
         }
+
+    async def subagent_node(state: AgentState) -> dict:
+        """Drain the research fan-out: one flash-model subgraph run per query.
+        Each run has its own recursion budget and a research-only tool set;
+        results rejoin the main conversation as ToolMessages (the run.ts
+        label/tool reuse invariant holds: `done` reuses the running event's
+        id/label/tool)."""
+        results: list[ToolMessage] = []
+        for call_id, name, query in state.get("research_pending", []):
+            final = await subgraph.ainvoke(
+                {
+                    "messages": [HumanMessage(content=query)],
+                    "instruction": query,
+                    "session_id": f"subagent-{call_id}",
+                },
+                {"recursion_limit": SUBAGENT_RECURSION_LIMIT},
+            )
+            answer = extract_result(final["messages"])
+            results.append(ToolMessage(content=answer, tool_call_id=call_id, name=name))
+            emit(step_event(call_id, name, "done", name))
+        return {"messages": results, "research_pending": []}
 
     def route_after_agent(state: AgentState) -> str:
         last = state["messages"][-1]
@@ -170,12 +238,25 @@ def build_graph(
             return "tools"
         return END
 
+    def route_after_tools(state: AgentState) -> str:
+        if state.get("research_pending"):
+            return "subagents"
+        return "agent"
+
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tools_node)
+    if subgraph is not None:
+        graph.add_node("subagents", subagent_node)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", route_after_agent, {"tools": "tools", END: END})
-    graph.add_edge("tools", "agent")
+    if subgraph is not None:
+        graph.add_conditional_edges(
+            "tools", route_after_tools, {"subagents": "subagents", "agent": "agent"}
+        )
+        graph.add_edge("subagents", "agent")
+    else:
+        graph.add_edge("tools", "agent")
     return graph.compile(checkpointer=checkpointer)
 
 

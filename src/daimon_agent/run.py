@@ -14,9 +14,12 @@ from uuid import uuid4
 
 from langchain_core.messages import HumanMessage
 
+import hashlib
+
 from .emitter import set_active_emit
 from .events import done_event, error_event, step_event
 from .graph import extract_result, run_config
+from .reflect import reflect_turn, should_reflect
 from .skills.injector import format_skills_block, select_skills
 
 
@@ -47,6 +50,7 @@ async def run_turn(
     graph: Any,
     memory: Any = None,
     skills: Any = None,  # list[Skill] — ranked and injected per turn
+    router: Any = None,  # for the post-turn reflection pass
     live_frames: Callable[[Callable[[dict], None]], Any] | None = None,
 ) -> str | None:
     """Run one turn and stream TaskEvents. Returns the final result string,
@@ -86,6 +90,20 @@ async def run_turn(
         emit(done_event(result))
         if memory is not None:
             memory.record_task(instruction, result, "done")
+        # Reflection runs after `done` (the user's result is already out) and
+        # only on tool-using turns; a failed or gated reflection never fails
+        # the turn. Awaiting keeps one writer to the memory DB and makes the
+        # behavior deterministic — the daemon can move it off-thread later.
+        if router is not None and getattr(settings, "reflect", True) and memory is not None:
+            try:
+                messages = state.values.get("messages", [])
+                if should_reflect(instruction, result, messages):
+                    note = await reflect_turn(router, instruction, result)
+                    if note is not None:
+                        digest = hashlib.sha1(instruction.encode("utf-8")).hexdigest()[:10]
+                        memory.index_note(f"reflect/{digest}.md", note)
+            except Exception:
+                pass  # reflection is advisory — never fail the turn for it
         return result
     except Exception as exc:
         message = str(exc) or exc.__class__.__name__

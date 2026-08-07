@@ -13,8 +13,10 @@ from __future__ import annotations
 import hashlib
 import json
 
-# web_search, open_url, and read_page share one hard budget per turn.
-RESEARCH_TOOLS = frozenset({"web_search", "open_url", "read_page"})
+# web_search, open_url, read_page, and research share one hard budget per
+# turn. The research fan-out counts as one call even though the subagents it
+# spawns do their own (subgraph-bounded) web work.
+RESEARCH_TOOLS = frozenset({"web_search", "open_url", "read_page", "research"})
 RESEARCH_TOOL_BUDGET = 10
 NEAR_DUPLICATE_THRESHOLD = 0.6
 

@@ -51,7 +51,7 @@ async def _amain(argv: list[str]) -> int:
 
         result = await run_turn(
             instruction, SESSION_ID, settings, _print_event,
-            graph=graph, memory=memory, skills=skills, live_frames=frame_task,
+            graph=graph, memory=memory, skills=skills, router=router, live_frames=frame_task,
         )
         if result is None:
             return 1

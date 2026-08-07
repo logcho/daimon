@@ -76,6 +76,7 @@ async def create_app(
     app["memory"] = memory or MemoryStore(settings.memory_db)
     app["locks"] = {}
     app["skills"] = []
+    app["router"] = ModelRouter(settings)  # lazy: only constructed when called
 
     async def startup(app: web.Application) -> None:
         graph, checkpointer = await graph_builder(settings, memory=app["memory"])
@@ -142,6 +143,7 @@ async def create_app(
                     graph=app["graph"],
                     memory=app["memory"],
                     skills=app["skills"],
+                    router=app["router"],
                     live_frames=frame_task,
                 )
             except Exception as exc:  # last-ditch backstop, port of server.ts's .catch
