@@ -91,7 +91,7 @@ def build_graph(
         # time, so a keyless process can still boot and serve /health. The
         # router caches instances; bind_tools per node call is cheap.
         model = router.pro().bind_tools(tools)
-        system_prompt = build_system_prompt(settings)
+        system_prompt = build_system_prompt(settings, skills_block=state.get("skills_block", ""))
         messages: list[AnyMessage] = [SystemMessage(content=system_prompt), *state["messages"]]
         response = await model.ainvoke(messages)
         for call in response.tool_calls:

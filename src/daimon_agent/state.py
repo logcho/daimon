@@ -20,3 +20,6 @@ class AgentState(TypedDict, total=False):
     call_log: list[tuple[str, str]]
     # sha1 of the last read_page content — unchanged-page detection.
     last_read_signature: str | None
+    # Injected skills tail (see skills/injector.py) — part of the prompt, not
+    # the conversation. Passed per-run so rollouts can vary only the skill.
+    skills_block: str

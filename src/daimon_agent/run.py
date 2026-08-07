@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage
 from .emitter import set_active_emit
 from .events import done_event, error_event, step_event
 from .graph import extract_result, run_config
+from .skills.injector import format_skills_block, select_skills
 
 
 class TurnTimeoutError(TimeoutError):
@@ -45,7 +46,7 @@ async def run_turn(
     *,
     graph: Any,
     memory: Any = None,
-    skills: Any = None,  # skills injector result, wired in Phase D
+    skills: Any = None,  # list[Skill] — ranked and injected per turn
     live_frames: Callable[[Callable[[dict], None]], Any] | None = None,
 ) -> str | None:
     """Run one turn and stream TaskEvents. Returns the final result string,
@@ -64,11 +65,15 @@ async def run_turn(
 
     try:
         config = run_config(session_id)
+        # Skills tail, appended after the frozen rules prefix (injector ranks
+        # by token overlap against the instruction; empty block when none hit).
+        skills_block = format_skills_block(select_skills(instruction, skills)) if skills else ""
         stream = graph.astream(
             {
                 "messages": [HumanMessage(content=instruction)],
                 "instruction": instruction,
                 "session_id": session_id,
+                "skills_block": skills_block,
             },
             config,
             stream_mode="updates",

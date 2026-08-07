@@ -15,6 +15,7 @@ from .graph import build_graph, close_checkpointer, make_sqlite_checkpointer
 from .memory import MemoryStore
 from .model import ModelRouter
 from .run import run_turn
+from .skills.injector import discover_skills
 from .tools import build_tools
 
 SESSION_ID = "cli"
@@ -42,6 +43,7 @@ async def _amain(argv: list[str]) -> int:
     tools = build_tools(settings, memory=memory, session_id=SESSION_ID)
     checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
     graph = build_graph(settings, router, tools, checkpointer=checkpointer)
+    skills = discover_skills(settings.resolved_skills_dir)
 
     async def one_turn(instruction: str) -> int:
         def frame_task(emit_fn):
@@ -49,7 +51,7 @@ async def _amain(argv: list[str]) -> int:
 
         result = await run_turn(
             instruction, SESSION_ID, settings, _print_event,
-            graph=graph, memory=memory, live_frames=frame_task,
+            graph=graph, memory=memory, skills=skills, live_frames=frame_task,
         )
         if result is None:
             return 1

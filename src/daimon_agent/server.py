@@ -25,6 +25,7 @@ from .graph import build_graph, close_checkpointer, make_sqlite_checkpointer
 from .memory import MemoryStore
 from .model import ModelRouter
 from .run import run_turn
+from .skills.injector import discover_skills
 from .tools import build_tools
 from .tools.repl import close_all_repls
 
@@ -74,11 +75,13 @@ async def create_app(
     app["checkpointer"] = None
     app["memory"] = memory or MemoryStore(settings.memory_db)
     app["locks"] = {}
+    app["skills"] = []
 
     async def startup(app: web.Application) -> None:
         graph, checkpointer = await graph_builder(settings, memory=app["memory"])
         app["graph"] = graph
         app["checkpointer"] = checkpointer
+        app["skills"] = discover_skills(settings.resolved_skills_dir)
         indexed = index_existing_vault_notes(settings, app["memory"])
         print(f"[daimon-agent] indexed {indexed} existing vault note(s) on startup", file=sys.stderr)
         print(f"[daimon-agent] listening on :{settings.port}", file=sys.stderr)
@@ -138,6 +141,7 @@ async def create_app(
                     emit,
                     graph=app["graph"],
                     memory=app["memory"],
+                    skills=app["skills"],
                     live_frames=frame_task,
                 )
             except Exception as exc:  # last-ditch backstop, port of server.ts's .catch

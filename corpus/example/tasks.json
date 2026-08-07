@@ -1,0 +1,74 @@
+[
+  {
+    "instruction": "Turn these release notes into a changelog section: 'fixed login timeout bug; added dark mode; upgraded deps; new export to PDF'",
+    "checks": [
+      {"kind": "contains", "value": "## ", "note": "uses section headings"},
+      {"kind": "contains", "value": "Fixed", "note": "mentions the bug fix"},
+      {"kind": "contains", "value": "dark mode", "note": "mentions the new feature"}
+    ],
+    "rubric": "A changelog entry: dated or versioned heading, grouped into Fixed / Added / Changed categories, every item from the input present."
+  },
+  {
+    "instruction": "Write a changelog section for: 'crash on empty search results; faster startup; settings moved to a new panel'",
+    "checks": [
+      {"kind": "contains", "value": "## ", "note": "uses section headings"},
+      {"kind": "contains", "value": "Fixed", "note": "categories the crash fix"},
+      {"kind": "contains", "value": "crash", "note": "mentions the crash"}
+    ],
+    "rubric": "A changelog entry: grouped into Fixed / Added / Changed categories, every item from the input present, no invented features."
+  },
+  {
+    "instruction": "Write changelog text for this list: 'fixes #42 (memory leak); adds --dry-run flag; removes legacy API endpoints'",
+    "checks": [
+      {"kind": "contains", "value": "Fixed", "note": "categories the fix"},
+      {"kind": "contains", "value": "Added", "note": "categories the new flag"},
+      {"kind": "contains", "value": "Removed", "note": "categories the removals"}
+    ],
+    "rubric": "Each input item lands in the correct category heading; concise one-line bullets; issue reference preserved."
+  },
+  {
+    "instruction": "Make a changelog from: 'better error messages; keyboard shortcuts; deprecated python2 support; search is 3x faster'",
+    "checks": [
+      {"kind": "contains", "value": "## ", "note": "uses section headings"},
+      {"kind": "contains", "value": "Improved", "note": "categories performance work"},
+      {"kind": "contains", "value": "3x", "note": "keeps the quantitative claim"}
+    ],
+    "rubric": "Categorized changelog; the performance claim is kept verbatim; no items invented."
+  },
+  {
+    "instruction": "Write changelog notes for a patch release: 'fixed typo in README; pinned dependency versions; added one test'",
+    "checks": [
+      {"kind": "contains", "value": "## ", "note": "uses section headings"},
+      {"kind": "contains", "value": "Fixed", "note": "categories the README fix"},
+      {"kind": "regex", "value": "(v?[0-9]+\\.[0-9]+(\\.[0-9]+)?)", "note": "versioned or dated heading"}
+    ],
+    "rubric": "A patch-release changelog: version heading, Fixed/Added/Changed categories, terse bullets."
+  },
+  {
+    "instruction": "Changelog for: 'new onboarding flow; fixed double-charge on retries; API rate limit headers'",
+    "checks": [
+      {"kind": "contains", "value": "Added", "note": "categories the onboarding flow"},
+      {"kind": "contains", "value": "Fixed", "note": "categories the billing fix"},
+      {"kind": "contains", "value": "rate limit", "note": "mentions the API change"}
+    ],
+    "rubric": "Every input item present and categorized; billing fix under Fixed; short bullets."
+  },
+  {
+    "instruction": "Write changelog notes for: 'dark-mode toggle in settings; fixed Windows installer; docs moved to a new site'",
+    "checks": [
+      {"kind": "contains", "value": "## ", "note": "uses section headings"},
+      {"kind": "contains", "value": "Windows", "note": "mentions the installer fix"},
+      {"kind": "contains", "value": "docs", "note": "mentions the docs move"}
+    ],
+    "rubric": "Categorized changelog; the docs move goes under Changed; installer fix under Fixed."
+  },
+  {
+    "instruction": "Changelog from: 'switched to ruff for linting; fixed flaky e2e test; added file-watch mode'",
+    "checks": [
+      {"kind": "contains", "value": "Changed", "note": "categories the tooling switch"},
+      {"kind": "contains", "value": "Fixed", "note": "categories the test fix"},
+      {"kind": "contains", "value": "file-watch", "note": "mentions the new mode"}
+    ],
+    "rubric": "Tooling change under Changed; new mode under Added; terse, complete, no invented items."
+  }
+]
