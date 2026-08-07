@@ -31,7 +31,7 @@ Decided 2026-07-24 (see the `daimon-positioning` project memory for full context
 | --- | --- | --- |
 | **Desktop Shell** | Tauri v2 (Rust/React) | Native window management, low footprint, system tray. |
 | **Ambient UI** | React + Tailwind, custom floating widget | Wispr Flow-style persistent pill: glanceable status, expands to a full pipeline view on demand. |
-| **Orchestration** | LangGraph (TypeScript/Node) | State machine for multi-step agent planning, tool calling, and subagent delegation. |
+| **Orchestration** | Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`, TypeScript/Node) | The Claude Code harness run as a library on-device: agent loop, context compaction, subagent delegation, permission gating, session persistence, and built-in file/search tools. Authenticates either through the user's own Claude Code subscription or an Anthropic API key. |
 | **Execution** | Native OS processes (PinchTab-driven headless Chrome + Node), supervised directly by the Rust daemon | Background, invisible workspace per task/project — where the agent actually browses/types/runs shell commands without touching the user's visible screen. Bundled as pinned sidecar binaries/resources (`scripts/fetch-sidecars.sh`) so the whole app ships as one download with no separate Docker install. |
 | **Memory & Skills** | Local store (SQLite + FTS/embeddings) | Cross-session memory of user context and task history; a growing library of reusable learned skills. |
 | **Gateway (remote access)** | Lightweight bridge service (Telegram/Slack/Discord to start) | Lets the user check status or send new instructions from a chat app when away from the desktop. Secondary to the native widget, not a replacement for it. |
@@ -59,14 +59,14 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 * **Gateway Supervisor:** Manages the optional remote-access bridge process.
 * **Automation Scheduler (Phase 10, implemented):** a background loop (30s poll) that fires recurring instructions (cron-scheduled, e.g. a daily brief) on their own, with no user interaction — each firing reuses the Phase 8 session machinery but auto-tears-down its workspace processes once the run completes, since an unattended recurring job doesn't need the "stay open until closed" continuation an interactive chat does. Also picks up automation-creation requests the agent itself submits from inside a session (see (C) below) — the workspace process has no reverse channel to call back into the daemon, so this goes through a shared host directory (passed to the agent process as `DAIMON_AUTOMATIONS_DIR`) the same way vault notes do, not a new network listener.
 
-### C. The Orchestrator (LangGraph Engine)
+### C. The Orchestrator (Claude Agent SDK harness)
 
-* **Agent Node:** Receives user intent (from the widget or a remote channel) and decomposes it into a graph of actions, pulling relevant memory and skills into context.
-* **Tooling:** Standardized library of tools that operate inside a background workspace (`read_file`, `shell_exec`, `browse`, `fill_form`, `web_search`).
+* **Agent loop:** Receives user intent (from the widget or a remote channel) and plans/executes against it, pulling relevant memory and skills into context. Supplied by the harness rather than hand-rolled — one long-lived `query()` per session in streaming-input mode, with each message pushed in via `streamInput`.
+* **Tooling:** The harness's built-in file and search tools (`Read`/`Write`/`Edit`/`Glob`/`Grep`), confined to the vault, plus Daimon's own capabilities exposed as an in-process MCP server: the stateful PinchTab browser, the scheduler, host app control, Spotify, and `.xlsx` generation. `Bash` is deliberately withheld — `open_terminal_with_command` stages a command for the user to run instead (see §5).
 * **Subagents:** Independent sub-steps (e.g. checking several job boards at once) can be delegated to parallel subagents.
-* **Skill Library:** After successfully handling a novel task, the agent can persist a reusable, parameterized "skill" for future reuse.
+* **Skill Library:** After handling a novel task, the agent writes a reusable `skills/<name>/SKILL.md` into the vault — a real Claude Code skill, discovered by the harness and readable and editable by the user in Obsidian (previously a name+description row in SQLite behind a CRUD tab).
 * **State:** Persistent `Checkpoint` storage so long-running tasks (a multi-hour job-application run) survive app or machine restarts.
-* **Open question, still not decided:** whether Claude Code / the Claude Agent SDK could serve as (or alongside) this LangGraph engine for planning and tool orchestration. Noted here so the idea isn't lost; evaluate deliberately against LangGraph rather than swapping the stack row above without a real comparison. A separate, narrower idea in the same neighborhood — an embedded terminal running the real `claude` CLI directly, voice-dictation-integrated — was resolved and **built** (Phase 11, see `PROMPT.md`), and is a first-class product surface per §0's positioning, not a change to this orchestrator; the two questions still don't need to be resolved together.
+* **Resolved (was: an open question here):** the Claude Agent SDK **replaced** LangGraph outright rather than running alongside it. The deciding argument was that most of what `agents/` had accumulated was a hand-rolled substitute for a harness — four layered anti-loop mechanisms, a recursion limit, and a conversation-rollback hack to preserve user/assistant alternation after a failed turn — all of which the harness provides. It also made subscription authentication possible, since the SDK accepts a Claude Code login in place of an API key. A separate, narrower idea in the same neighborhood — an embedded terminal running the real `claude` CLI directly, voice-dictation-integrated — was resolved and **built** (Phase 11, see `PROMPT.md`), and is a first-class product surface per §0's positioning, not a change to this orchestrator; the two questions still don't need to be resolved together.
 * **Sessions, not one-shot tasks (Phase 8, implemented):** a session's background workspace stays alive between messages, so a follow-up genuinely continues (same browser/page state) rather than starting fresh — the "tear down immediately" policy from Phase 3 now applies only to teardown-on-session-end (explicit, or app exit), not after every message. See `PROMPT.md` Phase 8.
 * **Agent-created automations (Phase 10, implemented):** a `create_automation` tool lets the agent register a recurring instruction mid-conversation, not only through a settings form — it writes a pending request into a bind-mounted `automations/` directory (same shape as a vault note) for the daemon's scheduler to validate and promote.
 
@@ -91,7 +91,7 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 ## 4. Data Flow: The "Task Loop"
 
 1. **Input:** User gives Daimon an instruction via the widget (voice or text), or via a connected remote channel.
-2. **Plan:** LangGraph decomposes intent into a graph of actions, drawing on relevant memory/skills.
+2. **Plan:** The Claude Agent SDK harness plans against the intent, drawing on relevant memory/skills.
 3. **Spin-up:** Daemon creates or resumes a background workspace (native PinchTab-driven headless Chrome + Node agent process, not a Docker container — see §0/§2) for this task/project.
 4. **Execute:** Agent performs the real work — browsing, form-filling, shell commands — entirely inside the background workspace, invisible to the user's foreground screen.
 5. **Stream:** Live status renders on the ambient pill (and, if connected, mirrors to a remote channel); full logs are available in the expanded view.
@@ -118,7 +118,7 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 │                        #   src-tauri/binaries/, src-tauri/resources/ — gitignored bundled sidecars
 │                        #   (pinchtab, node, pinned Chromium, compiled+pruned agents/) — see scripts/fetch-sidecars.sh
 ├── src/                # React frontend: ambient pill UI + expanded pipeline view
-├── agents/             # LangGraph definitions, tool schemas, skill library
+├── agents/             # Claude Agent SDK harness config, MCP tool server, memory store
 ├── scripts/             # fetch-sidecars.sh — fetches/checksum-verifies the bundled sidecars above; run before `tauri build`
 ├── memory/             # Persistent memory & skills store
 ├── vault/               # Daimon-native notes vault (fallback when no Obsidian vault path is configured) — Phase 9, built
@@ -130,6 +130,48 @@ The system follows a **four-part model**: Shell, Daemon, Orchestrator, and the M
 ├── ARCHITECTURE.md     # This file (Source of Truth)
 └── package.json        # Dependencies
 ```
+
+---
+
+## 7. Evaluated and Deferred
+
+Things looked at seriously and deliberately not adopted, recorded so the
+reasoning isn't re-derived later.
+
+### Prime Intellect — not an agent runtime
+
+Prime Intellect is an RL *training* stack: the Environments Hub (2,500+
+open-source RL environments), the `prime-rl` framework, hosted training and
+evaluation, and the INTELLECT model family. None of it runs a consumer desktop
+agent, so it is not a candidate to replace or sit under the orchestrator in
+§3C — the surface-level similarity is the word "environments", which there
+means an RL task specification, not a sandbox to browse in.
+
+There is one real fit, and it is worth doing eventually: an `evals/` directory
+holding a `verifiers` environment of representative Daimon tasks with
+programmatic pass/fail, so a change to the harness, prompt, or tool surface
+can be measured rather than eyeballed. Deferred because it adds a Python
+surface to a TypeScript/Rust codebase, and because it should be built when
+there is a specific regression worth catching, not speculatively.
+
+The other conceivable use — Prime Intellect as a third inference provider for
+open models — is a much bigger change than it looks: the orchestrator is now
+the Claude Code harness specifically, and it is not model-agnostic.
+
+### SkillOpt — real, but strictly downstream of an eval harness
+
+SkillOpt (Microsoft, `pip install skillopt`) treats a `SKILL.md` as a trainable
+parameter: it runs a frozen agent over scored task batches, has an optimizer
+model propose bounded add/delete/replace edits to the skill document, and
+accepts a candidate only when validation performance improves, emitting a
+deployable `best_skill.md`. Reported gains are large, training cost is low, and
+it changes no model weights.
+
+It is **offline-only** and **requires a benchmark with a reward signal**, which
+Daimon does not have — so it is blocked on the eval harness above, not
+independently adoptable. It is recorded here rather than dropped because the
+decision to store skills as real `SKILL.md` files in the vault (§3C) is exactly
+the input format SkillOpt optimizes, so adopting it later needs no migration.
 
 ---
 

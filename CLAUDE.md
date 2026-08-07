@@ -20,7 +20,7 @@ Daimon is an ambient, on-device AI co-worker — not a takeover, not a remote de
 Planned stack (see `ARCHITECTURE.md` §2 for full detail):
 - **Desktop shell:** Tauri v2 (Rust backend, React/TypeScript frontend, Tailwind)
 - **Ambient UI:** a small draggable floating pill, expandable into a full pipeline view
-- **Orchestration:** LangGraph (TypeScript/Node) for agent planning/state as a graph, with subagent delegation and a growing skill library
+- **Orchestration:** the Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) — the Claude Code harness run as a library on-device, supplying the agent loop, context compaction, subagent delegation, permission gating, and built-in file/search tools. Authenticates via the user's Claude Code subscription *or* an Anthropic API key (Settings → agent)
 - **Execution:** native OS processes (a PinchTab-driven headless Chrome + Node agent server, supervised directly by the Rust daemon — no Docker) providing each task/project its own background workspace, bundled as pinned sidecar binaries/resources for single-download distribution (`scripts/fetch-sidecars.sh`)
 - **Memory & skills:** local SQLite + FTS/embeddings store for cross-session context and reusable learned skills
 - **Gateway:** optional bridge to chat platforms (Telegram/Slack/Discord) for remote check-in/control
@@ -34,7 +34,7 @@ Four-part model — keep this separation when adding code:
 
 1. **Shell (frontend):** the ambient pill widget (React + Tailwind), toggled/expanded by a global hotkey into a "Thought-Action-Result" pipeline view. No direct host, process, or workspace access — everything goes through Tauri IPC.
 2. **Daemon (Rust backend):** owns the Tauri IPC handlers, the lifecycle of background workspaces (native OS processes — a PinchTab-driven headless Chrome + Node agent server, supervised directly by the daemon via process-group-leader spawning, not Docker containers — created on demand, resumable, not always ephemeral), and the optional gateway process.
-3. **Orchestrator (LangGraph engine):** decomposes user intent into a graph of actions using a standardized tool library (`read_file`, `shell_exec`, `browse`, `fill_form`, `web_search`, ...) that execute inside a background workspace; pulls relevant memory/skills into context; persists checkpoints so tasks resume across restarts.
+3. **Orchestrator (Claude Agent SDK harness):** plans and executes against user intent using the harness's built-in file/search tools (confined to the vault) plus Daimon's own capabilities exposed as an in-process MCP server — the PinchTab browser, scheduler, host app control, Spotify, `.xlsx`. One long-lived `query()` per session in streaming-input mode; the harness owns conversation history and compaction. `Bash` is deliberately withheld — see the non-disruption invariants below.
 4. **Memory/Gateway layer:** durable cross-session memory and skill store, plus an opt-in bridge exposing the same agent/session to external chat channels.
 
 Build phases (see `PROMPT.md` for the authoritative, detailed breakdown — do not skip ahead to a later phase before the current one's "done when" criterion is verified):
@@ -47,9 +47,10 @@ Build phases (see `PROMPT.md` for the authoritative, detailed breakdown — do n
 - **Phase 7:** terminal CLI companion (Hermes/OpenClaw-style), sharing the same daemon/orchestrator session.
 - **Phase 8 (done, out of order):** continuable chat sessions instead of one-shot tasks — a session's workspace stays alive between messages (see `PROMPT.md`).
 - **Phase 9 (done, out of order):** vaults/Obsidian integration — a file/notes vault (real Obsidian vault path or a Daimon-native folder fallback), browsable in-app (`VaultPanel.tsx`), with notes indexed into Phase 2's memory/skill retrieval as a third searchable category.
-- **Phase 10 (done, out of order):** cron jobs/automations — recurring instructions (cron-scheduled) that fire unattended, creatable either from the `automations` tab UI or by the agent itself mid-conversation via a `create_automation` tool. Triggered runs auto-teardown their workspace processes (unlike interactive sessions) since they don't need continuation.
+- **Phase 10 (done, out of order):** cron jobs/automations — recurring instructions (cron-scheduled) that fire unattended, created by the agent mid-conversation via a `create_automation` tool (there is no create form; see the harness refactor below). Triggered runs auto-teardown their workspace processes (unlike interactive sessions) since they don't need continuation.
+- **Harness refactor (done, on `refactor/agent-harness`):** LangGraph replaced by the Claude Agent SDK; subscription-or-API-key auth in Settings; the `automations` and `skills` tabs collapsed into one reminders-first `scheduled` tab; skills moved to `vault/skills/<name>/SKILL.md`; recording thumbnails moved host-side to the bundled ffmpeg. See `ARCHITECTURE.md` §3C and §7.
 
-Task loop (full, end-state — see `ARCHITECTURE.md` §4 for detail): input (voice/text, from the widget or a remote channel) → LangGraph plan, informed by memory/skills → daemon creates/resumes a background workspace → agent executes steps invisibly inside it → status streams live to the pill (and any connected channel) → progress checkpoints continuously → on completion, result surfaces and new skills/facts are written to memory.
+Task loop (full, end-state — see `ARCHITECTURE.md` §4 for detail): input (voice/text, from the widget or a remote channel) → harness plans, informed by memory/skills → daemon creates/resumes a background workspace → agent executes steps invisibly inside it → status streams live to the pill (and any connected channel) → progress checkpoints continuously → on completion, result surfaces and new skills/facts are written to memory.
 
 ## Non-disruption invariants
 
@@ -57,7 +58,8 @@ These constraints come from `ARCHITECTURE.md` §5 and should hold for any code t
 
 - The agent never moves the user's real cursor, steals keyboard focus, or brings another app to the foreground. All GUI-style work (browsing, form-filling) happens inside a background/headless browser instance, invisible to the user's actual screen.
 - Each active task/project gets its own background workspace; workspaces don't share state except through the explicit memory store.
-- Secrets are injected into the relevant workspace at runtime only — never written to disk in plaintext, never forwarded to a remote gateway channel.
+- Secrets are injected into the relevant workspace at runtime only — never written to disk in plaintext, never forwarded to a remote gateway channel. In subscription auth mode the daemon must `env_remove("ANTHROPIC_API_KEY")` rather than merely not set it: the agent process inherits the daemon's environment, and an inherited key silently shadows the user's Claude Code OAuth login, billing their API account while the UI reports otherwise.
+- The agent's file tools are confined to the vault by `buildCanUseTool` in `agents/src/agent.ts`, and `Bash` is withheld entirely — `open_terminal_with_command` stages a command in a terminal tab for the user to run rather than executing it. Note that listing a tool in the SDK's `allowedTools` auto-approves it *before* `canUseTool` runs, which silently disables the gate; `agents/src/agent.test.ts` covers this.
 - Remote channels are opt-in per workflow and explicitly scoped (read-only status vs. full control) — never full control by default.
 
 ## Target directory structure
@@ -68,7 +70,7 @@ These constraints come from `ARCHITECTURE.md` §5 and should hold for any code t
 │                        #   binaries/, resources/ — gitignored bundled sidecars (pinchtab, node, pinned
 │                        #   Chromium, compiled+pruned agents/) — see scripts/fetch-sidecars.sh
 ├── src/                # React frontend: ambient pill UI + expanded pipeline view (built)
-├── agents/             # LangGraph agent server + SQLite memory/skill store (built)
+├── agents/             # Claude Agent SDK harness + MCP tool server + SQLite memory store (built)
 ├── scripts/             # fetch-sidecars.sh — fetches/checksum-verifies the bundled sidecars above (built)
 ├── memory/             # Local SQLite DB, gitignored — passed to the workspace process via DAIMON_MEMORY_DB
 ├── vault/               # Notes vault, gitignored — passed alongside memory/ (built, Phase 9)
