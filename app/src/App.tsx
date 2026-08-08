@@ -107,13 +107,16 @@ export default function App() {
   const expand = useCallback(() => {
     setExpanded(true);
     expandedRef.current = true;
-    setUnreadCompletion(false); // user has seen the result
+    // Don't clear unreadCompletion — keep green while user reads.
     void expandToPanel();
   }, []);
 
   const collapse = useCallback(() => {
     setExpanded(false);
     expandedRef.current = false;
+    // If the user didn't send a new message while reading, the green
+    // has served its purpose — back to idle grey.
+    setUnreadCompletion(false);
     void collapseToPill();
   }, []);
 
@@ -293,6 +296,7 @@ export default function App() {
   const send = async (text: string) => {
     const sid = activeSessionId;
     if (!sid || busy || !text.trim()) return;
+    setUnreadCompletion(false); // new turn starting → busy blue takes over
     const agent = "general";
     const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false };
     const asstMsg: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: true };
