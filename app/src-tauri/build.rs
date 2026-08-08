@@ -12,6 +12,7 @@ fn main() {
             "send_message",
             "close_agent",
             "set_window_vibrancy",
+            "activate_and_focus_window",
             "start_terminal",
             "write_to_terminal",
             "resize_terminal",

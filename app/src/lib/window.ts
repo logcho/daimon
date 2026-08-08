@@ -1,5 +1,6 @@
 import { currentMonitor, getCurrentWindow, primaryMonitor } from "@tauri-apps/api/window";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { invoke } from "@tauri-apps/api/core";
 
 // The pill/panel fill the window edge-to-edge (no inset padding wrapper) so
 // the visible shape aligns exactly with the native vibrancy material, which
@@ -199,6 +200,10 @@ export async function collapseToPill() {
   await win.setMinSize(null);
   await win.setMaxSize(null);
   await animateTo(PILL_SIZE);
+  // Re-assert always-on-top + visible-on-all-workspaces after the collapse
+  // animation — same defensive reasoning as expandToPanel.
+  await win.setAlwaysOnTop(true);
+  await win.setVisibleOnAllWorkspaces(true);
   // Harmless no-op in the common case (the window is already visible) —
   // a cheap safety net in case anything upstream ever hides it.
   await win.show();
@@ -214,16 +219,20 @@ export async function expandToPanel() {
   await win.setMinSize(new LogicalSize(MIN_PANEL_SIZE.width, MIN_PANEL_SIZE.height));
   await win.setMaxSize(new LogicalSize(MAX_PANEL_SIZE.width, MAX_PANEL_SIZE.height));
   await win.setResizable(true);
-  // Explicitly re-assert always-on-top — Tauri preserves the creation flag,
-  // but a defensive re-apply after the expand animation guards against any
-  // platform-specific window-level reset during resize.
+  // Explicitly re-assert always-on-top and visible-on-all-workspaces — Tauri
+  // preserves the creation flags, but a defensive re-apply after the expand
+  // animation guards against any platform-specific window-level reset during
+  // resize. On macOS `alwaysOnTop` sets NSFloatingWindowLevel and
+  // `visibleOnAllWorkspaces` sets `canJoinAllSpaces` + `fullScreenAuxiliary`,
+  // which together are what "float in front of everything, across every
+  // Space/desktop, including full-screen apps" actually requires.
   await win.setAlwaysOnTop(true);
-  // Plain `setFocus()` suffices here: unlike the legacy app (an
-  // ActivationPolicy::Accessory window, where AppKit activation had to be
-  // forced via a dedicated command), this is a regular app whose expansion
-  // is triggered by a real click on the pill — which already carries its own
-  // OS-level focus semantics. If focus gaps ever appear (e.g. a hotkey-
-  // triggered expand while another app has focus), port legacy's
-  // window_focus.rs (NSApplication::activate) at that point.
-  await getCurrentWindow().setFocus();
+  await win.setVisibleOnAllWorkspaces(true);
+  // With ActivationPolicy::Accessory set on the Rust side, plain setFocus() is
+  // unreliable — the window can become nominally key without the app itself
+  // ever activating. The dedicated `activate_and_focus_window` command (ported
+  // from legacy's window_focus.rs) calls NSApplication::activate() on the main
+  // thread then makes the webview first responder, which is what AppKit needs
+  // to actually route keystrokes into our input.
+  await invoke("activate_and_focus_window");
 }

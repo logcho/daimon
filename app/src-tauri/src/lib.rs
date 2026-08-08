@@ -6,6 +6,7 @@ mod timefmt;
 mod vault;
 mod vibrancy;
 mod voice;
+mod window_focus;
 mod workspace;
 
 use agent::{AgentManager, AgentStatus};
@@ -69,6 +70,11 @@ async fn set_window_vibrancy<R: tauri::Runtime>(app: tauri::AppHandle<R>, radius
     vibrancy::apply(&app, radius).await
 }
 
+#[tauri::command]
+async fn activate_and_focus_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    window_focus::activate_and_focus(&app).await
+}
+
 /// Shared app builder — used by both `run()` and `#[test]` ACL reachability
 /// tests (see vault.rs). Tests pass `mock_builder()` so no real window/event
 /// loop is created. Uses the concrete `Wry` runtime so `#[tauri::command]`
@@ -82,6 +88,7 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             send_message,
             close_agent,
             set_window_vibrancy,
+            activate_and_focus_window,
             terminal::start_terminal,
             terminal::write_to_terminal,
             terminal::resize_terminal,
@@ -123,7 +130,17 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    build_app(tauri::Builder::default()).run(|app_handle, event| {
+    let mut app = build_app(tauri::Builder::default());
+
+    // Ambient widget, not a regular app: no Dock icon, no Cmd+Tab entry.
+    // This is also what makes `alwaysOnTop` + `visibleOnAllWorkspaces` actually
+    // work as intended on macOS — without Accessory policy the window still
+    // participates in normal app-switching and can get hidden when the user
+    // switches to another Space. Ported from legacy `lib.rs`.
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+    app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
             // The agent server (and its kernels) must not outlive us —
             // and neither must any open terminal shells.
