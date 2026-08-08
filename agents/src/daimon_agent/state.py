@@ -14,7 +14,9 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     instruction: str
     session_id: str
-    # web_search + open_url + read_page budget counter (era-1 RESEARCH_TOOL_BUDGET).
+    # Per-turn web_search + open_url + read_page + web_fetch budget counter
+    # (era-1 RESEARCH_TOOL_BUDGET). Reset to 0 by run.py at the top of each
+    # turn so a new message always gets a fresh budget.
     research_used: int
     # (tool_name, json-sorted args) — exact-repeat and near-duplicate inputs.
     call_log: list[tuple[str, str]]

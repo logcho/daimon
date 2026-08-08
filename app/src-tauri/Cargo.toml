@@ -12,7 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2", features = ["macos-private-api", "test"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -45,3 +45,6 @@ block2 = "0.6.2"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSHapticFeedback", "NSApplication", "NSResponder", "block2"] }
 objc2-foundation = "0.3.2"
 log = "0.4"
+# For vault.rs: data_dir() and RFC3339 time formatting
+dirs-next = "2"
+chrono = "0.4"

@@ -10,6 +10,8 @@ loop-prone tool.
 
 from __future__ import annotations
 
+import asyncio
+import random
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -18,10 +20,19 @@ import httpx
 from bs4 import BeautifulSoup
 
 DDG_URL = "https://html.duckduckgo.com/html/"
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-)
+
+# A small pool of recent Chrome user agents — rotated per request so
+# repeated searches don't look identical and trigger rate-limiting.
+_CHROME_USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+]
+
+# Retry config for DuckDuckGo's rate-limiting (403/429).
+_SEARCH_MAX_RETRIES = 3
+_SEARCH_RETRY_BACKOFF = (1.0, 2.0, 4.0)
 
 
 @dataclass
@@ -67,10 +78,46 @@ class DuckDuckGoProvider:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def search(self, query: str) -> list[SearchResult]:
-        res = await self._client.get(DDG_URL, params={"q": query}, headers={"User-Agent": USER_AGENT})
-        res.raise_for_status()
-        return parse_ddg_html(res.text)
+    async def search(self, query: str, max_results: int = 8) -> list[SearchResult]:
+        last_error: str | None = None
+        for attempt in range(_SEARCH_MAX_RETRIES):
+            ua = random.choice(_CHROME_USER_AGENTS)
+            headers = {
+                "User-Agent": ua,
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            try:
+                res = await self._client.get(
+                    DDG_URL, params={"q": query}, headers=headers
+                )
+                if res.status_code in (403, 429):
+                    last_error = (
+                        f"DuckDuckGo returned {res.status_code}"
+                    )
+                    if attempt < _SEARCH_MAX_RETRIES - 1:
+                        delay = _SEARCH_RETRY_BACKOFF[attempt]
+                        await asyncio.sleep(delay)
+                        continue
+                    raise httpx.HTTPStatusError(
+                        f"rate-limited after {_SEARCH_MAX_RETRIES} attempts",
+                        request=res.request,
+                        response=res,
+                    )
+                res.raise_for_status()
+                return parse_ddg_html(res.text)[:max_results]
+            except httpx.HTTPStatusError:
+                raise
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+                if attempt < _SEARCH_MAX_RETRIES - 1:
+                    delay = _SEARCH_RETRY_BACKOFF[attempt]
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+        # Should not be reached (the loop either returns or raises),
+        # but keep as a safety net.
+        raise httpx.HTTPError(last_error or "search failed")
 
 
 class TavilyProvider:
@@ -94,7 +141,23 @@ class TavilyProvider:
         ]
 
 
+# ---------------------------------------------------------------------------
+# Process-wide singleton (mirrors browser.py's build_browser / aclose_browser)
+# ---------------------------------------------------------------------------
+
+_provider: DuckDuckGoProvider | TavilyProvider | None = None
+
+
 def build_search_provider(settings: Any):
     """Tavily when configured, else DuckDuckGo — same interface either way."""
+    global _provider
     api_key = getattr(settings, "tavily_api_key", None)
-    return TavilyProvider(api_key) if api_key else DuckDuckGoProvider()
+    _provider = TavilyProvider(api_key) if api_key else DuckDuckGoProvider()
+    return _provider
+
+
+async def aclose_search_provider() -> None:
+    global _provider
+    if _provider is not None:
+        await _provider.aclose()
+        _provider = None

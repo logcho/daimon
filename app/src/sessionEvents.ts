@@ -18,6 +18,16 @@ function lastAssistant(messages: ChatMessage[]): number {
   return -1;
 }
 
+/**
+ * True while the session's last assistant message still has an open Thinking
+ * step — a turn is in flight. Derived per session (the chat chips pulse per
+ * session; the pill pulses when any session is busy).
+ */
+export function isSessionBusy(messages: ChatMessage[]): boolean {
+  const idx = lastAssistant(messages);
+  return idx >= 0 && messages[idx].thinking;
+}
+
 function upsertStep(steps: Step[], ev: StepEvent): Step[] {
   const idx = steps.findIndex((s) => s.id === ev.id);
   if (idx < 0) return [...steps, { id: ev.id, label: ev.label, tool: ev.tool, status: ev.status }];
@@ -55,6 +65,7 @@ export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMess
       next = { ...next, content: event.result, thinking: false, error: undefined };
       break;
     case "error":
+      if (next.content) return messages; // result already delivered — ignore straggler stream errors
       next = { ...next, error: event.message, thinking: false };
       break;
     default:

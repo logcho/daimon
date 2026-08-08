@@ -13,10 +13,10 @@ from __future__ import annotations
 import hashlib
 import json
 
-# web_search, open_url, read_page, and research share one hard budget per
-# turn. The research fan-out counts as one call even though the subagents it
-# spawns do their own (subgraph-bounded) web work.
-RESEARCH_TOOLS = frozenset({"web_search", "open_url", "read_page", "research"})
+# web_search, open_url, read_page, web_fetch, and research share one hard
+# budget per turn. The research fan-out counts as one call even though the
+# subagents it spawns do their own (subgraph-bounded) web work.
+RESEARCH_TOOLS = frozenset({"web_search", "open_url", "read_page", "web_fetch", "research"})
 RESEARCH_TOOL_BUDGET = 10
 NEAR_DUPLICATE_THRESHOLD = 0.6
 
@@ -27,9 +27,10 @@ REPEAT_WARNING = (
 )
 
 BUDGET_WARNING = (
-    "Hard stop: you have used your {budget}-call research budget (web_search/open_url/read_page) "
-    "for this turn. These tools will not run again until the next turn. Believe this warning and "
-    "finish from what you already have, or tell the user what remains to be found."
+    "Hard stop: you have used your {budget}-call research budget "
+    "(web_search/open_url/read_page/web_fetch) for this turn. These tools will "
+    "not run again until the next turn. Believe this warning and finish from "
+    "what you already have, or tell the user what remains to be found."
 )
 
 NEAR_DUPLICATE_WARNING = (

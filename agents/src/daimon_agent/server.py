@@ -337,8 +337,27 @@ async def create_app(
                 "sessions": sorted(reg["sessions"]),
             })
 
+    async def tools_handler(request: web.Request) -> web.Response:
+        """GET /tools?agent=general|coding — return the tool list for an agent."""
+        agent = request.query.get("agent", "general")
+        if agent not in ("general", "coding"):
+            return web.json_response(
+                {"error": f'unknown agent type: "{agent}" — use "general" or "coding"'},
+                status=400,
+            )
+        graph = request.app["coding_graph"] if agent == "coding" else request.app["graph"]
+        tools = getattr(graph, "tools", []) if graph is not None else []
+        result = []
+        for t in tools:
+            name = getattr(t, "name", "")
+            desc = getattr(t, "description", "")
+            if name:
+                result.append({"name": name, "description": desc})
+        return web.json_response(result)
+
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
+    app.router.add_get("/tools", tools_handler)
     app.router.add_post("/task", task)
     return app
 

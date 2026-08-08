@@ -66,8 +66,9 @@ class PinchTabClient:
         self._base = base.rstrip("/")
         self._token = token
         self._client = httpx.AsyncClient(timeout=PINCHTAB_REQUEST_TIMEOUT_S)
-        self._content_tab: asyncio.Future[str] | None = None
-        self._search_tab: asyncio.Future[str] | None = None
+        self._content_tab: str | None = None
+        self._search_tab: str | None = None
+        self._tab_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -109,9 +110,17 @@ class PinchTabClient:
             raise PinchTabError("PinchTab /navigate returned no tabId")
         return str(tab_id)
 
-    @staticmethod
-    def _resolved(value: str) -> str:
-        return value
+    async def _ensure_content_tab(self) -> str:
+        async with self._tab_lock:
+            if self._content_tab is None:
+                self._content_tab = await self._open_blank_tab()
+            return self._content_tab
+
+    async def _ensure_search_tab(self) -> str:
+        async with self._tab_lock:
+            if self._search_tab is None:
+                self._search_tab = await self._open_blank_tab()
+            return self._search_tab
 
     async def new_tab(self, url: str = "about:blank") -> str:
         """Open a fresh tab and make it the content tab."""
@@ -119,41 +128,31 @@ class PinchTabClient:
         tab_id = str(res.get("tabId", ""))
         if not tab_id:
             raise PinchTabError("PinchTab /navigate returned no tabId")
-        self._content_tab = asyncio.ensure_future(self._resolved(tab_id))
+        self._content_tab = tab_id
         return tab_id
 
     async def switch_tab(self, tab_id: str) -> None:
         """Point the content tab at an existing tab id (from list_tabs)."""
-        self._content_tab = asyncio.ensure_future(self._resolved(tab_id))
+        self._content_tab = tab_id
 
-    def _get_content_tab(self) -> asyncio.Future[str]:
-        if self._content_tab is None:
-            self._content_tab = asyncio.ensure_future(self._open_blank_tab())
-        return self._content_tab
-
-    def _get_search_tab(self) -> asyncio.Future[str]:
-        if self._search_tab is None:
-            self._search_tab = asyncio.ensure_future(self._open_blank_tab())
-        return self._search_tab
-
-    async def _with_tab(self, get_tab, cache_attr: str, op) -> Any:
+    async def _with_tab(self, ensure_tab, cache_attr: str, op) -> Any:
         """Run op(tab_id); on a 404 (recycle signature) drop the cached tab
         and retry exactly once against a fresh one."""
-        tab_id = await get_tab()
+        tab_id = await ensure_tab()
         try:
             return await op(str(tab_id))
         except PinchTabHttpError as err:
             if not _is_tab_not_found(err):
                 raise
             setattr(self, cache_attr, None)
-            fresh = await get_tab()
+            fresh = await ensure_tab()
             return await op(str(fresh))
 
     async def _with_content_tab(self, op) -> Any:
-        return await self._with_tab(self._get_content_tab, "_content_tab", op)
+        return await self._with_tab(self._ensure_content_tab, "_content_tab", op)
 
     async def _with_search_tab(self, op) -> Any:
-        return await self._with_tab(self._get_search_tab, "_search_tab", op)
+        return await self._with_tab(self._ensure_search_tab, "_search_tab", op)
 
     # -- actions -----------------------------------------------------------
 
@@ -220,9 +219,9 @@ class PinchTabClient:
 
     async def close_tab(self, tab_id: str) -> None:
         await self._fetch("DELETE", f"/tabs/{tab_id}")
-        if self._content_tab is not None and self._content_tab.done() and self._content_tab.result() == tab_id:
+        if self._content_tab == tab_id:
             self._content_tab = None
-        if self._search_tab is not None and self._search_tab.done() and self._search_tab.result() == tab_id:
+        if self._search_tab == tab_id:
             self._search_tab = None
 
     # -- search tab --------------------------------------------------------

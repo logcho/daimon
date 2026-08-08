@@ -66,6 +66,17 @@ async def test_recursion_cap_binds(settings) -> None:
         await graph.ainvoke({"messages": [HumanMessage(content="loop forever")]}, config)
 
 
+async def test_checkpointer_busy_timeout(settings) -> None:
+    # Two daimon-agent processes (app + CLI) may share the checkpoints file —
+    # the pragma value IS the contract: wait, don't error.
+    checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
+    try:
+        cursor = await checkpointer.conn.execute("PRAGMA busy_timeout")
+        assert (await cursor.fetchone())[0] == 10000
+    finally:
+        await close_checkpointer(checkpointer)
+
+
 async def test_two_turn_session_continuity_via_checkpointer(settings, tmp_path) -> None:
     checkpointer = await make_sqlite_checkpointer(tmp_path / "checkpoints.db")
     router = FakeRouter(

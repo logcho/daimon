@@ -89,9 +89,17 @@ export interface TerminalExitedPayload {
   code: number | null;
 }
 
-export type View = "chat" | "terminal";
+export type View = "chat" | "terminal" | "vault";
 
 export type AgentKind = "general" | "coding";
+
+// --- Vault ------------------------------------------------------------------
+
+export interface VaultFile {
+  name: string;
+  sizeBytes: number;
+  modifiedAt: string;
+}
 
 // --- Voice dictation -------------------------------------------------------
 

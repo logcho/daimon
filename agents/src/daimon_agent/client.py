@@ -1,0 +1,322 @@
+"""Thin client for the daimon-agent HTTP server — the whole `daimon` CLI.
+
+The heavy stack (graph, tools, browser, memory) lives in one background
+server process. This module knows how to find one, spawn one, talk to one,
+and stop one:
+
+- `ensure_server` probes the configured port and adopts whatever answers
+  `/health`; otherwise it spawns `python -m daimon_agent.server` with
+  `cwd=agents/`, logs to a CLI-owned run dir, and waits up to 30s for it to
+  become healthy. The spawned server writes its own pidfile
+  (`daimon-agent.pid`, env `DAIMON_PIDFILE`) so the pidfile always names the
+  live server — no spawner-side write race.
+- `stream_turn` streams one `/task` turn (line-framed NDJSON, terminal event
+  = `done`/`error`) through a caller-provided `aiohttp.ClientSession`.
+- `stop_server` kills only a server that *we* spawned: pidfile present AND
+  pid alive AND the recorded port still answers `/health` (never a recycled
+  pid). Adopted and app-managed servers are left alone.
+- `list_sessions` reads the checkpointer's thread ids read-only for `--list`.
+
+Known limitation (shared state, pre-existing): one server process holds a
+single shared browser tab and a single shared REPL, so two sessions that use
+the browser or the REPL *simultaneously* interfere. The server's per-session
+turn locks serialize each session's turns; only cross-session browser/REPL
+use overlaps.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+import aiohttp
+
+from .config import Settings
+
+# The CLI-owned run dir. Deliberately NOT the Tauri app's run dir, whose
+# orphan sweep would kill our server on app exit.
+def default_run_dir() -> Path:
+    return Path.home() / ".local" / "share" / "daimon" / "run"
+
+
+class ClientError(RuntimeError):
+    """Any failure to reach, spawn, or stream from the server."""
+
+
+def _agents_cwd() -> Path:
+    """The cwd the server is spawned with: the agents/ package root when
+    this code runs from an (editable) install, else the caller's cwd. The
+    server resolves its cwd-relative `.env`/`vault`/`memory` against it."""
+    root = Path(__file__).resolve().parents[2]
+    if (root / "pyproject.toml").exists():
+        return root
+    return Path.cwd()
+
+
+def server_checkpoints_db(settings: Settings) -> Path:
+    """The checkpoints DB the *server* will use — `--list` must read that
+    one, not the CLI's cwd-relative default. The server (spawned with
+    cwd=agents/) resolves relative paths against agents/, so we re-anchor
+    relative paths there; absolute paths (explicit DAIMON_CHECKPOINTS_DB)
+    pass through verbatim."""
+    db = settings.checkpoints_db
+    if db.is_absolute():
+        return db
+    return _agents_cwd() / db
+
+
+# --- process management ------------------------------------------------------
+
+def _read_pid(pidfile: Path) -> int | None:
+    """First line of the server-written pidfile (pid). None on garbage —
+    the server writes it with one atomic write_text, so garbage means a
+    crash mid-write and the file is treated as absent."""
+    try:
+        return int(pidfile.read_text(encoding="utf-8").splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_port(pidfile: Path) -> int | None:
+    try:
+        return int(pidfile.read_text(encoding="utf-8").splitlines()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by another user
+        return True
+    return True
+
+
+def _kill_group(pid: int) -> None:
+    # The server is spawned with start_new_session=True, so its pid is a
+    # process-group leader and killpg takes the ipykernel children too.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)
+
+
+async def _health(port: int) -> bool:
+    try:
+        timeout = aiohttp.ClientTimeout(total=2.0)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"http://127.0.0.1:{port}/health") as resp:
+                return resp.status == 200
+    except (aiohttp.ClientError, OSError):
+        return False
+
+
+def _spawn_server(port: int, *, run_dir: Path) -> subprocess.Popen:
+    """Start `python -m daimon_agent.server` with cwd=agents/, the port as
+    real env (it beats any .env value), and DAIMON_PIDFILE for the server's
+    own pidfile. The env is plain os.environ — cwd-`.env` values the CLI's
+    Settings merged must NOT leak into the server; agents/.env governs it
+    (the server reads it itself with its own cwd)."""
+    log_out = run_dir / "daimon-agent.out.log"
+    log_err = run_dir / "daimon-agent.err.log"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "PORT": str(port), "DAIMON_PIDFILE": str(run_dir / "daimon-agent.pid")}
+    out_f = open(log_out, "ab")
+    err_f = open(log_err, "ab")
+    try:
+        return subprocess.Popen(
+            [sys.executable, "-m", "daimon_agent.server"],
+            cwd=_agents_cwd(),
+            env=env,
+            stdout=out_f,
+            stderr=err_f,
+            start_new_session=True,
+        )
+    finally:
+        out_f.close()
+        err_f.close()
+
+
+def _tail(path: Path, n: int = 2000) -> str:
+    try:
+        tail = path.read_text(encoding="utf-8", errors="replace")[-n:]
+        return f"; log tail: {tail!r}" if tail.strip() else ""
+    except OSError:
+        return ""
+
+
+async def _wait_healthy(port: int, proc: subprocess.Popen, *, err_log: Path, timeout: float = 30.0) -> None:
+    """Poll /health every 500ms; on timeout or early exit, kill the process
+    group and raise with the log tail. 30s covers graph build + vault
+    indexing; normal startup is well under that."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if await _health(port):
+            return
+        if proc.poll() is not None:
+            raise ClientError(
+                f"server exited early (code {proc.returncode}){_tail(err_log)}"
+            )
+        await asyncio.sleep(0.5)
+    _kill_group(proc.pid)
+    raise ClientError(f"server did not become healthy within {timeout:.0f}s{_tail(err_log)}")
+
+
+def _sweep_stale(run_dir: Path) -> None:
+    """The port probe failed, so any pidfile here is stale (the server writes
+    its own pidfile — a live one would have answered /health). Kill the
+    recorded process group if it still exists and remove the file."""
+    pidfile = run_dir / "daimon-agent.pid"
+    pid = _read_pid(pidfile) if pidfile.exists() else None
+    if pid is not None and _pid_alive(pid):
+        _kill_group(pid)
+    with contextlib.suppress(OSError):
+        pidfile.unlink()
+
+
+async def ensure_server(settings: Settings, *, run_dir: Path | None = None) -> tuple[int, bool]:
+    """Make sure a daimon server answers on settings.port: adopt one that
+    does, spawn one otherwise. Returns (port, spawned). Mirrors the Tauri
+    app's ensure in app/src-tauri/src/agent.rs — the CLI and the app can
+    share a server on 4711, and each kills only its own."""
+    run_dir = run_dir or default_run_dir()
+    port = settings.port
+    if await _health(port):
+        return port, False
+    _sweep_stale(run_dir)
+    proc = _spawn_server(port, run_dir=run_dir)
+    await _wait_healthy(port, proc, err_log=run_dir / "daimon-agent.err.log")
+    return port, True
+
+
+async def stop_server(run_dir: Path | None = None) -> tuple[bool, str]:
+    """Stop a CLI-spawned server, and only that: pidfile present AND pid
+    alive AND the recorded port still answers /health. Anything else is
+    refused (a recycled pid must never be killed). Returns (stopped,
+    message)."""
+    run_dir = run_dir or default_run_dir()
+    pidfile = run_dir / "daimon-agent.pid"
+    if not pidfile.exists():
+        return False, "no daimon server to stop (no pidfile)"
+    pid = _read_pid(pidfile)
+    if pid is None:
+        return False, "pidfile is corrupt; nothing stopped"
+    if not _pid_alive(pid):
+        with contextlib.suppress(OSError):
+            pidfile.unlink()
+        return False, "the recorded server is already dead; stale pidfile removed"
+    port = _read_port(pidfile)
+    if port is None or not await _health(port):
+        # Live pid but no server on the recorded port — either a recycled
+        # pid or a wedge. Not ours to kill.
+        return False, "pidfile's server is not answering on its recorded port; nothing stopped"
+    _kill_group(pid)
+    with contextlib.suppress(OSError):
+        pidfile.unlink()
+    return True, f"stopped daimon server (pid {pid}, port {port})"
+
+
+# --- the task stream ---------------------------------------------------------
+
+async def stream_turn(
+    http: aiohttp.ClientSession,
+    port: int,
+    session_id: str,
+    instruction: str,
+    emit: Callable[[dict[str, Any]], None],
+    agent: str = "general",
+) -> str | None:
+    """POST one `/task` and stream the NDJSON events to `emit`. Returns the
+    `done` result, or None on an `error` event. Raises ClientError on
+    transport failure, HTTP rejection, malformed events, or a stream that
+    ends without a terminal event. The caller owns `http` (the CLI keeps one
+    long-lived session for the whole loop; tests pass TestClient.session).
+    """
+    try:
+        async with http.post(
+            f"http://127.0.0.1:{port}/task",
+            json={"instruction": instruction, "session_id": session_id, "agent": agent},
+        ) as resp:
+            if resp.status != 200:
+                raise ClientError(f"server rejected the task (HTTP {resp.status})")
+            result: str | None = None
+            terminal = False
+            # Frame the stream ourselves: resp.content yields raw chunks that
+            # can split an event mid-line (and the server writes one event
+            # per \n-terminated line), so buffer partial lines between reads.
+            buf = b""
+            async for raw in resp.content:
+                buf += raw
+                while True:
+                    nl = buf.find(b"\n")
+                    if nl < 0:
+                        break
+                    line = buf[:nl].strip()
+                    buf = buf[nl + 1 :]
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise ClientError(f"bad event from server: {line[:120]!r}") from exc
+                    emit(event)
+                    etype = event.get("type")
+                    if etype in ("done", "error"):
+                        result = event.get("result") if etype == "done" else None
+                        terminal = True
+                        break
+                if terminal:
+                    break
+            if not terminal:
+                # Stream ended without a terminal event (e.g. the server
+                # died mid-turn and the connection just EOF'd).
+                raise ClientError("stream ended without a done/error event")
+            return result
+    except aiohttp.ClientError as exc:
+        raise ClientError(f"could not reach the daimon server: {exc}") from exc
+
+
+# --- introspection -----------------------------------------------------------
+
+async def list_tools(
+    http: aiohttp.ClientSession, port: int, agent: str = "general"
+) -> list[dict[str, str]]:
+    """GET /tools?agent=X — return the tool list for an agent type.
+    Returns a list of dicts with `name` and `description` keys."""
+    try:
+        async with http.get(
+            f"http://127.0.0.1:{port}/tools", params={"agent": agent}
+        ) as resp:
+            if resp.status != 200:
+                return []
+            return await resp.json()
+    except (aiohttp.ClientError, OSError):
+        return []
+
+def list_sessions(db_path: Path) -> list[str]:
+    """Distinct thread ids from the checkpointer DB, sorted. Read-only URI
+    connection — never creates the file; [] on a missing DB or table."""
+    if not db_path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints ORDER BY thread_id"
+        ).fetchall()
+        return [row[0] for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()

@@ -49,6 +49,34 @@ def _history_block(messages: list[AnyMessage]) -> str:
     return "\n".join(lines) or "(nothing yet)"
 
 
+def _compact_keep(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Return the verbatim suffix to keep after summarisation, extended
+    backward as needed so no ToolMessage is orphaned from its AIMessage with
+    tool_calls — DeepSeek rejects orphaned tool-result messages."""
+    kept = list(messages[-KEEP_LAST:])
+
+    # Collect tool_call_ids from ToolMessages in the kept suffix.
+    needed_ids: set[str] = set()
+    for m in kept:
+        tc_id = getattr(m, "tool_call_id", None)
+        if tc_id:
+            needed_ids.add(tc_id)
+
+    # Walk backward through the summarised prefix and pull in any AIMessage
+    # whose tool_calls are referenced by the kept ToolMessages.
+    for m in reversed(messages[:-KEEP_LAST]):
+        if not needed_ids:
+            break
+        tc_list = getattr(m, "tool_calls", None)
+        if tc_list:
+            tc_ids = {tc["id"] for tc in tc_list if "id" in tc}
+            if tc_ids & needed_ids:
+                needed_ids -= tc_ids
+                kept.insert(0, m)
+
+    return kept
+
+
 async def compact(router: Any, messages: list[AnyMessage]) -> list[AnyMessage]:
     """Summarize the old tail with flash; keep the recent messages verbatim."""
     summary = await router.flash().ainvoke(
@@ -57,7 +85,8 @@ async def compact(router: Any, messages: list[AnyMessage]) -> list[AnyMessage]:
     summary_text = str(summary.content).strip()
     if not summary_text:
         return list(messages)
-    return [SystemMessage(content=f"Earlier conversation summary: {summary_text}"), *messages[-KEEP_LAST:]]
+    kept = _compact_keep(messages)
+    return [SystemMessage(content=f"Earlier conversation summary: {summary_text}"), *kept]
 
 
 async def compact_if_needed(

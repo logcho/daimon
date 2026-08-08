@@ -21,6 +21,10 @@ fn main() {
             "start_dictation",
             "stop_dictation",
             "accessibility_trusted",
+            "get_vault_path_status",
+            "set_vault_path",
+            "list_vault_files",
+            "read_vault_file",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }

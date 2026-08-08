@@ -1,8 +1,8 @@
 """Configuration — the single source of env-name truth.
 
 Settings load from, in order of precedence: real environment variables >
-`.env` in the project root > `.daimon/pinchtab.env` (written by
-scripts/setup-pinchtab.sh; only PINCHTAB_* keys are taken from it).
+`.daimon/pinchtab.env` (written by scripts/setup-pinchtab.sh; only
+PINCHTAB_* keys are taken from it) > `.env` in the project root.
 """
 
 from __future__ import annotations
@@ -75,19 +75,22 @@ class Settings:
             # (a plain dict.update would clobber, e.g. the app spawning the
             # server with a specific PORT).
             merged.update(os.environ)
-            # Project-root .env next (never overrides real env).
-            root_env = dotenv_values(Path.cwd() / ".env")
-            merged.update(
-                {k: v for k, v in root_env.items() if v is not None and k not in merged}
-            )
-            # PinchTab env file written by setup-pinchtab.sh — PINCHTAB_* only.
+            # PinchTab env file written by setup-pinchtab.sh goes next —
+            # it knows the actual port/token of the running instance, so it
+            # must override .env defaults (don't check `k not in merged`).
             pinchtab_env = dotenv_values(Path.cwd() / ".daimon" / "pinchtab.env")
             merged.update(
                 {
                     k: v
                     for k, v in pinchtab_env.items()
-                    if v is not None and k.startswith("PINCHTAB_") and k not in merged
+                    if v is not None and k.startswith("PINCHTAB_")
                 }
+            )
+            # Project-root .env last — fills in defaults for keys not already
+            # set by the real environment or the PinchTab env file.
+            root_env = dotenv_values(Path.cwd() / ".env")
+            merged.update(
+                {k: v for k, v in root_env.items() if v is not None and k not in merged}
             )
         else:
             merged = dict(env)

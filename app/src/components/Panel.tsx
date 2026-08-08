@@ -1,12 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AgentKind, AgentStatus, ChatMessage, DictationStatus, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
+import type { AgentStatus, ChatMessage, DictationStatus, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
 import { isSessionBusy } from "../sessionEvents";
 import { ChatInput } from "./ChatInput";
 import { ErrorBanner } from "./ErrorBanner";
 import { MessageList } from "./MessageList";
 import { TerminalPanel } from "./TerminalPanel";
 import { VoiceIndicator } from "./VoiceIndicator";
-import { AgentPicker } from "./AgentPicker";
+import { VaultPanel } from "./VaultPanel";
 
 interface PanelProps {
   /** Active session only — gates ChatInput. */
@@ -40,9 +40,6 @@ interface PanelProps {
   voiceModel: VoiceModelStatus | null;
   voiceModelDownload: VoiceModelDownloadPayload | null;
   onRefreshVoiceModel: () => void;
-  /** Agent kind per session — defaults to "general" for new sessions. */
-  sessionAgents: Record<string, AgentKind>;
-  onChangeSessionAgent: (sid: string, agent: AgentKind) => void;
 }
 
 const STATUS_DOT =
@@ -82,8 +79,6 @@ export function Panel({
   voiceModel,
   voiceModelDownload,
   onRefreshVoiceModel,
-  sessionAgents,
-  onChangeSessionAgent,
 }: PanelProps) {
   const dot =
     globalBusy
@@ -129,14 +124,17 @@ export function Panel({
           >
             terminal
           </button>
+          <button
+            onClick={() => onViewChange("vault")}
+            className={`rounded-full px-2.5 py-1 text-xs transition-colors ${
+              view === "vault"
+                ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+                : "text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
+            }`}
+          >
+            vault
+          </button>
         </nav>
-        {view === "chat" && activeSessionId && (
-          <AgentPicker
-            agent={sessionAgents[activeSessionId] ?? "general"}
-            onChange={(a) => onChangeSessionAgent(activeSessionId, a)}
-            locked={messages.length > 0}
-          />
-        )}
         <VoiceIndicator
           dictation={dictation}
           model={voiceModel}
@@ -281,6 +279,8 @@ export function Panel({
           )}
         </div>
       )}
+
+      {view === "vault" && <VaultPanel />}
     </div>
   );
 }

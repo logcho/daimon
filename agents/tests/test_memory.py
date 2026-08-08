@@ -11,6 +11,45 @@ def test_fts_query_quotes_every_token() -> None:
     assert fts_query("café-naïve 123") == '"café" OR "naïve" OR "123"'
 
 
+def test_recall_works_from_worker_threads_concurrently(tmp_path) -> None:
+    # langchain runs sync tools (recall) in worker threads, and concurrent
+    # sessions' turns can hit the store from two threads at once. Without
+    # check_same_thread=False + the lock this raises "SQLite objects created
+    # in a thread can only be used in that same thread".
+    import threading
+
+    store = MemoryStore(tmp_path / "memory.db")
+    store.record_task("favorite color?", "blue", "done")
+    results: list[str] = []
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            results.append(store.recall("color"))
+        except Exception as exc:  # noqa: BLE001 — the point is to catch any
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    store.close()
+    assert errors == []
+    assert len(results) == 2
+    assert all("blue" in r for r in results)
+
+
+def test_busy_timeout_waits_not_errors(tmp_path) -> None:
+    # Two daimon-agent processes (app + CLI) may share the memory file — the
+    # pragma value IS the contract: wait, don't error.
+    store = MemoryStore(tmp_path / "memory.db")
+    try:
+        assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
+    finally:
+        store.close()
+
+
 def test_record_and_search_tasks(tmp_path) -> None:
     store = MemoryStore(tmp_path / "memory.db")
     store.record_task("build a job application spreadsheet", "Done.", "done")

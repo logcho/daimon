@@ -15,14 +15,14 @@ export function MessageList({ messages }: Props) {
 
   if (messages.length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-slate-400">
+      <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-neutral-500">
         Ask Daimon anything — coding, research, or chores around your computer.
       </div>
     );
   }
 
   return (
-    <div className="flex-1 space-y-4 overflow-y-auto px-3 py-4">
+    <div className="themed-scroll flex-1 space-y-4 overflow-y-auto px-3 py-4">
       {messages.map((m) => (
         <MessageBubble key={m.id} message={m} />
       ))}

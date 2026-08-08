@@ -2,8 +2,11 @@ mod agent;
 mod fn_key;
 mod session;
 mod terminal;
+mod timefmt;
+mod vault;
 mod vibrancy;
 mod voice;
+mod workspace;
 
 use agent::{AgentManager, AgentStatus};
 use serde::Serialize;
@@ -66,9 +69,12 @@ async fn set_window_vibrancy<R: tauri::Runtime>(app: tauri::AppHandle<R>, radius
     vibrancy::apply(&app, radius).await
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
+/// Shared app builder — used by both `run()` and `#[test]` ACL reachability
+/// tests (see vault.rs). Tests pass `mock_builder()` so no real window/event
+/// loop is created. Uses the concrete `Wry` runtime so `#[tauri::command]`
+/// macros resolve correctly (generic `R` breaks `AppHandle` deserialization).
+pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri::Wry> {
+    builder
         .manage(AgentManager::new())
         .invoke_handler(tauri::generate_handler![
             agent_status,
@@ -85,15 +91,17 @@ pub fn run() {
             voice::start_dictation,
             voice::stop_dictation,
             accessibility_trusted,
+            vault::get_vault_path_status,
+            vault::set_vault_path,
+            vault::list_vault_files,
+            vault::read_vault_file,
         ])
         .setup(|app| {
             voice::init(app.handle());
             #[cfg(target_os = "macos")]
             fn_key::install_fn_key_monitors(app.handle().clone());
 
-            // SIGTERM (e.g. `kill` from a terminal, or the dev watcher) does
-            // not fire RunEvent::Exit on its own — exit cleanly instead so
-            // the Exit handler sweeps the agent server.
+            // SIGTERM — exit cleanly so the Exit handler sweeps the agent server.
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{signal, SignalKind};
@@ -111,12 +119,16 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building daimon app")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                // The agent server (and its kernels) must not outlive us —
-                // and neither must any open terminal shells.
-                app_handle.state::<AgentManager>().kill_sync();
-                terminal::kill_terminal_on_exit();
-            }
-        });
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    build_app(tauri::Builder::default()).run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            // The agent server (and its kernels) must not outlive us —
+            // and neither must any open terminal shells.
+            app_handle.state::<AgentManager>().kill_sync();
+            terminal::kill_terminal_on_exit();
+        }
+    });
 }

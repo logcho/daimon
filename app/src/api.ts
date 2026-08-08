@@ -6,6 +6,7 @@ import type {
   DictationStatus,
   TerminalExitedPayload,
   TerminalOutputPayload,
+  VaultFile,
   VoiceModelDownloadPayload,
   VoiceModelStatus,
 } from "./types";
@@ -60,3 +61,9 @@ export const onDictationStatus = (handler: (status: DictationStatus) => void): P
 
 export const onVoiceModelDownload = (handler: (payload: VoiceModelDownloadPayload) => void): Promise<UnlistenFn> =>
   listen<VoiceModelDownloadPayload>("voice-model-download", (e) => handler(e.payload));
+
+// --- Vault -------------------------------------------------------------------
+
+export const listVaultFiles = (): Promise<VaultFile[]> => invoke<VaultFile[]>("list_vault_files");
+
+export const readVaultFile = (name: string): Promise<string> => invoke<string>("read_vault_file", { name });

@@ -59,6 +59,7 @@ start() {
     PORT="${PINCHTAB_PORT:-$((20000 + RANDOM % 20000))}"
     TOKEN="$(uuidgen)"
 
+    rm -f "$PROFILE_DIR/.pinchtab/config.json"  # avoid interactive "Overwrite?" prompt in non-TTY + corruption from previous runs
     pinchtab_cli config init
     pinchtab_cli config set server.bind 127.0.0.1
     pinchtab_cli config set server.token "$TOKEN"

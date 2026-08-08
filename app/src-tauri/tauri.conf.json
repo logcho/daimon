@@ -12,17 +12,24 @@
   "app": {
     "windows": [
       {
-        "label": "main",
+        "label": "pill",
         "title": "Daimon",
-        "width": 400,
-        "height": 600,
-        "minWidth": 320,
-        "minHeight": 480,
-        "resizable": true,
-        "decorations": true,
-        "center": true
+        "width": 96,
+        "height": 96,
+        "minWidth": 96,
+        "minHeight": 96,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "center": false,
+        "visible": true
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }

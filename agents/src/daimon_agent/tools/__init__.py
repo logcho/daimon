@@ -6,6 +6,7 @@ shapes. `research` (Phase E's fan-out) is reserved."""
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -19,6 +20,7 @@ from . import host as _host
 from . import search as _search
 from . import shell as _shell
 from . import skills_tools as _skills
+from . import web as _web
 from .repl import get_repl
 
 BROWSER_UNAVAILABLE = (
@@ -109,13 +111,24 @@ class ResearchArgs(BaseModel):
 
 
 def _tool(name: str, description: str, args_model: type[BaseModel], fn) -> StructuredTool:
-    return StructuredTool.from_function(name=name, description=description, args_schema=args_model, func=fn)
+    """Wrap `fn` as a StructuredTool. Async functions get `coroutine` set so
+    `ainvoke` actually awaits them; without it, LangChain calls the sync
+    `func` path, which returns an unawaited coroutine object for async defs."""
+    if inspect.iscoroutinefunction(fn):
+        return StructuredTool.from_function(
+            name=name, description=description, args_schema=args_model,
+            func=fn, coroutine=fn,
+        )
+    return StructuredTool.from_function(
+        name=name, description=description, args_schema=args_model, func=fn,
+    )
 
 
 def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id: str = "default") -> list[BaseTool]:
     conf = Confinement(settings.resolved_workspace_dir)
     browser = build_browser(settings)
     provider = _search.build_search_provider(settings)
+    fetcher = _web.build_web_fetcher(settings)
     repl = get_repl(session_id, settings.resolved_workspace_dir)
 
     # ---- background browser (PinchTab) -----------------------------------
@@ -178,6 +191,9 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
         if not results:
             return f'No search results found for "{query}". Try a different, more specific query.'
         return "\n".join(f"{i + 1}. {r.title} — {r.url} — {r.snippet}" for i, r in enumerate(results))
+
+    async def web_fetch(url: str) -> str:
+        return await fetcher.fetch(url)
 
     # ---- memory ----------------------------------------------------------
 
@@ -292,9 +308,18 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
             "web_search",
             "Search the web and get back a numbered list of results (title, URL, snippet). Use this "
             "when you don't already know the specific URL you need, instead of guessing one, then "
-            "open_url the most relevant result.",
+            "open_url or web_fetch the most relevant result.",
             QueryArgs,
             web_search,
+        ),
+        _tool(
+            "web_fetch",
+            "Fetch a URL and return its main content as clean Markdown. Works without the "
+            "background browser — no PinchTab needed. Use this to read a specific page when you "
+            "already have the URL (e.g. from a web_search result). For interactive browsing "
+            "(clicking, filling forms), use open_url + read_page + click + fill_field instead.",
+            UrlArgs,
+            web_fetch,
         ),
         _tool(
             "recall",

@@ -78,6 +78,13 @@ async def run_turn(
                 "instruction": instruction,
                 "session_id": session_id,
                 "skills_block": skills_block,
+                # Per-turn bookkeeping — reset every turn so the research
+                # budget, duplicate detection, and page-change detection
+                # start fresh. The checkpointer carries these across turns
+                # if not overridden here.
+                "research_used": 0,
+                "call_log": [],
+                "last_read_signature": None,
             },
             config,
             stream_mode="updates",

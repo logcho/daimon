@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,31 @@ class SaveSkillArgs(BaseModel):
 
 class CommandArgs(BaseModel):
     command: str = Field(description="Shell command to stage — typed, not executed")
+
+
+class MkdirArgs(BaseModel):
+    path: str = Field(description="Directory path relative to the workspace root")
+
+
+class ListDirArgs(BaseModel):
+    path: str = Field(default="", description="Directory to list (empty = workspace root)")
+
+
+class MoveArgs(BaseModel):
+    source: str = Field(description="Source file path relative to the workspace root")
+    destination: str = Field(description="Destination file path relative to the workspace root")
+
+
+class CheckCodeArgs(BaseModel):
+    file_path: str = Field(default="", description="File or directory to check (empty = whole workspace)")
+
+
+class DebugArgs(BaseModel):
+    code: str = Field(description="Python code to debug (runs in an isolated subprocess)")
+
+
+class RunTestsArgs(BaseModel):
+    path: str = Field(default="", description="Test file or directory to run (empty = all tests)")
 
 
 def _tool(name: str, description: str, args_model: type[BaseModel], fn) -> StructuredTool:
@@ -212,6 +238,192 @@ def build_coding_tools(
     def stage_terminal_command(command: str) -> str:
         return _host.stage_terminal_command(command)
 
+    # ---- new tools: directory ops, code quality, debugging, tests ----------
+
+    def mkdir(path: str) -> str:
+        """Create a directory (and any parents) in the workspace."""
+        target = (conf.root / path).resolve()
+        if not str(target).startswith(str(conf.root.resolve())):
+            return f"Error: path \"{path}\" is outside the workspace."
+        target.mkdir(parents=True, exist_ok=True)
+        rel = target.relative_to(conf.root)
+        return f"Created directory \"{rel}\"."
+
+    def list_directory(path: str) -> str:
+        """List contents of a directory in the workspace."""
+        target = conf.root / path if path else conf.root
+        target = target.resolve()
+        if not str(target).startswith(str(conf.root.resolve())):
+            return f"Error: path \"{path}\" is outside the workspace."
+        if not target.exists():
+            return f"Error: \"{path or '.'}\" does not exist."
+        if not target.is_dir():
+            return f"Error: \"{path or '.'}\" is not a directory."
+        lines: list[str] = []
+        try:
+            entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except PermissionError:
+            return f"Error: permission denied reading \"{path or '.'}\"."
+        for entry in entries:
+            try:
+                st = entry.stat()
+            except OSError:
+                lines.append(f"??? {entry.name}")
+                continue
+            if entry.is_dir():
+                lines.append(f"drwxr-xr-x {entry.name}/")
+            else:
+                size = st.st_size
+                if size < 1024:
+                    size_str = f"{size}B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size / 1024:.1f}K"
+                else:
+                    size_str = f"{size / (1024 * 1024):.1f}M"
+                lines.append(f"-rw-r--r-- {size_str:>6} {entry.name}")
+        if not lines:
+            return "(empty directory)"
+        return "\n".join(lines)
+
+    def delete_file(file_path: str) -> str:
+        """Delete a workspace file. Refuses to delete directories."""
+        target = (conf.root / file_path).resolve()
+        if not str(target).startswith(str(conf.root.resolve())):
+            return f"Error: path \"{file_path}\" is outside the workspace."
+        if not target.exists():
+            return f"Error: \"{file_path}\" does not exist."
+        if target.is_dir():
+            return f"Error: \"{file_path}\" is a directory — use run_shell with `rm -r` instead."
+        target.unlink()
+        return f"Deleted \"{file_path}\"."
+
+    def move_file(source: str, destination: str) -> str:
+        """Move or rename a workspace file."""
+        src = (conf.root / source).resolve()
+        dst = (conf.root / destination).resolve()
+        if not str(src).startswith(str(conf.root.resolve())):
+            return f"Error: source \"{source}\" is outside the workspace."
+        if not str(dst).startswith(str(conf.root.resolve())):
+            return f"Error: destination \"{destination}\" is outside the workspace."
+        if not src.exists():
+            return f"Error: source \"{source}\" does not exist."
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dst)
+        return f"Moved \"{source}\" → \"{destination}\"."
+
+    async def check_code(file_path: str) -> str:
+        """Run ruff (lint) and mypy (typecheck) on workspace code."""
+        target = conf.root / file_path if file_path else conf.root
+        cwd = str(conf.root)
+        results: list[str] = []
+
+        # ruff check — fast linting
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ruff", "check", str(target.relative_to(conf.root)) if file_path else ".",
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            out = (stdout or b"").decode("utf-8", errors="replace").strip()
+            if proc.returncode == 0:
+                results.append("✓ ruff: no issues found")
+            else:
+                results.append(f"✗ ruff (exit {proc.returncode}):\n{out}" if out else f"✗ ruff (exit {proc.returncode})")
+        except FileNotFoundError:
+            results.append("⚠ ruff not installed — run `pip install ruff`")
+        except asyncio.TimeoutError:
+            results.append("⚠ ruff timed out")
+
+        # mypy — type checking
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "mypy", str(target.relative_to(conf.root)) if file_path else ".",
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            out = (stdout or b"").decode("utf-8", errors="replace").strip()
+            if proc.returncode == 0:
+                results.append("✓ mypy: no type errors found")
+            else:
+                results.append(f"✗ mypy (exit {proc.returncode}):\n{out}" if out else f"✗ mypy (exit {proc.returncode})")
+        except FileNotFoundError:
+            results.append("⚠ mypy not installed — run `pip install mypy`")
+        except asyncio.TimeoutError:
+            results.append("⚠ mypy timed out")
+
+        return "\n\n".join(results) if results else "No checks available."
+
+    async def debug(code: str) -> str:
+        """Run Python code in an isolated subprocess and capture structured
+        debugging output on failure: exception type, message, and traceback
+        with local variables at each frame."""
+        script = (
+            "import sys, traceback, pprint\n"
+            "try:\n"
+            + "\n".join(f"    {line}" for line in code.split("\n"))
+            + "\n"
+            "except Exception as exc:\n"
+            "    print(f'EXCEPTION: {type(exc).__name__}: {exc}', file=sys.stderr)\n"
+            "    tb = traceback.TracebackException.from_exception(exc, capture_locals=True)\n"
+            "    print(''.join(tb.format()), file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+        )
+        env = dict(os.environ)
+        for key in _SECRET_ENV:
+            env.pop(key, None)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script,
+            cwd=str(conf.root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "Debug execution timed out after 30s and was killed."
+
+        out = (stdout or b"").decode("utf-8", errors="replace")
+        err = (stderr or b"").decode("utf-8", errors="replace")
+        if proc.returncode != 0:
+            return f"Debug — execution failed:\n\n{err}{out}" if err else f"Debug — execution failed (exit {proc.returncode}):\n{out}"
+        return out or "(no output — code ran successfully)"
+
+    async def run_tests(path: str) -> str:
+        """Run pytest in the workspace. Falls back if pytest isn't installed."""
+        cwd = str(conf.root)
+        args = ["pytest", "-x", "-q"]
+        if path:
+            args.append(path)
+        else:
+            args.append(".")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            out = (stdout or b"").decode("utf-8", errors="replace")
+            if len(out) > 8000:
+                out = out[:8000] + "\n…(output truncated)"
+            if proc.returncode == 0:
+                return f"✓ All tests passed.\n\n{out}" if out.strip() else "✓ All tests passed."
+            return f"✗ Tests failed (exit {proc.returncode}):\n{out}"
+        except FileNotFoundError:
+            return "pytest not installed — run `pip install pytest`"
+        except asyncio.TimeoutError:
+            return "Tests timed out after 120s."
+
+    # ---- tool list ---------------------------------------------------------
+
     return [
         _tool(
             "kernel_execute",
@@ -309,5 +521,57 @@ def build_coding_tools(
             "or commands the safety check blocks.",
             CommandArgs,
             stage_terminal_command,
+        ),
+        # ---- new: directory ops, code quality, debugging, tests -------------
+        _tool(
+            "mkdir",
+            "Create a directory (and any parent directories) in the workspace.",
+            MkdirArgs,
+            mkdir,
+        ),
+        _tool(
+            "list_directory",
+            "List the contents of a workspace directory. Shows names, sizes, and "
+            "type markers (dir/ suffix). Like `ls -la`.",
+            ListDirArgs,
+            list_directory,
+        ),
+        _tool(
+            "delete_file",
+            "Delete a file from the workspace. Refuses to delete directories — "
+            "use run_shell with `rm -r` for that.",
+            FilePathArgs,
+            delete_file,
+        ),
+        _tool(
+            "move_file",
+            "Move or rename a workspace file. Creates parent directories of the "
+            "destination if needed.",
+            MoveArgs,
+            move_file,
+        ),
+        _tool(
+            "check_code",
+            "Run ruff (lint) and mypy (typecheck) on workspace code. Pass a "
+            "specific file or directory, or omit the argument to check everything.",
+            CheckCodeArgs,
+            check_code,
+        ),
+        _tool(
+            "debug",
+            "Run Python code in an isolated subprocess and return a structured "
+            "debugging report. On failure: exception type, message, and traceback "
+            "with local variables at each frame. Use to understand *why* code "
+            "is failing before editing.",
+            DebugArgs,
+            debug,
+        ),
+        _tool(
+            "run_tests",
+            "Run pytest in the workspace. Pass a specific test file or directory, "
+            "or omit the argument to run all tests. Falls back gracefully if pytest "
+            "isn't installed.",
+            RunTestsArgs,
+            run_tests,
         ),
     ]

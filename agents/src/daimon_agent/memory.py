@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -80,74 +81,91 @@ def _matches_and_rows(
 
 class MemoryStore:
     """One store per process. Sync sqlite3 is fine here: writes are single
-    inserts and reads are bounded, and langchain already runs sync tool calls
-    in a worker thread."""
+    inserts and reads are bounded. langchain runs sync tool calls (recall,
+    etc.) in worker threads, and concurrent sessions' turns can hit the store
+    from different threads at the same time — so the connection is created
+    with check_same_thread=False and every access serializes on a lock."""
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
+        self._lock = threading.Lock()
+        # check_same_thread=False: sync tools run in langchain's worker
+        # threads — without it the first recall from a worker thread raises
+        # "SQLite objects created in a thread can only be used in that same
+        # thread". The lock serializes those cross-thread accesses.
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # Two daimon-agent processes (app + CLI) may share this file — wait
+        # up to 10s for the other's write lock instead of erroring.
+        self._conn.execute("PRAGMA busy_timeout = 10000")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     # -- tasks -------------------------------------------------------------
 
     def record_task(self, instruction: str, result: str | None, status: str) -> None:
-        task_id = str(uuid.uuid4())
-        created_at = int(time.time() * 1000)
-        self._conn.execute(
-            "INSERT INTO tasks (id, instruction, result, status, created_at) VALUES (?, ?, ?, ?, ?)",
-            (task_id, instruction, result, status, created_at),
-        )
-        self._conn.execute(
-            "INSERT INTO tasks_fts (id, instruction, result) VALUES (?, ?, ?)",
-            (task_id, instruction, result or ""),
-        )
-        self._conn.commit()
+        with self._lock:
+            task_id = str(uuid.uuid4())
+            created_at = int(time.time() * 1000)
+            self._conn.execute(
+                "INSERT INTO tasks (id, instruction, result, status, created_at) VALUES (?, ?, ?, ?, ?)",
+                (task_id, instruction, result, status, created_at),
+            )
+            self._conn.execute(
+                "INSERT INTO tasks_fts (id, instruction, result) VALUES (?, ?, ?)",
+                (task_id, instruction, result or ""),
+            )
+            self._conn.commit()
 
     def search_tasks(self, query: str, limit: int = 5) -> list[sqlite3.Row]:
-        return _matches_and_rows(self._conn, "tasks_fts", "tasks", "id", query, limit, "created_at")
+        with self._lock:
+            return _matches_and_rows(self._conn, "tasks_fts", "tasks", "id", query, limit, "created_at")
 
     # -- skills ------------------------------------------------------------
 
     def upsert_skill(self, name: str, description: str) -> None:
-        created_at = int(time.time() * 1000)
-        self._conn.execute(
-            "INSERT INTO skills (name, description, created_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET description = excluded.description",
-            (name, description, created_at),
-        )
-        self._conn.execute("DELETE FROM skills_fts WHERE name = ?", (name,))
-        self._conn.execute(
-            "INSERT INTO skills_fts (name, description) VALUES (?, ?)", (name, description)
-        )
-        self._conn.commit()
+        with self._lock:
+            created_at = int(time.time() * 1000)
+            self._conn.execute(
+                "INSERT INTO skills (name, description, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET description = excluded.description",
+                (name, description, created_at),
+            )
+            self._conn.execute("DELETE FROM skills_fts WHERE name = ?", (name,))
+            self._conn.execute(
+                "INSERT INTO skills_fts (name, description) VALUES (?, ?)", (name, description)
+            )
+            self._conn.commit()
 
     def search_skills(self, query: str, limit: int = 5) -> list[sqlite3.Row]:
-        return _matches_and_rows(self._conn, "skills_fts", "skills", "name", query, limit, "created_at")
+        with self._lock:
+            return _matches_and_rows(self._conn, "skills_fts", "skills", "name", query, limit, "created_at")
 
     # -- notes -------------------------------------------------------------
 
     def index_note(self, filename: str, content: str) -> None:
         """Upsert by filename — FTS5 virtual tables don't support ON CONFLICT,
         so it's delete-then-insert into both tables."""
-        updated_at = int(time.time() * 1000)
-        self._conn.execute(
-            "INSERT INTO notes (filename, content, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(filename) DO UPDATE SET content = excluded.content, "
-            "updated_at = excluded.updated_at",
-            (filename, content, updated_at),
-        )
-        self._conn.execute("DELETE FROM notes_fts WHERE filename = ?", (filename,))
-        self._conn.execute("INSERT INTO notes_fts (filename, content) VALUES (?, ?)", (filename, content))
-        self._conn.commit()
+        with self._lock:
+            updated_at = int(time.time() * 1000)
+            self._conn.execute(
+                "INSERT INTO notes (filename, content, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(filename) DO UPDATE SET content = excluded.content, "
+                "updated_at = excluded.updated_at",
+                (filename, content, updated_at),
+            )
+            self._conn.execute("DELETE FROM notes_fts WHERE filename = ?", (filename,))
+            self._conn.execute("INSERT INTO notes_fts (filename, content) VALUES (?, ?)", (filename, content))
+            self._conn.commit()
 
     def search_notes(self, query: str, limit: int = 5) -> list[sqlite3.Row]:
-        return _matches_and_rows(self._conn, "notes_fts", "notes", "filename", query, limit, "updated_at")
+        with self._lock:
+            return _matches_and_rows(self._conn, "notes_fts", "notes", "filename", query, limit, "updated_at")
 
     # -- combined ----------------------------------------------------------
 
