@@ -8,7 +8,7 @@
 //! ready. Shutdown kills the whole process group — the agent spawns ipykernel
 //! children, so a plain child-kill would orphan them.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -24,6 +24,12 @@ pub struct AgentStatus {
     pub running: bool,
     pub adopted: bool,
     pub port: u16,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default)]
+    pub active_turns: u32,
+    #[serde(default)]
+    pub sessions: Vec<String>,
 }
 
 enum ChildState {
@@ -92,7 +98,7 @@ impl AgentManager {
             };
             if let Some((adopted, port)) = cached {
                 if health(port).await.is_ok() {
-                    return Ok(AgentStatus { running: true, adopted, port });
+                    return Ok(AgentStatus { running: true, adopted, port, busy: false, active_turns: 0, sessions: vec![] });
                 }
                 *self.inner.lock().unwrap() = None; // dead — respawn below
             }
@@ -100,7 +106,7 @@ impl AgentManager {
         // Nothing cached — probe the fixed port and adopt an external server.
         if health(self.port).await.is_ok() {
             *self.inner.lock().unwrap() = Some(ChildState::Adopted { port: self.port });
-            return Ok(AgentStatus { running: true, adopted: true, port: self.port });
+            return Ok(AgentStatus { running: true, adopted: true, port: self.port, busy: false, active_turns: 0, sessions: vec![] });
         }
         self.spawn(app, &run_dir).await
     }
@@ -142,7 +148,7 @@ impl AgentManager {
                     _log_out: log_out,
                     _log_err: log_err,
                 });
-                return Ok(AgentStatus { running: true, adopted: false, port });
+                return Ok(AgentStatus { running: true, adopted: false, port, busy: false, active_turns: 0, sessions: vec![] });
             }
             tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
         }
@@ -189,6 +195,31 @@ impl Default for AgentManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Deserialized from `GET /status` — unknown fields are ignored so an older
+/// server binary (without the endpoint) degrades gracefully to not-busy.
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct BusyState {
+    pub busy: bool,
+    pub active_turns: u32,
+    pub sessions: Vec<String>,
+}
+
+impl Default for BusyState {
+    fn default() -> Self {
+        Self { busy: false, active_turns: 0, sessions: vec![] }
+    }
+}
+
+/// Fetch the global busy state from the agent server. An older server (no
+/// /status endpoint) or a connection error returns the default: not busy.
+pub async fn fetch_busy_state(port: u16) -> BusyState {
+    let Ok(resp) = reqwest::get(format!("http://127.0.0.1:{port}/status")).await else {
+        return BusyState::default();
+    };
+    resp.json::<BusyState>().await.unwrap_or_default()
 }
 
 async fn health(port: u16) -> Result<(), String> {

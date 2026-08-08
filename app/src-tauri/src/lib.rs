@@ -1,5 +1,7 @@
 mod agent;
 mod session;
+mod terminal;
+mod vibrancy;
 
 use agent::{AgentManager, AgentStatus};
 use serde::Serialize;
@@ -19,7 +21,14 @@ async fn agent_status(
     state: tauri::State<'_, AgentManager>,
 ) -> Result<AgentStatus, String> {
     // The app owns its server: mounting the chat window brings the agent up.
-    Ok(state.ensure(&app).await?)
+    let mut status = state.ensure(&app).await?;
+    if status.running {
+        let bs = agent::fetch_busy_state(status.port).await;
+        status.busy = bs.busy;
+        status.active_turns = bs.active_turns;
+        status.sessions = bs.sessions;
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -44,6 +53,11 @@ async fn close_agent(state: tauri::State<'_, AgentManager>) -> Result<(), String
     state.shutdown().await
 }
 
+#[tauri::command]
+async fn set_window_vibrancy<R: tauri::Runtime>(app: tauri::AppHandle<R>, radius: f64) -> Result<(), String> {
+    vibrancy::apply(&app, radius).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -52,7 +66,12 @@ pub fn run() {
             agent_status,
             start_chat,
             send_message,
-            close_agent
+            close_agent,
+            set_window_vibrancy,
+            terminal::start_terminal,
+            terminal::write_to_terminal,
+            terminal::resize_terminal,
+            terminal::close_terminal
         ])
         .setup(|app| {
             // SIGTERM (e.g. `kill` from a terminal, or the dev watcher) does
@@ -77,8 +96,10 @@ pub fn run() {
         .expect("error while building daimon app")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                // The agent server (and its kernels) must not outlive us.
+                // The agent server (and its kernels) must not outlive us —
+                // and neither must any open terminal shells.
                 app_handle.state::<AgentManager>().kill_sync();
+                terminal::kill_terminal_on_exit();
             }
         });
 }

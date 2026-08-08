@@ -10,12 +10,20 @@ last-ditch error emit so nothing escapes as an unhandled rejection.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
+import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import httpx
 from aiohttp import web
+from aiohttp.client_exceptions import ClientConnectionResetError
+from dataclasses import replace
+from dotenv import dotenv_values
 
 from . import live_frames
 from .browser import aclose_browser, build_browser
@@ -28,8 +36,92 @@ from .run import run_turn
 from .skills.injector import discover_skills
 from .tools import build_tools
 from .tools.repl import close_all_repls
+from .tools.search import aclose_search_provider
+from .tools.web import aclose_web_fetcher
 
 NDJSON = "application/x-ndjson"
+PINCHTAB_HEALTH_TIMEOUT_S = 5.0
+PINCHTAB_SETUP_SCRIPT = Path(__file__).resolve().parent.parent.parent / "scripts" / "setup-pinchtab.sh"
+
+
+async def _pinchtab_healthy(settings: Settings) -> bool:
+    """True if PinchTab is reachable and responding on the configured base."""
+    try:
+        headers = {}
+        if settings.pinchtab_token:
+            headers["Authorization"] = f"Bearer {settings.pinchtab_token}"
+        async with httpx.AsyncClient(timeout=PINCHTAB_HEALTH_TIMEOUT_S) as client:
+            resp = await client.get(f"{settings.pinchtab_base}/health", headers=headers)
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def _ensure_pinchtab(settings: Settings) -> Settings:
+    """Auto-start PinchTab if it isn't healthy, then return settings with
+    updated pinchtab_base/token. Only touches PinchTab keys — caller-provided
+    overrides (tmp paths, port, etc.) are preserved."""
+
+    if await _pinchtab_healthy(settings):
+        return settings
+
+    script = str(PINCHTAB_SETUP_SCRIPT)
+    if not Path(script).exists():
+        print(f"[daimon-agent] PinchTab not running and {script} not found — "
+              f"browser tools will be unavailable", file=sys.stderr)
+        return settings
+
+    print(f"[daimon-agent] PinchTab not healthy on {settings.pinchtab_base} — "
+          f"auto-starting via {script}", file=sys.stderr)
+    try:
+        # Kill orphaned instances first so we don't accumulate them.
+        await _stop_pinchtab()
+
+        proc = await asyncio.create_subprocess_exec(
+            script, "start",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=60.0,
+        )
+        if proc.returncode != 0:
+            print(f"[daimon-agent] PinchTab setup failed (exit {proc.returncode}): "
+                  f"{stderr.decode()}", file=sys.stderr)
+            return settings
+
+        # Only read PinchTab keys from the env file — don't reload everything
+        # (that would lose caller-provided overrides like test tmp paths).
+        pinchtab_env = dotenv_values(Path.cwd() / ".daimon" / "pinchtab.env")
+        new_base = pinchtab_env.get("PINCHTAB_BASE") or settings.pinchtab_base
+        new_token = pinchtab_env.get("PINCHTAB_TOKEN") or settings.pinchtab_token
+        new_settings = replace(settings, pinchtab_base=new_base, pinchtab_token=new_token)
+        print(f"[daimon-agent] PinchTab started on {new_settings.pinchtab_base}", file=sys.stderr)
+        return new_settings
+    except asyncio.TimeoutError:
+        print("[daimon-agent] PinchTab setup timed out", file=sys.stderr)
+        return settings
+    except Exception as exc:
+        print(f"[daimon-agent] PinchTab setup error: {exc}", file=sys.stderr)
+        return settings
+
+
+async def _stop_pinchtab() -> None:
+    """Gracefully stop the PinchTab server if the setup script exists, and
+    remove stale env/pid files so the next auto-start begins from a clean
+    slate."""
+    script = str(PINCHTAB_SETUP_SCRIPT)
+    if not Path(script).exists():
+        return
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            script, "stop",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.communicate(), timeout=10.0)
+    except Exception:
+        pass  # best-effort — don't block shutdown
 
 
 def index_existing_vault_notes(settings: Settings, memory: MemoryStore) -> int:
@@ -77,8 +169,15 @@ async def create_app(
     app["locks"] = {}
     app["skills"] = []
     app["router"] = ModelRouter(settings)  # lazy: only constructed when called
+    # Turn registry for the /status endpoint — counts active turns across all
+    # sessions (both app-initiated and CLI-initiated) so the activity signal
+    # dot on the pill covers *every* source of work.
+    app["turn_registry"] = {"count": 0, "sessions": Counter(), "lock": asyncio.Lock()}
 
     async def startup(app: web.Application) -> None:
+        nonlocal settings
+        settings = await _ensure_pinchtab(settings)
+        app["settings"] = settings
         graph, checkpointer = await graph_builder(settings, memory=app["memory"])
         app["graph"] = graph
         app["checkpointer"] = checkpointer
@@ -90,8 +189,11 @@ async def create_app(
     async def cleanup(app: web.Application) -> None:
         await close_checkpointer(app["checkpointer"])
         await aclose_browser()
+        await aclose_web_fetcher()
+        await aclose_search_provider()
         await close_all_repls()
         app["memory"].close()
+        await _stop_pinchtab()
 
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
@@ -115,22 +217,53 @@ async def create_app(
 
         # Events must be emitted from sync graph-node context in order, so the
         # emit closure enqueues and a single writer task drains the queue.
-        queue: asyncio.Queue[bytes] = asyncio.Queue()
+        queue: asyncio.Queue[tuple[bytes, bool] | None] = asyncio.Queue()
+        # `terminal_emitted` — a done|error event was enqueued (done|error is
+        # exclusive per the contract). The writer closes the body right after
+        # the terminal event itself, so the client's stream ends at the result
+        # instead of staying open through reflection/teardown (a connection
+        # that dies in that window made the client's final read fail with
+        # hyper's "incomplete message", surfacing as a spurious stream error
+        # after the result). The terminal-ness rides on the *chunk*, not this
+        # flag: the flag is set as soon as the terminal event is enqueued,
+        # which can happen while earlier chunks are still queued — checking
+        # the flag after every write would drop those earlier chunks' tails
+        # and the done itself. FIFO + synchronous emit keeps everything before
+        # the terminal event ahead of it in the queue.
+        terminal_emitted = False
 
         async def writer() -> None:
             while True:
-                chunk = await queue.get()
-                if chunk is None:
+                item = await queue.get()
+                if item is None:
                     break
+                chunk, is_terminal = item
                 await response.write(chunk)
+                if is_terminal:
+                    break
 
         writer_task = asyncio.create_task(writer())
 
         def emit(event: dict) -> None:
-            queue.put_nowait(json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n")
+            nonlocal terminal_emitted
+            is_terminal = event.get("type") in ("done", "error")
+            if is_terminal:
+                terminal_emitted = True
+            queue.put_nowait(
+                (json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n", is_terminal)
+            )
 
         def frame_task(emit_fn) -> asyncio.Task | None:
             return live_frames.start(emit_fn, build_browser(settings), settings)
+
+        # Register the turn globally *before* acquiring the per-session lock —
+        # a turn queued behind another for the same session is still activity
+        # and the pill should show busy while it waits. The /status endpoint
+        # reads this registry to answer "is anything running."
+        reg = app["turn_registry"]
+        async with reg["lock"]:
+            reg["count"] += 1
+            reg["sessions"][session_id] += 1
 
         lock = app["locks"].setdefault(session_id, asyncio.Lock())
         async with lock:  # one turn per session at a time, like legacy's queue
@@ -148,23 +281,71 @@ async def create_app(
                 )
             except Exception as exc:  # last-ditch backstop, port of server.ts's .catch
                 print(f"[daimon-agent] unhandled error running task: {exc}", file=sys.stderr)
-                try:
-                    emit(error_event(str(exc)))
-                except Exception:
-                    pass  # response may already be closed
+                if not terminal_emitted:  # done|error is exclusive per the contract
+                    try:
+                        emit(error_event(str(exc)))
+                    except Exception:
+                        pass  # response may already be closed
             finally:
+                # De-register the turn so /status stops reporting busy.
+                async with reg["lock"]:
+                    reg["count"] -= 1
+                    if reg["sessions"][session_id] <= 1:
+                        del reg["sessions"][session_id]
+                    else:
+                        reg["sessions"][session_id] -= 1
+
                 await queue.put(None)
                 await writer_task
-                await response.write_eof()
+                # The terminal chunk has been written; the client ends its
+                # read at the done|error line and closes the connection right
+                # after (stream-end-is-the-result contract), so this final
+                # chunk-footer write can race the close — a reset here is
+                # expected, not an error. Best-effort, like the terminal
+                # write above.
+                with contextlib.suppress(ClientConnectionResetError):
+                    await response.write_eof()
         return response
 
+    async def status(request: web.Request) -> web.Response:
+        """Global busy state — the pill polls this to drive its activity dot.
+        Covers both app-initiated and CLI-initiated turns because they share
+        the same server process."""
+        reg = request.app["turn_registry"]
+        async with reg["lock"]:
+            return web.json_response({
+                "running": True,
+                "busy": reg["count"] > 0,
+                "active_turns": reg["count"],
+                "sessions": sorted(reg["sessions"]),
+            })
+
     app.router.add_get("/health", health)
+    app.router.add_get("/status", status)
     app.router.add_post("/task", task)
     return app
 
 
 def main() -> None:
     settings = Settings.from_env()
+    # When the CLI spawned us it set DAIMON_PIDFILE — write our pid + port so
+    # `daimon --stop` and concurrent spawns can find us. The app and manual
+    # runs never set it, so they stay unmanaged (each owner kills only its
+    # own). Writing it here (not in the spawner) kills the double-spawn race:
+    # the pidfile always names the live server, so a stale one is
+    # dead-by-definition and the next ensure/--stop just removes it.
+    pidfile = os.environ.get("DAIMON_PIDFILE")
+    if pidfile:
+        path = Path(pidfile)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{os.getpid()}\n{settings.port}\n", encoding="utf-8")
     # run_app awaits the app coroutine inside its own loop, so startup hooks
     # (checkpointer, browser) bind to the running loop.
     web.run_app(create_app(settings), host="127.0.0.1", port=settings.port)
+
+
+if __name__ == "__main__":
+    # `python -m daimon_agent.server` must actually serve — this is what the
+    # CLI's spawn uses (sys.executable resolves in the tool venv). Without
+    # the guard the module imports and exits 0 silently.
+    raise SystemExit(main())

@@ -56,14 +56,17 @@ export default function App() {
 
   // Derived per-session state. `busy` guards the active session's input only
   // — per-session concurrency is the point — while the pill pulses when any
-  // session is working.
+  // session is working OR the server reports global busy (CLI turns, queued
+  // turns, etc.). The local check gives instant reactivity between polls.
   const messages = activeSessionId ? (sessions[activeSessionId] ?? []) : [];
   const busy = isSessionBusy(messages);
-  const anyBusy = sessionOrder.some((sid) => isSessionBusy(sessions[sid] ?? []));
+  const anyBusy = (status?.busy ?? false) || sessionOrder.some((sid) => isSessionBusy(sessions[sid] ?? []));
   const hasError = sessionOrder.some((sid) => (sessions[sid] ?? []).some((m) => m.error));
 
   const refreshStatus = useCallback(() => {
-    agentStatus().then(setStatus).catch(() => setStatus({ running: false, adopted: false, port: 4711 }));
+    agentStatus()
+      .then(setStatus)
+      .catch(() => setStatus({ running: false, adopted: false, port: 4711, busy: false, active_turns: 0, sessions: [] }));
   }, []);
 
   const expand = useCallback(() => {
@@ -180,17 +183,21 @@ export default function App() {
   // On mount: collapse to the pill, install the native vibrancy material
   // behind the window (28px = a circle at the pill size and the panel's
   // rounded corner when expanded, so one value covers both states), report
-  // agent status, and pre-create the first chat session.
+  // agent status, pre-create the first chat session and default terminal tab.
+  // Poll /status every 1.5s so CLI-initiated turns light the pill — the
+  // localhost GET is cheap and the pill dot reactivity matters.
   useEffect(() => {
     void collapseToPill();
     void setWindowVibrancy(28);
     refreshStatus();
+    const poll = setInterval(refreshStatus, 1500);
     startChat().then((sid) => {
       commitSessions((prev) => ({ ...prev, [sid]: [] }));
       setSessionOrder((order) => [...order, sid]);
       setActiveSessionId((current) => current ?? sid);
     }).catch(() => {});
     openNewTerminalTab();
+    return () => clearInterval(poll);
   }, [refreshStatus, commitSessions, openNewTerminalTab]);
 
   const newChat = async () => {
@@ -230,6 +237,7 @@ export default function App() {
       {expanded ? (
         <Panel
           busy={busy}
+          globalBusy={anyBusy}
           status={status}
           view={view}
           onViewChange={setView}
