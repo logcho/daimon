@@ -1,7 +1,17 @@
 import { useEffect, useState } from "react";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const VERBS = ["Thinking", "Reasoning", "Planning", "Considering", "Working it out", "Piecing it together"];
+// Mirrors the CLI's thinking verbs (agents/src/daimon_agent/cli/tui.py)
+const VERBS = [
+  "Thinking…",
+  "Ruminating…",
+  "Discombobulating…",
+  "Consulting the oracles…",
+  "Spelunking the vault…",
+  "Chasing will-o'-wisps…",
+  "Fiddling with knobs…",
+  "Flibbertigibbeting…",
+];
 
 export function ThinkingIndicator() {
   const [frame, setFrame] = useState(0);

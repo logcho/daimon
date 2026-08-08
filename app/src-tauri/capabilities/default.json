@@ -31,6 +31,10 @@
     "allow-download-voice-model",
     "allow-start-dictation",
     "allow-stop-dictation",
-    "allow-accessibility-trusted"
+    "allow-accessibility-trusted",
+    "allow-get-vault-path-status",
+    "allow-set-vault-path",
+    "allow-list-vault-files",
+    "allow-read-vault-file"
   ]
 }

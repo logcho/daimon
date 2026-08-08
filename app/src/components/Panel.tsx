@@ -84,9 +84,9 @@ export function Panel({
   const dot =
     globalBusy
       ? "bg-[#4f8dff] animate-daimon-pulse"
-      : status?.running
-        ? status.adopted ? "bg-amber-400" : "bg-emerald-400"
-        : "bg-red-400";
+      : !status?.running
+        ? "bg-red-400"
+        : "bg-neutral-600";
   const statusTitle = status ? `agent on port ${status.port}${status.adopted ? " (adopted)" : ""}` : "agent offline";
 
   return (

@@ -310,7 +310,8 @@ async def run_tui(
     async def _show_tools(state: TuiState, session_name: str | None) -> None:
         """Fetch the tool list from the server and display it grouped by
         category (file ops, execution, search, etc.)."""
-        tools = await client.list_tools(state.http, state.port, state.agent)
+        port, _ = await client.ensure_server(settings)
+        tools = await client.list_tools(state.http, port, state.agent)
         if not tools:
             state.output_lines.append("")
             state.output_lines.append(

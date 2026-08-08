@@ -155,8 +155,41 @@ async function animateTo(target: { width: number; height: number }) {
   });
 }
 
+const SAVED_SIZE_KEY = "daimon-panel-size";
+
+function loadPanelSize(): { width: number; height: number } | null {
+  try {
+    const raw = localStorage.getItem(SAVED_SIZE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.width === "number" && typeof parsed.height === "number") {
+      // Clamp to min/max bounds — the saved size may be from a different
+      // screen or a prior version with different limits.
+      return {
+        width: Math.min(MAX_PANEL_SIZE.width, Math.max(MIN_PANEL_SIZE.width, parsed.width)),
+        height: Math.min(MAX_PANEL_SIZE.height, Math.max(MIN_PANEL_SIZE.height, parsed.height)),
+      };
+    }
+  } catch {
+    // corrupted — ignore
+  }
+  return null;
+}
+
+function savePanelSize(size: { width: number; height: number }) {
+  try {
+    localStorage.setItem(SAVED_SIZE_KEY, JSON.stringify(size));
+  } catch {
+    // quota exceeded or private browsing — silently ignore
+  }
+}
+
 export async function collapseToPill() {
   const win = getCurrentWindow();
+  // Save the panel's current size before collapsing so the next expand
+  // restores it instead of always landing at the fixed default.
+  const rect = await currentLogicalRect();
+  savePanelSize({ width: rect.width, height: rect.height });
   // Clear the panel's min/max constraints *before* shrinking — otherwise
   // the leftover `MIN_PANEL_SIZE` floor (set by expandToPanel below) clamps
   // every frame of this animation to itself, so the window never actually
@@ -172,7 +205,8 @@ export async function collapseToPill() {
 }
 
 export async function expandToPanel() {
-  await animateTo(EXPANDED_SIZE);
+  const saved = loadPanelSize();
+  await animateTo(saved ?? EXPANDED_SIZE);
   const win = getCurrentWindow();
   // Constraints are applied only *after* landing at the full size — applying
   // them mid-animation would clamp the early (smaller) frames to this floor
@@ -180,6 +214,10 @@ export async function expandToPanel() {
   await win.setMinSize(new LogicalSize(MIN_PANEL_SIZE.width, MIN_PANEL_SIZE.height));
   await win.setMaxSize(new LogicalSize(MAX_PANEL_SIZE.width, MAX_PANEL_SIZE.height));
   await win.setResizable(true);
+  // Explicitly re-assert always-on-top — Tauri preserves the creation flag,
+  // but a defensive re-apply after the expand animation guards against any
+  // platform-specific window-level reset during resize.
+  await win.setAlwaysOnTop(true);
   // Plain `setFocus()` suffices here: unlike the legacy app (an
   // ActivationPolicy::Accessory window, where AppKit activation had to be
   // forced via a dedicated command), this is a regular app whose expansion

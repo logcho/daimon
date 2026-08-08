@@ -10,11 +10,8 @@
    input's `>` prompt), reached via the `font-sans`/`font-mono` utilities.
    Native system stacks — the app ships offline-first. */
 @theme {
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter",
-    "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono:
-    ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 html,
