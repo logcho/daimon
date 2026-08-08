@@ -96,7 +96,7 @@ def test_recall_formats_all_three_sections(tmp_path) -> None:
     assert '"apply to Stripe" -> Submitted.' in context
     assert "Known reusable skills:" in context
     assert "resume-tune: Tailor a resume to a Stripe posting" in context
-    assert "Vault notes:" in context
+    assert "Notes:" in context
     assert "notes/stripe.md: Stripe recruiter" in context
 
 

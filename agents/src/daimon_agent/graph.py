@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import aiosqlite
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
@@ -124,6 +125,13 @@ def build_graph(
         )
         messages = [SystemMessage(content=system_prompt), *messages]
         response = await model.ainvoke(messages)
+        # When the model sends text alongside tool calls (e.g. "Let me first
+        # read the file to understand it"), surface it as a reasoning step so
+        # the user sees the agent's plan before it starts executing.
+        if response.content and isinstance(response.content, str):
+            text = response.content.strip()
+            if text and response.tool_calls:
+                emit(step_event(str(uuid4()), f"Reasoning: {text[:200]}", "done", None))
         for call in response.tool_calls:
             name = call.get("name", "tool")
             emit(step_event(call["id"], name, "running", name))
@@ -266,7 +274,9 @@ def build_graph(
         graph.add_edge("subagents", "agent")
     else:
         graph.add_edge("tools", "agent")
-    return graph.compile(checkpointer=checkpointer)
+    compiled = graph.compile(checkpointer=checkpointer)
+    compiled.tools = tools  # attached for the /tools HTTP endpoint
+    return compiled
 
 
 def run_config(session_id: str) -> dict:

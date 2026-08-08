@@ -24,7 +24,7 @@ async def fake_graph_builder(settings, *, memory=None):
     checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
     graph = build_graph(settings, router, [], checkpointer=checkpointer)
     graph.router = router  # test handle to script the model
-    return graph, checkpointer
+    return graph, checkpointer, router
 
 
 @pytest.fixture
@@ -48,7 +48,10 @@ async def _post_task(client: TestClient, instruction: str, session_id: str | Non
 async def test_health(client: TestClient) -> None:
     resp = await client.get("/health")
     assert resp.status == 200
-    assert await resp.json() == {"ok": True}
+    body = await resp.json()
+    assert body["ok"] is True
+    assert "workspace" in body
+    assert body["workspace"].endswith("vault")
 
 
 async def test_task_streams_events_and_ends_with_done(client: TestClient) -> None:

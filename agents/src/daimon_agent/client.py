@@ -129,7 +129,17 @@ def _spawn_server(port: int, *, run_dir: Path) -> subprocess.Popen:
     log_out = run_dir / "daimon-agent.out.log"
     log_err = run_dir / "daimon-agent.err.log"
     run_dir.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "PORT": str(port), "DAIMON_PIDFILE": str(run_dir / "daimon-agent.pid")}
+    env = {
+        **os.environ,
+        "PORT": str(port),
+        "DAIMON_PIDFILE": str(run_dir / "daimon-agent.pid"),
+        # Carry the workspace through so the server uses the CLI's CWD, not its
+        # own cwd (agents/).  If DAIMON_WORKSPACE_DIR is already set in the
+        # environment (e.g. by the CLI), it flows via **os.environ; this
+        # explicit key ensures it's present even when spawning from outside the
+        # CLI (tests, direct calls).
+        "DAIMON_WORKSPACE_DIR": os.environ.get("DAIMON_WORKSPACE_DIR", os.getcwd()),
+    }
     out_f = open(log_out, "ab")
     err_f = open(log_err, "ab")
     try:
@@ -154,10 +164,11 @@ def _tail(path: Path, n: int = 2000) -> str:
         return ""
 
 
-async def _wait_healthy(port: int, proc: subprocess.Popen, *, err_log: Path, timeout: float = 30.0) -> None:
+async def _wait_healthy(port: int, proc: subprocess.Popen, *, err_log: Path, timeout: float = 60.0) -> None:
     """Poll /health every 500ms; on timeout or early exit, kill the process
-    group and raise with the log tail. 30s covers graph build + vault
-    indexing; normal startup is well under that."""
+    group and raise with the log tail. 60s covers graph build + vault
+    indexing + PinchTab auto-start (setup-pinchtab.sh has its own 60s
+    timeout)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if await _health(port):
@@ -183,16 +194,62 @@ def _sweep_stale(run_dir: Path) -> None:
         pidfile.unlink()
 
 
+async def _get_server_workspace(port: int) -> str | None:
+    """Return the resolved workspace of a running server from its /health
+    payload, or None when unreachable or the server predates the workspace
+    field (pre-0.1)."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=2.0)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"http://127.0.0.1:{port}/health") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("workspace")
+    except (aiohttp.ClientError, OSError):
+        pass
+    return None
+
+
 async def ensure_server(settings: Settings, *, run_dir: Path | None = None) -> tuple[int, bool]:
     """Make sure a daimon server answers on settings.port: adopt one that
     does, spawn one otherwise. Returns (port, spawned). Mirrors the Tauri
     app's ensure in app/src-tauri/src/agent.rs — the CLI and the app can
-    share a server on 4711, and each kills only its own."""
+    share a server on 4711, and each kills only its own.
+
+    When adopting an existing server, verifies that its workspace matches
+    the configured one.  A mismatch (or an old server that doesn't report
+    its workspace) means the server was started from a different directory —
+    kill it and spawn a fresh one with the correct workspace."""
     run_dir = run_dir or default_run_dir()
     port = settings.port
+    expected_ws = str(settings.resolved_workspace_dir.resolve())
+
     if await _health(port):
-        return port, False
-    _sweep_stale(run_dir)
+        # Adopting — check workspace compatibility.
+        actual_ws = await _get_server_workspace(port)
+        if actual_ws is None:
+            # Old server that doesn't report workspace — can't verify, so
+            # restart to guarantee the correct workspace is used.
+            print(
+                f"[daimon] running server does not report its workspace "
+                f"(pre-0.1) — restarting to use {expected_ws}",
+                file=sys.stderr,
+            )
+        elif actual_ws != expected_ws:
+            print(
+                f"[daimon] server workspace mismatch — "
+                f"expected {expected_ws}, got {actual_ws} — restarting",
+                file=sys.stderr,
+            )
+        else:
+            return port, False
+        # Mismatch or unknown — kill the old server before spawning.
+        _sweep_stale(run_dir)
+
+    # No healthy server with the right workspace — spawn a fresh one.
+    _sweep_stale(run_dir)  # no-op when the pidfile is already gone
+    # Brief yield so the OS can release the port after SIGKILL.
+    await asyncio.sleep(0.5)
     proc = _spawn_server(port, run_dir=run_dir)
     await _wait_healthy(port, proc, err_log=run_dir / "daimon-agent.err.log")
     return port, True
@@ -215,14 +272,24 @@ async def stop_server(run_dir: Path | None = None) -> tuple[bool, str]:
             pidfile.unlink()
         return False, "the recorded server is already dead; stale pidfile removed"
     port = _read_port(pidfile)
-    if port is None or not await _health(port):
-        # Live pid but no server on the recorded port — either a recycled
-        # pid or a wedge. Not ours to kill.
-        return False, "pidfile's server is not answering on its recorded port; nothing stopped"
+    if port is not None and await _health(port):
+        # Healthy server — clean shutdown.
+        _kill_group(pid)
+        with contextlib.suppress(OSError):
+            pidfile.unlink()
+        return True, f"stopped daimon server (pid {pid}, port {port})"
+
+    # The PID is alive but the server isn't answering on its recorded port.
+    # Most likely a hung/stuck server (e.g. PinchTab startup wedged).
+    # A recycled PID is theoretically possible but vanishingly unlikely
+    # for a PID we ourselves recorded.  Kill it so the user can recover.
     _kill_group(pid)
     with contextlib.suppress(OSError):
         pidfile.unlink()
-    return True, f"stopped daimon server (pid {pid}, port {port})"
+    return True, (
+        f"killed hung daimon server (pid {pid}) — "
+        f"it was alive but not responding on port {port or '?'}"
+    )
 
 
 # --- the task stream ---------------------------------------------------------
@@ -233,7 +300,7 @@ async def stream_turn(
     session_id: str,
     instruction: str,
     emit: Callable[[dict[str, Any]], None],
-    agent: str = "general",
+    agent: str | None = None,  # deprecated — single unified agent; kept for backward compat
 ) -> str | None:
     """POST one `/task` and stream the NDJSON events to `emit`. Returns the
     `done` result, or None on an `error` event. Raises ClientError on
@@ -242,9 +309,12 @@ async def stream_turn(
     long-lived session for the whole loop; tests pass TestClient.session).
     """
     try:
+        body: dict = {"instruction": instruction, "session_id": session_id}
+        if agent:
+            body["agent"] = agent  # backward compat — server ignores it
         async with http.post(
             f"http://127.0.0.1:{port}/task",
-            json={"instruction": instruction, "session_id": session_id, "agent": agent},
+            json=body,
         ) as resp:
             if resp.status != 200:
                 raise ClientError(f"server rejected the task (HTTP {resp.status})")
@@ -288,13 +358,17 @@ async def stream_turn(
 # --- introspection -----------------------------------------------------------
 
 async def list_tools(
-    http: aiohttp.ClientSession, port: int, agent: str = "general"
+    http: aiohttp.ClientSession, port: int, agent: str | None = None
 ) -> list[dict[str, str]]:
-    """GET /tools?agent=X — return the tool list for an agent type.
-    Returns a list of dicts with `name` and `description` keys."""
+    """GET /tools — return the tool list for the unified agent.
+    Returns a list of dicts with `name` and `description` keys.
+    The `agent` parameter is kept for backward compat but ignored."""
     try:
+        params: dict = {}
+        if agent:
+            params["agent"] = agent  # backward compat — server ignores it
         async with http.get(
-            f"http://127.0.0.1:{port}/tools", params={"agent": agent}
+            f"http://127.0.0.1:{port}/tools", params=params
         ) as resp:
             if resp.status != 200:
                 return []

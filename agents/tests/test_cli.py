@@ -143,7 +143,7 @@ def fake_client(monkeypatch):
         calls["ensure"] += 1
         return 4711, False
 
-    async def fake_stream(http, port, session_id, instruction, emit, agent="general"):
+    async def fake_stream(http, port, session_id, instruction, emit, agent=None):
         calls["stream"] = (session_id, instruction, agent)
         return f"result for {session_id}"
 
@@ -161,14 +161,14 @@ async def test_amain_one_shot_default_session(fake_client, capsys):
     code = await _m._amain(["say hi"])
     assert code == 0
     assert fake_client["ensure"] == 1
-    assert fake_client["stream"] == ("cli", "say hi", "general")
+    assert fake_client["stream"] == ("cli", "say hi", None)
     assert "result for cli" in capsys.readouterr().out
 
 
 async def test_amain_named_session(fake_client, capsys):
     code = await _m._amain(["-n", "work", "hello"])
     assert code == 0
-    assert fake_client["stream"] == ("work", "hello", "general")
+    assert fake_client["stream"] == ("work", "hello", None)
     assert "result for work" in capsys.readouterr().out
 
 
@@ -213,7 +213,7 @@ async def test_amain_piped_stdin(fake_client, monkeypatch):
     monkeypatch.setattr(_m.sys, "stdin", FakeStdin())
     code = await _m._amain([])
     assert code == 0
-    assert fake_client["stream"] == ("cli", "piped hello", "general")
+    assert fake_client["stream"] == ("cli", "piped hello", None)
 
 
 async def test_amain_version(fake_client, capsys):
@@ -222,25 +222,11 @@ async def test_amain_version(fake_client, capsys):
     assert "daimon" in capsys.readouterr().out
 
 
-async def test_amain_agent_flag_coding(fake_client, capsys):
-    """--agent coding routes to the coding agent."""
-    code = await _m._amain(["--agent", "coding", "1+1"])
-    assert code == 0
-    assert fake_client["stream"] == ("cli", "1+1", "coding")
-
-
-async def test_amain_agent_flag_short_form(fake_client, capsys):
-    """-a coding is the short form."""
-    code = await _m._amain(["-a", "coding", "print('hi')"])
-    assert code == 0
-    assert fake_client["stream"] == ("cli", "print('hi')", "coding")
-
-
-async def test_amain_agent_flag_defaults_to_general(fake_client, capsys):
-    """No --agent flag defaults to general."""
+async def test_amain_no_agent_flag(fake_client, capsys):
+    """No --agent flag — agent parameter is no longer needed."""
     code = await _m._amain(["hello world"])
     assert code == 0
-    assert fake_client["stream"] == ("cli", "hello world", "general")
+    assert fake_client["stream"] == ("cli", "hello world", None)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +238,8 @@ async def test_amain_interactive_tui(fake_client, monkeypatch):
     then runs the background task and verifies the stream call."""
     monkeypatch.setattr(_m.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(_m.sys.stderr, "isatty", lambda: True)
+    # Workspace confirmation prompt: simulate pressing Enter (empty = default).
+    monkeypatch.setattr("builtins.input", lambda: "")
 
     import prompt_toolkit as pt
     import prompt_toolkit.application
@@ -330,7 +318,7 @@ async def test_amain_interactive_tui(fake_client, monkeypatch):
     assert code == 0
     assert fake_client["stream"][0] == "cli"
     assert fake_client["stream"][1] == "hello"
-    assert fake_client["stream"][2] == "general"
+    assert fake_client["stream"][2] is None
     assert fake_client["ensure"] == 1
 
 
@@ -377,7 +365,7 @@ def _get_completions(text: str):
 def test_completer_returns_all_on_bare_slash():
     completions = _get_completions("/")
     texts = {t for t, _ in completions}
-    assert texts >= {"help", "clear", "status", "model", "agents", "general", "coding"}
+    assert texts >= {"help", "clear", "status", "model", "tools", "workspace"}
 
 
 def test_completer_filters_by_prefix():

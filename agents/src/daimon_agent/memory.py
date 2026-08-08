@@ -190,7 +190,7 @@ def format_memory_context(tasks: list, skills: list, notes: list) -> str:
         )
     if notes:
         parts.append(
-            "Vault notes:\n"
+            "Notes:\n"
             + "\n".join(f"- {n['filename']}: {n['content'][:200]}" for n in notes)
         )
     return "\n\n".join(parts)

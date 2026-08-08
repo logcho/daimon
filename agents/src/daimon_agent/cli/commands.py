@@ -119,30 +119,47 @@ def _cmd_model(text: str, session_name: str | None) -> list[str]:
     return lines
 
 
-def _cmd_agents(text: str, session_name: str | None) -> list[str]:
-    """``/agents`` — show available agents."""
-    return [
-        "",
-        f"{_DIM}── agents{_RESET}",
-        f"  {_BLUE}/general{_RESET}  {_DIM}browsing, research, notes, shell{_RESET}",
-        f"  {_BLUE}/coding{_RESET}   {_DIM}kernel-first, file editing, shell, git{_RESET}",
-        "",
-        f"  {_DIM}type{_RESET} {_BLUE}/general{_RESET}"
-        f" {_DIM}or{_RESET} {_BLUE}/coding{_RESET}"
-        f" {_DIM}to switch, or press Shift+Tab{_RESET}",
-    ]
-
-
-# These are handled directly by the TUI (they mutate state.agent), but
-# registered here so the completer and /help pick them up.
-def _cmd_switch_agent(text: str, session_name: str | None) -> list[str]:
-    """Switch agent — handled by the TUI directly."""
-    return [""]  # never reached; the TUI intercepts before dispatch
-
-
 def _cmd_tools(text: str, session_name: str | None) -> list[str]:
     """``/tools`` — handled by the TUI directly (needs HTTP client)."""
     return [""]  # never reached; the TUI intercepts before dispatch
+
+
+def _cmd_workspace(text: str, session_name: str | None) -> list[str]:
+    """``/workspace [path]`` — show or change the agent's workspace directory.
+    Without a path, shows the current workspace.  With a path, sets a new
+    workspace (requires restarting the server on the next turn)."""
+    import os
+    from pathlib import Path
+
+    from ..banner import workspace_full
+
+    args = text.strip().split(maxsplit=1)
+    if len(args) < 2:
+        # Show current workspace
+        ws = workspace_full()
+        return [
+            "",
+            f"{_DIM}── workspace{_RESET}",
+            f"  {ws}",
+            "",
+            f"  {_DIM}to change:{_RESET} {_BLUE}/workspace /path/to/dir{_RESET}",
+        ]
+
+    new_path = Path(args[1]).expanduser().resolve()
+    if not new_path.is_dir():
+        return [
+            "",
+            f"  {_RED}Error:{_RESET} not a directory: {args[1]}",
+        ]
+
+    os.environ["DAIMON_WORKSPACE_DIR"] = str(new_path)
+    return [
+        "",
+        f"{_DIM}── workspace updated{_RESET}",
+        f"  {new_path}",
+        "",
+        f"  {_DIM}The server will restart with the new workspace on the next turn.{_RESET}",
+    ]
 
 
 # Register built-in commands
@@ -150,7 +167,5 @@ register("help", "show available commands", _cmd_help)
 register("clear", "clear the output", _cmd_clear)
 register("status", "session and terminal info", _cmd_status)
 register("model", "current model configuration", _cmd_model)
-register("agents", "list available agents", _cmd_agents)
-register("tools", "list available tools for the current agent", _cmd_tools)
-register("general", "switch to general agent", _cmd_switch_agent)
-register("coding", "switch to coding agent", _cmd_switch_agent)
+register("tools", "list available tools", _cmd_tools)
+register("workspace", "show or change the workspace directory", _cmd_workspace)

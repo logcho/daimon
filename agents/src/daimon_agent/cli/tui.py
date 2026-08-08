@@ -31,8 +31,10 @@ from prompt_toolkit.layout import (
     Window,
 )
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.output import create_output
 from prompt_toolkit.styles import Style
 
@@ -66,7 +68,7 @@ _THINKING_VERBS = [
     "Ruminating…",
     "Discombobulating…",
     "Consulting the oracles…",
-    "Spelunking the vault…",
+    "Exploring…",
     "Chasing will-o'-wisps…",
     "Fiddling with knobs…",
     "Flibbertigibbeting…",
@@ -120,7 +122,6 @@ class TuiState:
         self.output_lines: list[str] = []
         self.turn_count: int = 0
         self.last_elapsed: float | None = None
-        self.agent: str = "general"  # toggled by Shift+Tab
         self.http: Any = http  # aiohttp.ClientSession for /tools and other server calls
         self._frame_idx: int = 0
         self._verb_idx: int = 0
@@ -129,6 +130,7 @@ class TuiState:
         self._thinking_lines: tuple[int, int] | None = None  # (start, end) in output_lines
         self._running_steps: dict[str, int] = {}  # step_id → line_index
         self._redraw: Any = lambda: None
+        self._auto_scroll: bool = True  # tracks whether we should scroll to bottom
 
 
 def _render_output(state: TuiState) -> ANSI:
@@ -168,7 +170,6 @@ async def run_tui(
     settings: Settings,
     session_name: str | None,
     http: Any,  # aiohttp.ClientSession
-    agent: str = "general",
 ) -> int:
     """Launch the full-screen prompt_toolkit TUI.  Returns 0 on clean exit.
 
@@ -176,7 +177,6 @@ async def run_tui(
     never pay the ~120ms prompt_toolkit cost.
     """
     state = TuiState(http)
-    state.agent = agent
     state.output_lines = display.render_banner(session_name)
 
     # --- Layout ----------------------------------------------------------
@@ -187,11 +187,35 @@ async def run_tui(
         content=FormattedTextControl(
             text=lambda: _render_output(state),
             focusable=False,
-            get_cursor_position=lambda: _cursor_at_end(state),
+            # When auto-scrolling, put the cursor at the bottom so
+            # prompt_toolkit's built-in _scroll() follows new output.
+            # When the user scrolls up, put the cursor at the first
+            # visible line — do_scroll() inside _scroll() then sees the
+            # cursor is already visible and leaves vertical_scroll alone.
+            get_cursor_position=lambda: _cursor_at_end(state)
+            if state._auto_scroll
+            else Point(0, output_window.vertical_scroll),
         ),
         wrap_lines=True,
         always_hide_cursor=True,
+        right_margins=[ScrollbarMargin(display_arrows=True)],
     )
+
+    # Monkey-patch the Window's mouse handler so mouse-wheel scrolling
+    # sets _auto_scroll = False (the built-in handler changes vertical_scroll
+    # but doesn't know about our auto-scroll flag, so cursor-following would
+    # immediately undo the scroll on the next render).
+    _orig_mouse_handler = output_window._mouse_handler
+
+    def _mouse_handler(mouse_event):
+        if mouse_event.event_type in (
+            MouseEventType.SCROLL_UP,
+            MouseEventType.SCROLL_DOWN,
+        ):
+            state._auto_scroll = False
+        return _orig_mouse_handler(mouse_event)
+
+    output_window._mouse_handler = _mouse_handler.__get__(output_window)
 
     input_buffer = Buffer(
         multiline=True,
@@ -240,6 +264,45 @@ async def run_tui(
     def _redraw() -> None:
         state._redraw()
 
+    # --- Scroll helpers --------------------------------------------------
+
+    def _scroll_to_bottom() -> None:
+        """Force the output window to show the bottom of the content."""
+        state._auto_scroll = True
+        ri = output_window.render_info
+        if ri:
+            total = len(state.output_lines)
+            output_window.vertical_scroll = max(0, total - ri.window_height)
+        else:
+            output_window.vertical_scroll = 1_000_000
+
+    def _page_up() -> None:
+        """Scroll output up by half a page."""
+        state._auto_scroll = False
+        ri = output_window.render_info
+        page = max((ri.window_height if ri else 20) // 2, 1)
+        output_window.vertical_scroll = max(0, output_window.vertical_scroll - page)
+
+    def _page_down() -> None:
+        """Scroll output down by half a page, or snap to bottom."""
+        ri = output_window.render_info
+        page = max((ri.window_height if ri else 20) // 2, 1)
+        output_window.vertical_scroll += page
+        # If we're past the end, snap to auto-scroll (bottom).
+        total = len(state.output_lines)
+        if ri and output_window.vertical_scroll + ri.window_height >= total:
+            _scroll_to_bottom()
+
+    # Redraw snaps to bottom only when auto-scroll is on (default).  When the
+    # user pages up, auto-scroll disables and the view stays where they left
+    # it.  New-turn start and user-initiated scroll-to-bottom restore it.
+    def _redraw_snap() -> None:
+        if state._auto_scroll:
+            _scroll_to_bottom()
+        app.invalidate()
+
+    state._redraw = _redraw_snap
+
     # --- Key bindings ----------------------------------------------------
 
     kb = KeyBindings()
@@ -285,26 +348,34 @@ async def run_tui(
         else:
             event.app.create_background_task(_run_turn(text, state, settings, session_name))
 
-    @kb.add("s-tab")
-    def _toggle_agent(event):
-        """Shift+Tab toggles the agent (like Claude Code's mode switching)."""
-        state.agent = "coding" if state.agent == "general" else "general"
-        name = state.agent
-        label = f"{_BLUE}{name}{_RESET}"
-        desc = (
-            f"{_DIM}(browsing, research, notes, shell){_RESET}"
-            if name == "general"
-            else f"{_DIM}(kernel-first, file editing, shell, git){_RESET}"
-        )
-        state.output_lines.append("")
-        state.output_lines.append(
-            f"  {_DIM}agent →{_RESET} {label}  {desc}"
-        )
-        _redraw()
-
     @kb.add("escape", "enter")
     def _newline(event):
         event.app.current_buffer.insert_text("\n")
+
+    @kb.add("s-pageup")
+    def _page_up_kb(event):
+        """Shift+PageUp: scroll output up by half a page."""
+        _page_up()
+
+    @kb.add("s-pagedown")
+    def _page_down_kb(event):
+        """Shift+PageDown: scroll output down by half a page."""
+        _page_down()
+
+    @kb.add("c-up")
+    def _scroll_line_up(event):
+        """Ctrl-Up: scroll output up by one line."""
+        state._auto_scroll = False
+        output_window.vertical_scroll = max(0, output_window.vertical_scroll - 1)
+
+    @kb.add("c-down")
+    def _scroll_line_down(event):
+        """Ctrl-Down: scroll output down by one line."""
+        ri = output_window.render_info
+        total = len(state.output_lines)
+        output_window.vertical_scroll += 1
+        if ri and output_window.vertical_scroll + ri.window_height >= total:
+            _scroll_to_bottom()
 
     # --- Tools listing (async — fetches from server) ----------------------
 
@@ -312,7 +383,7 @@ async def run_tui(
         """Fetch the tool list from the server and display it grouped by
         category (file ops, execution, search, etc.)."""
         port, _ = await client.ensure_server(settings)
-        tools = await client.list_tools(state.http, port, state.agent)
+        tools = await client.list_tools(state.http, port)
         if not tools:
             state.output_lines.append("")
             state.output_lines.append(
@@ -352,7 +423,7 @@ async def run_tui(
 
         state.output_lines.append("")
         state.output_lines.append(
-            f"{_DIM}── tools ({state.agent}){_RESET}"
+            f"{_DIM}── tools{_RESET}"
         )
         order = ["file ops", "execution", "code quality", "search",
                  "browser", "memory & skills", "host", "research", "other"]
@@ -379,23 +450,9 @@ async def run_tui(
             "exit": "exit",
             "quit": "exit",
             "q": "exit",
+            "ws": "workspace",
         }
         cmd_name = aliases.get(cmd_name, cmd_name)
-
-        # Agent switching — handled here because it mutates state.agent
-        if cmd_name in ("general", "coding"):
-            state.agent = cmd_name
-            desc = (
-                f"{_DIM}(browsing, research, notes, shell){_RESET}"
-                if cmd_name == "general"
-                else f"{_DIM}(kernel-first, file editing, shell, git){_RESET}"
-            )
-            state.output_lines.append("")
-            state.output_lines.append(
-                f"  {_DIM}agent →{_RESET} {_BLUE}{cmd_name}{_RESET}  {desc}"
-            )
-            _redraw()
-            return
 
         if cmd_name == "exit":
             app.exit()
@@ -429,8 +486,10 @@ async def run_tui(
     def _on_tui_event(event: dict) -> None:
         """Step/error events → output_lines with raw ANSI.
 
-        Running steps are replaced in place when they finish; the thinking
-        panel pops on the first tool step and collapses on Thinking-done.
+        Tool steps appear inline beneath the thinking panel during the turn so
+        the user sees the agent's plan through its actions.  The thinking panel
+        stays visible through tool execution and collapses when the agent
+        finishes.
         """
         etype = event.get("type")
         if etype == "step":
@@ -481,17 +540,8 @@ async def run_tui(
                                     state._running_steps[sid] -= shift
                 return
 
-            # Tool step — drop thinking panel on first tool step
-            if state._thinking_lines is not None:
-                s, e = state._thinking_lines
-                del state.output_lines[s:e]
-                state._thinking_lines = None
-                state._thinking_start = None
-                shift = e - s
-                for sid in list(state._running_steps):
-                    if state._running_steps[sid] > e:
-                        state._running_steps[sid] -= shift
-
+            # Tool step — show inline beneath the thinking panel so the user
+            # sees the agent's plan unfold through its actions.
             if status == "running":
                 mark = f"{_DIM}→{_RESET}"
             elif status == "done":
@@ -510,14 +560,10 @@ async def run_tui(
                 state.output_lines.append(line)
                 state._running_steps[step_id] = idx
             elif step_id in state._running_steps:
-                # Replace running line in place
                 idx = state._running_steps.pop(step_id)
                 state.output_lines[idx] = line
             else:
-                # No running line found — append
                 state.output_lines.append(line)
-
-            _redraw()
 
         elif etype == "error":
             # Drop thinking panel if present
@@ -537,6 +583,9 @@ async def run_tui(
         settings: Settings,
         session_name: str | None,
     ) -> None:
+        # New turn — always restore auto-scroll so the user sees the response.
+        state._auto_scroll = True
+
         # User message line
         state.output_lines.append("")
         state.output_lines.append(f"{_BLUE}>{_RESET} {_BOLD}{text}{_RESET}")
@@ -557,7 +606,6 @@ async def run_tui(
                 session_name or "cli",
                 text,
                 _on_tui_event,
-                agent=state.agent,
             )
 
             # Drop thinking panel if still present (no tool steps fired)
@@ -613,20 +661,8 @@ async def run_tui(
                 state.output_lines[s:e] = panel
                 app.invalidate()
 
-            # Update running tool-step frames
-            for sid, idx in list(state._running_steps.items()):
-                line = state.output_lines[idx]
-                frame = _SPINNER_FRAMES[
-                    state._frame_idx % len(_SPINNER_FRAMES)
-                ]
-                # Replace the → marker with the current frame
-                old_mark = f"{_DIM}→{_RESET}"
-                new_mark = f"{_DIM}{frame}{_RESET}"
-                if old_mark in line:
-                    state.output_lines[idx] = line.replace(
-                        old_mark, new_mark, 1
-                    )
-                    app.invalidate()
+            # Tool steps are hidden behind the thinking panel — no inline
+            # spinner animation needed.  The thinking panel already animates.
 
     # --- Status line -----------------------------------------------------
 
@@ -637,8 +673,7 @@ async def run_tui(
     ) -> ANSI:
         name = session_name or "cli"
         model = settings.model
-        agent = state.agent
-        parts = [f"{_DIM}{name} · {model} · {agent}"]
+        parts = [f"{_DIM}{name} · {model}"]
 
         if state.turn_count > 0:
             ts = "turn" if state.turn_count == 1 else "turns"
@@ -666,11 +701,8 @@ async def run_tui(
         ),
     )
 
-    # Wire up redraw
-    state._redraw = lambda: (
-        app.invalidate(),
-        setattr(output_window, "vertical_scroll", 1_000_000),
-    )
+    # Redraw is already wired via _smart_redraw above (line 276) — it
+    # auto-scrolls to bottom only when the user hasn't scrolled away.
 
     with create_app_session(output=create_output(stdout=None)):
         # Start the animation ticker as a background task.

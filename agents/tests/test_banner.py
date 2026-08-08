@@ -60,16 +60,17 @@ def test_full_banner_lines_emits_blue_for_eyes():
 # --- Simplified banner (default) ------------------------------------------
 
 def test_banner_lines_is_simplified():
-    """Default banner_lines() returns 3 lines (wordmark, hint, blank)."""
+    """Default banner_lines() returns 4 lines (wordmark, workspace, hint, blank)."""
     lines = banner_lines()
-    assert len(lines) == 3
-    assert lines[2] == ""  # trailing blank
+    assert len(lines) == 4
+    assert lines[3] == ""  # trailing blank
     assert any("daimon" in line for line in lines)
+    assert any("Workspace" in line for line in lines)
 
 
 def test_banner_lines_has_hint():
     lines = banner_lines()
-    hint_line = lines[1]
+    hint_line = lines[2]
     assert "Alt+Enter" in hint_line
     assert "/help" in hint_line
 

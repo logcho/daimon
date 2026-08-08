@@ -1,5 +1,5 @@
 """Workspace-confined file tools — the harness's Write/Read/Glob/Grep,
-narrowed to the vault. Every path goes through Confinement (resolve-then-
+narrowed to the workspace. Every path goes through Confinement (resolve-then-
 compare; `notes/../../.ssh/id_rsa` cannot escape), so the model gets a plain
 error ToolMessage for anything outside instead of touching it.
 """

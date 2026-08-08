@@ -41,33 +41,47 @@ BANNER = "\n".join(text for _, text in BANNER_LINES)
 # Simplified banner (default)
 # ---------------------------------------------------------------------------
 
-def _shorten_cwd() -> str:
-    cwd = os.getcwd()
+def _shorten_path(path: str) -> str:
+    """Shorten a path for display: ~ substitution + truncation."""
     home = os.path.expanduser("~")
-    if cwd.startswith(home):
-        cwd = "~" + cwd[len(home):]
-    if len(cwd) > 40:
-        cwd = "…" + cwd[-38:]
-    return cwd
+    if path.startswith(home):
+        path = "~" + path[len(home):]
+    if len(path) > 50:
+        path = "…" + path[-48:]
+    return path
+
+
+def workspace_display() -> str:
+    """Resolved workspace directory (absolute, shortened for display)."""
+    ws = os.environ.get("DAIMON_WORKSPACE_DIR") or os.getcwd()
+    return _shorten_path(os.path.abspath(ws))
+
+
+def workspace_full() -> str:
+    """Resolved workspace directory (absolute, full path)."""
+    ws = os.environ.get("DAIMON_WORKSPACE_DIR") or os.getcwd()
+    return os.path.abspath(ws)
 
 
 def print_banner(stream: object, *, session_name: str | None = None) -> None:
     """Print the simplified banner to *stream* (usually stderr).
 
-    Two lines + blank::
+    Three lines + blank::
 
-        daimon  ~/projects/my-app
+        daimon
+        Workspace: ~/projects/my-app
         Enter submit  ·  Alt+Enter newline  ·  Ctrl-D exit  [session]  ·  /help
     """
     from .ansi import blue, bold, dim
 
-    cwd = _shorten_cwd()
-    print(blue(bold("daimon", stream), stream) + "  " + dim(cwd, stream), file=stream)
+    ws = workspace_display()
+    print(blue(bold("daimon", stream), stream), file=stream)
+    print(f"  {dim('Workspace:', stream)} {ws}", file=stream)
 
     hint = "Enter submit  ·  Alt+Enter newline  ·  Ctrl-D exit"
     if session_name:
         hint += f"  [{session_name}]"
-    hint += "  ·  /help"
+    hint += "  ·  /help  ·  /workspace"
     print(dim(hint, stream), file=stream)
     print(file=stream)
 
@@ -81,17 +95,18 @@ def banner_lines(session_name: str | None = None) -> list[str]:
     """
     from .ansi import BLUE, BOLD, DIM, RESET
 
-    cwd = _shorten_cwd()
+    ws = workspace_display()
 
-    line0 = f"{BLUE}{BOLD}daimon{RESET}  {DIM}{cwd}{RESET}"
+    line0 = f"{BLUE}{BOLD}daimon{RESET}"
+    line1 = f"  {DIM}Workspace:{RESET} {ws}"
 
     hint = "Enter submit  ·  Alt+Enter newline  ·  Ctrl-D exit"
     if session_name:
         hint += f"  [{session_name}]"
-    hint += "  ·  /help"
-    line1 = f"{DIM}{hint}{RESET}"
+    hint += "  ·  /help  ·  /workspace"
+    line2 = f"{DIM}{hint}{RESET}"
 
-    return [line0, line1, ""]
+    return [line0, line1, line2, ""]
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +121,7 @@ def full_banner_lines(session_name: str | None = None) -> list[str]:
     from .ansi import BLUE, BOLD, DIM, RESET
 
     max_art_width = max(len(text) for _, text in BANNER_LINES)
-    cwd = _shorten_cwd()
+    ws = workspace_display()
 
     lines: list[str] = []
     for i, (_style, text) in enumerate(BANNER_LINES):
@@ -122,12 +137,14 @@ def full_banner_lines(session_name: str | None = None) -> list[str]:
         art = art + " " * (max_art_width - len(text) + 2)
 
         if i == 0:
-            info = f"{BLUE}{BOLD}daimon{RESET}  {DIM}{cwd}{RESET}"
+            info = f"{BLUE}{BOLD}daimon{RESET}"
         elif i == 1:
+            info = f"  {DIM}Workspace:{RESET} {ws}"
+        elif i == 2:
             hint = "Enter submit  ·  Alt+Enter newline  ·  Ctrl-D exit"
             if session_name:
                 hint += f"  [{session_name}]"
-            hint += "  ·  /help"
+            hint += "  ·  /help  ·  /workspace"
             info = f"{DIM}{hint}{RESET}"
         else:
             info = ""

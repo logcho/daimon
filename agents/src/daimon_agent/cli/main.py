@@ -13,8 +13,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import os
 import shutil
 import sys
+from pathlib import Path
 
 import aiohttp
 
@@ -55,13 +57,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="show version and exit",
     )
     parser.add_argument(
-        "-a",
-        "--agent",
-        choices=["general", "coding"],
-        default="general",
-        help="agent to use (default: general — browsing, research, notes; "
-        "coding: kernel-first execution, file editing, git). "
-        "Shift+Tab toggles in interactive mode.",
+        "--doctor",
+        action="store_true",
+        help="run diagnostics on the daimon installation and exit",
     )
     parser.add_argument(
         "instruction",
@@ -195,10 +193,21 @@ async def _amain(argv: list[str]) -> int:
         print(f"daimon {__version__}")
         return 0
 
+    if args.doctor:
+        from .doctor import format_report, run_doctor
+
+        report = await run_doctor()
+        print(format_report(report))
+        return 0
+
     if args.stop:
         ok, message = await client.stop_server()
         print(message)
         return 0 if ok else 1
+
+    # ---- workspace: default to the directory the CLI was opened in ---------
+    if "DAIMON_WORKSPACE_DIR" not in os.environ:
+        os.environ["DAIMON_WORKSPACE_DIR"] = os.getcwd()
 
     settings = Settings.from_env()
 
@@ -208,11 +217,43 @@ async def _amain(argv: list[str]) -> int:
         return 0
 
     interactive = sys.stdin.isatty() and not args.instruction
+
+    # ---- workspace permission prompt (interactive only) --------------------
+    if interactive:
+        ws_path = Path(os.environ["DAIMON_WORKSPACE_DIR"]).resolve()
+        # Show a confirmation line so the user knows where the agent operates.
+        print(
+            f"\n  Workspace: {ws_path}\n"
+            f"  Press Enter to confirm, or type a different path: ",
+            file=sys.stderr,
+            end="",
+            flush=True,
+        )
+        try:
+            alt = input()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return 0
+        if alt.strip():
+            new_path = Path(alt.strip()).expanduser().resolve()
+            if new_path.is_dir():
+                os.environ["DAIMON_WORKSPACE_DIR"] = str(new_path)
+                ws_path = new_path
+                print(f"  Workspace changed to: {ws_path}\n", file=sys.stderr)
+            else:
+                print(
+                    f"  {red('Error:', sys.stderr)} not a directory: {alt.strip()}\n",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            print(file=sys.stderr)  # blank line after confirmation
+
     timeout = aiohttp.ClientTimeout(total=None)
 
     async with aiohttp.ClientSession(timeout=timeout) as http:
 
-        async def one_turn(instruction: str, agent: str = "general") -> int:
+        async def one_turn(instruction: str) -> int:
             port, _spawned = await client.ensure_server(settings)
 
             tty_stderr = sys.stderr.isatty()
@@ -223,7 +264,7 @@ async def _amain(argv: list[str]) -> int:
 
             try:
                 result = await client.stream_turn(
-                    http, port, args.name, instruction, emit, agent=agent
+                    http, port, args.name, instruction, emit
                 )
                 if result is None:
                     return 1
@@ -235,7 +276,7 @@ async def _amain(argv: list[str]) -> int:
                 stream.finish()
 
         if args.instruction:
-            return await one_turn(" ".join(args.instruction), agent=args.agent)
+            return await one_turn(" ".join(args.instruction))
 
         if interactive:
             session_name = args.name if args.name != SESSION_ID else None
@@ -245,7 +286,7 @@ async def _amain(argv: list[str]) -> int:
                 # prompt_toolkit imported lazily — ~120ms, keeps one-shot fast
                 from .tui import run_tui
 
-                return await run_tui(settings, session_name, http, agent=args.agent)
+                return await run_tui(settings, session_name, http)
             else:
                 # --- Legacy fallback (stderr redirected) ---
                 # Print simplified banner to stderr
@@ -259,7 +300,7 @@ async def _amain(argv: list[str]) -> int:
                         print(file=sys.stderr)
                         return 0
                     if line.strip():
-                        exit_code = await one_turn(line.strip(), agent=args.agent)
+                        exit_code = await one_turn(line.strip())
                         # Divider between turns
                         print(
                             dim(

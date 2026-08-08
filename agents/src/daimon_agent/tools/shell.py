@@ -4,7 +4,7 @@ Daimon's non-disruption invariant: a shell command that could reach outside
 the workspace (absolute paths elsewhere, `..`, `~`, credential verbs) is
 never executed — it is staged via a `ui_action` event for the user to run
 themselves. Commands whose static scan shows they stay inside the workspace
-(the vault) do run, with cwd pinned to the workspace root and secrets
+(the workspace root) do run, with cwd pinned to the workspace root and secrets
 scrubbed from the child environment. When in doubt: stage.
 """
 

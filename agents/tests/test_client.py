@@ -96,7 +96,7 @@ async def test_stream_turn_posts_body_and_returns_done_result():
     result = await client.stream_turn(session, 4711, "cli", "q", events.append)
     assert result == "The answer is 42."
     assert events == [done]
-    assert session.posted == [{"instruction": "q", "session_id": "cli", "agent": "general"}]
+    assert session.posted == [{"instruction": "q", "session_id": "cli"}]
 
 
 async def test_stream_turn_multiple_events_in_one_chunk():
@@ -191,6 +191,10 @@ async def test_ensure_server_adopts_when_healthy(monkeypatch, settings, tmp_path
         probed.append(port)
         return True
     monkeypatch.setattr(client, "_health", fake_health)
+    # The server reports the same workspace — adoption should succeed.
+    async def fake_workspace(port):
+        return str(settings.resolved_workspace_dir.resolve())
+    monkeypatch.setattr(client, "_get_server_workspace", fake_workspace)
     port, spawned = await client.ensure_server(settings, run_dir=tmp_path)
     assert port == settings.port
     assert spawned is False
@@ -281,9 +285,10 @@ async def test_stop_server_dead_pid_removes_stale_file(monkeypatch, tmp_path):
     assert not pidfile.exists()
 
 
-async def test_stop_server_live_pid_not_answering_refuses(monkeypatch, tmp_path):
-    # A live pid whose recorded port answers nothing is a recycled pid or a
-    # wedge — never ours to kill.
+async def test_stop_server_live_pid_not_answering_kills_hung(monkeypatch, tmp_path):
+    # A live pid whose recorded port answers nothing is almost certainly a
+    # hung/stuck server.  We kill it so the user can recover (a recycled
+    # PID collision is vanishingly unlikely).
     pidfile = tmp_path / "daimon-agent.pid"
     pidfile.write_text("4242\n4711\n", encoding="utf-8")
     monkeypatch.setattr(client, "_pid_alive", lambda pid: True)
@@ -291,9 +296,9 @@ async def test_stop_server_live_pid_not_answering_refuses(monkeypatch, tmp_path)
     killed: list[int] = []
     monkeypatch.setattr(client, "_kill_group", lambda pid: killed.append(pid))
     ok, msg = await client.stop_server(run_dir=tmp_path)
-    assert ok is False
-    assert killed == []
-    assert pidfile.exists()
+    assert ok is True
+    assert killed == [4242]
+    assert "hung" in msg.lower()
 
 
 async def test_stop_server_kills_only_own_spawned(monkeypatch, tmp_path):
