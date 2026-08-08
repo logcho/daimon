@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 interface Props {
   onSend: (text: string) => void;
@@ -7,6 +7,16 @@ interface Props {
 
 export function ChatInput({ onSend, disabled }: Props) {
   const [text, setText] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Autosize: reset height to 0 so scrollHeight reflects content, not the
+  // previous expanded height. Capped by max-h-32 + overflow-y-auto in CSS.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [text]);
 
   const submit = () => {
     const trimmed = text.trim();
@@ -23,25 +33,18 @@ export function ChatInput({ onSend, disabled }: Props) {
   };
 
   return (
-    <div className="border-t border-slate-200 bg-white px-3 py-2.5">
-      <div className="flex items-end gap-2">
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-          rows={1}
-          placeholder={disabled ? "Working…" : "Message Daimon (Enter to send)"}
-          disabled={disabled}
-          className="max-h-32 min-h-9 flex-1 resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500 disabled:bg-slate-100"
-        />
-        <button
-          onClick={submit}
-          disabled={disabled || !text.trim()}
-          className="rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
-        >
-          Send
-        </button>
-      </div>
+    <div className="m-3 flex items-start gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]">
+      <span className="mt-[3px] font-mono text-sm leading-5 text-[#4f8dff]">&gt;</span>
+      <textarea
+        ref={textareaRef}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={onKeyDown}
+        rows={1}
+        placeholder={disabled ? "Working…" : "Message Daimon (Enter to send)"}
+        disabled={disabled}
+        className="max-h-32 flex-1 resize-none bg-transparent py-0 font-mono text-sm leading-5 text-neutral-100 outline-none placeholder:text-neutral-500 disabled:opacity-50"
+      />
     </div>
   );
 }
