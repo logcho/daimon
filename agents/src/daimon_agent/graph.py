@@ -85,6 +85,34 @@ async def close_checkpointer(checkpointer: Any) -> None:
         await conn.close()
 
 
+def _repair_orphaned_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Inject synthetic error ToolMessages for any AIMessage tool_calls that
+    aren't followed by the corresponding ToolMessages. This heals state that
+    was interrupted mid-turn (killed process, crashed checkpointer, etc.) so
+    the model API doesn't reject the conversation with 'insufficient tool
+    messages following tool_calls message'."""
+    repaired: list[AnyMessage] = []
+    for i, msg in enumerate(messages):
+        repaired.append(msg)
+        if not isinstance(msg, AIMessage) or not msg.tool_calls:
+            continue
+        # Collect tool_call_ids that have a corresponding ToolMessage after
+        required = {call["id"] for call in msg.tool_calls}
+        for later in messages[i + 1:]:
+            if isinstance(later, ToolMessage) and later.tool_call_id in required:
+                required.discard(later.tool_call_id)
+        # Inject a synthetic error for each orphaned call
+        for missing_id in sorted(required):
+            repaired.append(
+                ToolMessage(
+                    content="(This tool call was interrupted — the agent process was killed or restarted before it could complete.)",
+                    tool_call_id=missing_id,
+                    name="unknown",
+                )
+            )
+    return repaired
+
+
 def build_graph(
     settings: Any,
     router: ModelRouter,
@@ -123,6 +151,9 @@ def build_graph(
             if role == "pro"
             else list(state["messages"])
         )
+        # Heal interrupted state — if the last turn was killed mid-execution,
+        # orphaned tool_calls would cause the model API to reject the request.
+        messages = _repair_orphaned_tool_calls(messages)
         messages = [SystemMessage(content=system_prompt), *messages]
         response = await model.ainvoke(messages)
         # When the model sends text alongside tool calls (e.g. "Let me first
