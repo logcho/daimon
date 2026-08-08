@@ -31,6 +31,8 @@ interface PanelProps {
   onActivateTerminal: (id: string) => void;
   onCloseTerminal: (id: string) => void;
   onAddTerminal: () => void;
+  /** CLI/external session ids the app doesn't own — read-only chips. */
+  cliSessions?: string[];
 }
 
 const STATUS_DOT =
@@ -65,6 +67,7 @@ export function Panel({
   onActivateTerminal,
   onCloseTerminal,
   onAddTerminal,
+  cliSessions,
 }: PanelProps) {
   const dot =
     globalBusy
@@ -154,6 +157,16 @@ export function Panel({
               </span>
             );
           })}
+          {cliSessions?.map((name) => (
+            <span
+              key={`cli-${name}`}
+              title={`CLI session "${name}" is active`}
+              className="liquid-glass-subtle flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs text-neutral-400"
+            >
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400 animate-daimon-pulse" />
+              {name}
+            </span>
+          ))}
           <button
             onClick={onAddChat}
             title="start a new chat"

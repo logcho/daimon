@@ -62,6 +62,9 @@ export default function App() {
   const busy = isSessionBusy(messages);
   const anyBusy = (status?.busy ?? false) || sessionOrder.some((sid) => isSessionBusy(sessions[sid] ?? []));
   const hasError = sessionOrder.some((sid) => (sessions[sid] ?? []).some((m) => m.error));
+  // External (CLI) sessions the app doesn't own — surfaced as read-only chips
+  // in the panel so the user sees CLI activity in the dashboard.
+  const cliSessions = (status?.sessions ?? []).filter((sid) => !(sid in sessionsRef.current));
 
   const refreshStatus = useCallback(() => {
     agentStatus()
@@ -256,6 +259,7 @@ export default function App() {
           onActivateTerminal={setActiveTerminalId}
           onCloseTerminal={closeTerminalTab}
           onAddTerminal={openNewTerminalTab}
+          cliSessions={cliSessions}
         />
       ) : (
         <Pill
