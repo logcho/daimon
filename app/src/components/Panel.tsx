@@ -4,6 +4,7 @@ import { isSessionBusy } from "../sessionEvents";
 import { ChatInput } from "./ChatInput";
 import { ErrorBanner } from "./ErrorBanner";
 import { MessageList } from "./MessageList";
+import { SoundWave } from "./SoundWave";
 import { TerminalPanel } from "./TerminalPanel";
 import { VoiceIndicator } from "./VoiceIndicator";
 import { VaultPanel } from "./VaultPanel";
@@ -91,7 +92,7 @@ export function Panel({
   return (
     <div className="animate-daimon-in liquid-glass flex h-full w-full flex-col overflow-hidden rounded-[28px] text-white">
       <header
-        className="flex items-center gap-3 border-b border-white/[0.08] px-4 py-3 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]"
+        className="flex shrink-0 items-center gap-2 border-b border-white/[0.08] px-4 py-3 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]"
         onMouseDown={(e) => {
           // The whole header bar drags the window — except when the press
           // started on a button (tab chips, new-chat, collapse), which keeps
@@ -101,52 +102,73 @@ export function Panel({
         }}
       >
         <img src="/logo.svg" alt="" draggable={false} className="h-5 w-5 invert" />
-        <h1 className="text-sm font-semibold tracking-tight text-neutral-50">daimon</h1>
+        <span className="text-sm font-semibold tracking-tight text-neutral-50">daimon</span>
         <span className={`${STATUS_DOT} ${dot}`} title={statusTitle} />
-        <nav className="ml-3 flex items-center gap-1">
-          <button
-            onClick={() => onViewChange("chat")}
-            className={`rounded-full px-2.5 py-1 text-xs transition-colors ${
-              view === "chat"
-                ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
-                : "text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
-            }`}
-          >
-            chat
-          </button>
-          <button
-            onClick={() => onViewChange("terminal")}
-            className={`rounded-full px-2.5 py-1 text-xs transition-colors ${
-              view === "terminal"
-                ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
-                : "text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
-            }`}
-          >
-            terminal
-          </button>
-          <button
-            onClick={() => onViewChange("vault")}
-            className={`rounded-full px-2.5 py-1 text-xs transition-colors ${
-              view === "vault"
-                ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
-                : "text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
-            }`}
-          >
-            vault
-          </button>
-        </nav>
+        {/* Dictation state inline — SoundWave while recording, spinner while
+            transcribing, error text. Matches the legacy header layout where
+            the dictation indicator sits next to the status dot, before the
+            tabs, rather than after them. */}
+        {dictation.type === "recording" && (
+          <span className="flex items-center gap-1.5 font-mono text-xs text-[#4f8dff]">
+            <SoundWave barHeight={10} />
+            {dictation.locked && (
+              // Two small static dots — visibly steadier than the moving
+              // wave alone, signaling "hands-free, keeps going until you
+              // press fn again" rather than "only while held."
+              <span className="flex items-center gap-1">
+                <span className="h-1 w-1 rounded-full bg-[#4f8dff]" />
+                <span className="h-1 w-1 rounded-full bg-[#4f8dff]" />
+              </span>
+            )}
+          </span>
+        )}
+        {dictation.type === "transcribing" && (
+          <span className="block h-3 w-3 animate-spin rounded-full border-2 border-[#4f8dff]/25 border-t-[#4f8dff]" />
+        )}
+        {dictation.type === "error" && (
+          <span className="text-xs text-red-400">{dictation.message || "dictation error"}</span>
+        )}
+        <div className="flex-1" />
+        <button
+          onClick={() => onViewChange("chat")}
+          className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
+            view === "chat"
+              ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+              : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
+          }`}
+        >
+          chat
+        </button>
+        <button
+          onClick={() => onViewChange("terminal")}
+          className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
+            view === "terminal"
+              ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+              : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
+          }`}
+        >
+          terminal
+        </button>
+        <button
+          onClick={() => onViewChange("vault")}
+          className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
+            view === "vault"
+              ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+              : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
+          }`}
+        >
+          vault
+        </button>
         <VoiceIndicator
-          dictation={dictation}
           model={voiceModel}
           modelDownload={voiceModelDownload}
           onRefreshModel={onRefreshVoiceModel}
         />
         <button
           onClick={onCollapse}
-          title="Collapse to pill"
-          className="ml-auto rounded-full px-2 py-1 text-xs text-neutral-400 transition-colors hover:bg-white/5 hover:text-neutral-200"
+          className="rounded-full px-2 py-1 text-xs font-medium text-neutral-400 transition duration-200 hover:bg-white/5 hover:text-neutral-100 active:scale-90"
         >
-          ⌄
+          collapse
         </button>
       </header>
 

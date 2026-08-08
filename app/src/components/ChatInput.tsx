@@ -34,8 +34,8 @@ export function ChatInput({ onSend, disabled }: Props) {
   };
 
   return (
-    <div className="m-3 flex items-start gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)]">
-      <span className="mt-[3px] font-mono text-sm leading-5 text-[#4f8dff]">&gt;</span>
+    <div className="m-3 flex items-start gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)] backdrop-blur-md transition focus-within:border-[#4f8dff]/40 focus-within:bg-white/[0.06]">
+      <span className="pt-0.5 font-mono text-sm text-[#4f8dff]">&gt;</span>
       <textarea
         ref={textareaRef}
         value={text}
@@ -50,7 +50,7 @@ export function ChatInput({ onSend, disabled }: Props) {
         }
         onBlur={() => clearInsertTarget()}
         rows={1}
-        placeholder={disabled ? "Working…" : "Message Daimon (Enter to send)"}
+        placeholder={disabled ? "waiting for daimon to finish this turn…" : "tell daimon what to do..."}
         disabled={disabled}
         className="max-h-32 flex-1 resize-none bg-transparent py-0 font-mono text-sm leading-5 text-neutral-100 outline-none placeholder:text-neutral-500 disabled:opacity-50"
       />

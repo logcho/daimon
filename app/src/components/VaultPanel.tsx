@@ -141,7 +141,7 @@ export function VaultPanel() {
         {selectedFile && detailState === "loading" && <p className="text-sm text-neutral-500">loading…</p>}
         {selectedFile && detailState === "error" && <p className="text-sm text-red-400">{detailErrorMessage}</p>}
         {selectedFile && detailState === "ready" && (
-          <article className="md max-w-none">
+          <article className="daimon-prose prose prose-invert prose-sm max-w-none">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
           </article>
         )}

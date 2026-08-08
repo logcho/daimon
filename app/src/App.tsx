@@ -338,6 +338,7 @@ export default function App() {
           agentDown={!status?.running}
           hasError={hasError}
           onExpand={expand}
+          dictation={dictation}
         />
       )}
     </main>
