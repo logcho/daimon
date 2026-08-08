@@ -116,11 +116,12 @@ def shimmer_color(hex_color: str) -> str:
 class TuiState:
     """Mutable state for the TUI, shared between the app and the ticker."""
 
-    def __init__(self) -> None:
+    def __init__(self, http: Any) -> None:
         self.output_lines: list[str] = []
         self.turn_count: int = 0
         self.last_elapsed: float | None = None
         self.agent: str = "general"  # toggled by Shift+Tab
+        self.http: Any = http  # aiohttp.ClientSession for /tools and other server calls
         self._frame_idx: int = 0
         self._verb_idx: int = 0
         self._verb_elapsed: float = 0.0
@@ -174,7 +175,7 @@ async def run_tui(
     The heavy import is here so ``--help`` / ``--list`` / one-shot paths
     never pay the ~120ms prompt_toolkit cost.
     """
-    state = TuiState()
+    state = TuiState(http)
     state.agent = agent
     state.output_lines = display.render_banner(session_name)
 
