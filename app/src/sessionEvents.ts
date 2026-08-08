@@ -28,6 +28,17 @@ export function isSessionBusy(messages: ChatMessage[]): boolean {
   return idx >= 0 && messages[idx].thinking;
 }
 
+/**
+ * True when the session has a completed turn (result delivered, not thinking,
+ * no error) — the chip dot shows green instead of grey.
+ */
+export function hasCompletedTurn(messages: ChatMessage[]): boolean {
+  const idx = lastAssistant(messages);
+  if (idx < 0) return false;
+  const msg = messages[idx];
+  return !!msg.content && !msg.thinking && !msg.error;
+}
+
 function upsertStep(steps: Step[], ev: StepEvent): Step[] {
   const idx = steps.findIndex((s) => s.id === ev.id);
   if (idx < 0) return [...steps, { id: ev.id, label: ev.label, tool: ev.tool, status: ev.status }];

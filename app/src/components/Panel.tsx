@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { AgentStatus, ChatMessage, DictationStatus, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
-import { isSessionBusy } from "../sessionEvents";
+import { hasCompletedTurn, isSessionBusy } from "../sessionEvents";
 import { ChatInput } from "./ChatInput";
 import { ErrorBanner } from "./ErrorBanner";
 import { MessageList } from "./MessageList";
@@ -196,7 +196,11 @@ export function Panel({
                 <button onClick={() => onSelectChat(id)} className="flex items-center gap-1.5">
                   <span
                     className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                      isSessionBusy(list) ? "bg-[#4f8dff] animate-daimon-pulse" : "bg-neutral-600"
+                      isSessionBusy(list)
+                        ? "bg-[#4f8dff] animate-daimon-pulse"
+                        : hasCompletedTurn(list)
+                          ? "bg-emerald-400"
+                          : "bg-neutral-600"
                     }`}
                   />
                   {chatTitle(list, index)}
