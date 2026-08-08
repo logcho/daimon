@@ -36,6 +36,7 @@ from .guardrails import (
 from .model import ModelRouter
 from .prompts import build_system_prompt
 from .state import AgentState
+from collections.abc import Callable
 
 # Era-1 value, kept.
 RECURSION_LIMIT = 40
@@ -44,7 +45,7 @@ RECURSION_LIMIT = 40
 SUBAGENT_RECURSION_LIMIT = 15
 MAX_RESEARCH_FAN_OUT = 3
 # The research-only tool set delegated to each subagent (no nested research).
-RESEARCH_SUBAGENT_TOOLS = frozenset({"web_search", "open_url", "read_page", "extract_text"})
+RESEARCH_SUBAGENT_TOOLS = frozenset({"web_search", "open_url", "read_page", "extract_text", "web_fetch"})
 
 
 def _tool_result_text(content: Any) -> str:
@@ -66,6 +67,10 @@ async def make_sqlite_checkpointer(path: Path) -> AsyncSqliteSaver:
     it per request. setup() runs lazily on first checkpoint write."""
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(str(path))
+    # Two daimon-agent processes (app + CLI) may share this file — wait up
+    # to 10s for the other's write lock instead of erroring (WAL is already
+    # set lazily by AsyncSqliteSaver.setup()).
+    await conn.execute("PRAGMA busy_timeout = 10000")
     return AsyncSqliteSaver(conn)
 
 
@@ -87,12 +92,15 @@ def build_graph(
     memory: Any = None,
     checkpointer: Any = None,
     role: str = "pro",
+    prompt_builder: Callable[..., str] | None = None,
 ) -> CompiledStateGraph:
     """Build the compiled graph. `checkpointer` defaults to an
     AsyncSqliteSaver on settings.checkpoints_db; the caller owns its lifetime
     (one per process). `role` selects the model: "pro" (main agent, hybrid
     routing's primary role) or "flash" (research subagents — cheap, bounded
-    work where a missed call is cheap to retry)."""
+    work where a missed call is cheap to retry). `prompt_builder` overrides
+    the default system prompt (used by the coding agent for its kernel-first
+    doctrine)."""
 
     tool_by_name = {t.name: t for t in tools}
     subgraph = None
@@ -105,7 +113,8 @@ def build_graph(
         # time, so a keyless process can still boot and serve /health. The
         # router caches instances; bind_tools per node call is cheap.
         model = (router.pro() if role == "pro" else router.flash()).bind_tools(tools)
-        system_prompt = build_system_prompt(settings, skills_block=state.get("skills_block", ""))
+        _build_prompt = prompt_builder or build_system_prompt
+        system_prompt = _build_prompt(settings, skills_block=state.get("skills_block", ""))
         # Compaction (token-threshold summarization via flash) applies only to
         # the main agent — subgraph turns are bounded by their own recursion.
         messages = (

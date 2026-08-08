@@ -91,6 +91,8 @@ export interface TerminalExitedPayload {
 
 export type View = "chat" | "terminal";
 
+export type AgentKind = "general" | "coding";
+
 // --- Voice dictation -------------------------------------------------------
 
 export interface VoiceModelStatus {

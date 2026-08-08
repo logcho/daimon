@@ -44,9 +44,10 @@ async fn send_message(
     state: tauri::State<'_, AgentManager>,
     session_id: String,
     instruction: String,
+    agent: Option<String>,
 ) -> Result<(), String> {
     let status = state.ensure(&app).await?;
-    session::spawn_turn(app, status.port, session_id, instruction);
+    session::spawn_turn(app, status.port, session_id, instruction, agent.unwrap_or_else(|| "general".to_string()));
     Ok(())
 }
 

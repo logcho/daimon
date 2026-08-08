@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AgentKind,
   AgentStatus,
   DictationStatus,
   TerminalExitedPayload,
@@ -11,8 +12,8 @@ import type {
 
 export const startChat = (): Promise<string> => invoke<string>("start_chat");
 
-export const sendMessage = (sessionId: string, instruction: string): Promise<void> =>
-  invoke<void>("send_message", { sessionId, instruction });
+export const sendMessage = (sessionId: string, instruction: string, agent: AgentKind = "general"): Promise<void> =>
+  invoke<void>("send_message", { sessionId, instruction, agent });
 
 export const agentStatus = (): Promise<AgentStatus> => invoke<AgentStatus>("agent_status");
 

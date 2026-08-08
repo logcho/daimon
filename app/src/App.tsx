@@ -12,6 +12,7 @@ import {
 import { applyEvent, isSessionBusy, onSessionStatus } from "./sessionEvents";
 import { collapseToPill, expandToPanel } from "./lib/window";
 import type {
+  AgentKind,
   AgentStatus,
   ChatMessage,
   DictationStatus,
@@ -32,6 +33,7 @@ export default function App() {
   const [sessions, setSessions] = useState<Record<string, ChatMessage[]>>({});
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [sessionAgents, setSessionAgents] = useState<Record<string, AgentKind>>({});
   const [status, setStatus] = useState<AgentStatus | null>(null);
   // Whether the panel (vs. the pill) is showing. The pill itself is always
   // the real window — see collapseToPill/expandToPanel in lib/window.ts.
@@ -274,20 +276,26 @@ export default function App() {
       const sid = await startChat();
       commitSessions((prev) => ({ ...prev, [sid]: [] }));
       setSessionOrder((order) => [...order, sid]);
+      setSessionAgents((prev) => ({ ...prev, [sid]: "general" }));
       setActiveSessionId(sid);
     } catch {
       // keep the current session; the status dot shows the agent is down
     }
   };
 
+  const setSessionAgent = (sid: string, agent: AgentKind) => {
+    setSessionAgents((prev) => ({ ...prev, [sid]: agent }));
+  };
+
   const send = async (text: string) => {
     const sid = activeSessionId;
     if (!sid || busy || !text.trim()) return;
+    const agent = sessionAgents[sid] ?? "general";
     const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false };
     const asstMsg: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: true };
     commitSessions((prev) => ({ ...prev, [sid]: [...(prev[sid] ?? []), userMsg, asstMsg] }));
     try {
-      await sendMessage(sid, text);
+      await sendMessage(sid, text, agent);
     } catch (err) {
       // Invoke failed before the stream could start (agent down, etc.).
       commitSessions((prev) => {
@@ -330,6 +338,8 @@ export default function App() {
           voiceModel={voiceModel}
           voiceModelDownload={voiceModelDownload}
           onRefreshVoiceModel={refreshVoiceModel}
+          sessionAgents={sessionAgents}
+          onChangeSessionAgent={setSessionAgent}
         />
       ) : (
         <Pill

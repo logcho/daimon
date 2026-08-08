@@ -18,9 +18,10 @@ pub(crate) fn spawn_turn(
     port: u16,
     session_id: String,
     instruction: String,
+    agent: String,
 ) {
     tauri::async_runtime::spawn(async move {
-        if let Err(message) = run_and_stream(&app, port, &session_id, &instruction).await {
+        if let Err(message) = run_and_stream(&app, port, &session_id, &instruction, &agent).await {
             let _ = app.emit(
                 "session-status",
                 SessionStatusPayload {
@@ -37,6 +38,7 @@ async fn run_and_stream(
     port: u16,
     session_id: &str,
     instruction: &str,
+    agent: &str,
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
     let response = client
@@ -44,6 +46,7 @@ async fn run_and_stream(
         .json(&serde_json::json!({
             "instruction": instruction,
             "session_id": session_id,
+            "agent": agent,
         }))
         .send()
         .await
@@ -61,7 +64,18 @@ async fn run_and_stream(
             .await
             .map_err(|_| "agent stalled (no output for 90s)".to_string())?;
         let Some(chunk) = next else { break };
-        let chunk = chunk.map_err(|e| format!("agent stream error: {e}"))?;
+        let chunk = match chunk {
+            Ok(bytes) => bytes,
+            // Connection died after the terminal (done|error) event was
+            // delivered — the server can still hold the body open through
+            // reflection/teardown when it's killed (dev-watcher restart,
+            // kill_group), and hyper's final read then fails with "incomplete
+            // message". The result is already out; treat this as a clean
+            // end-of-stream, not a fatal error. A *truncated* terminal line
+            // still has saw_terminal == false and correctly errors.
+            Err(_) if saw_terminal => break,
+            Err(e) => return Err(format!("agent stream error: {e}")),
+        };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(newline_pos) = buffer.find('\n') {

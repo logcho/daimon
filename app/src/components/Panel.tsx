@@ -1,11 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AgentStatus, ChatMessage, DictationStatus, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
+import type { AgentKind, AgentStatus, ChatMessage, DictationStatus, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
 import { isSessionBusy } from "../sessionEvents";
 import { ChatInput } from "./ChatInput";
 import { ErrorBanner } from "./ErrorBanner";
 import { MessageList } from "./MessageList";
 import { TerminalPanel } from "./TerminalPanel";
 import { VoiceIndicator } from "./VoiceIndicator";
+import { AgentPicker } from "./AgentPicker";
 
 interface PanelProps {
   /** Active session only — gates ChatInput. */
@@ -39,6 +40,9 @@ interface PanelProps {
   voiceModel: VoiceModelStatus | null;
   voiceModelDownload: VoiceModelDownloadPayload | null;
   onRefreshVoiceModel: () => void;
+  /** Agent kind per session — defaults to "general" for new sessions. */
+  sessionAgents: Record<string, AgentKind>;
+  onChangeSessionAgent: (sid: string, agent: AgentKind) => void;
 }
 
 const STATUS_DOT =
@@ -78,6 +82,8 @@ export function Panel({
   voiceModel,
   voiceModelDownload,
   onRefreshVoiceModel,
+  sessionAgents,
+  onChangeSessionAgent,
 }: PanelProps) {
   const dot =
     globalBusy
@@ -124,6 +130,13 @@ export function Panel({
             terminal
           </button>
         </nav>
+        {view === "chat" && activeSessionId && (
+          <AgentPicker
+            agent={sessionAgents[activeSessionId] ?? "general"}
+            onChange={(a) => onChangeSessionAgent(activeSessionId, a)}
+            locked={messages.length > 0}
+          />
+        )}
         <VoiceIndicator
           dictation={dictation}
           model={voiceModel}
