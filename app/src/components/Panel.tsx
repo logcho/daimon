@@ -14,6 +14,8 @@ interface PanelProps {
   busy: boolean;
   /** Global: any session (chat or CLI) is running. Drives the header dot. */
   globalBusy: boolean;
+  /** A turn finished while collapsed — green dot until user expands. */
+  unreadCompletion?: boolean;
   status: AgentStatus | null;
   view: View;
   onViewChange: (view: View) => void;
@@ -44,7 +46,7 @@ interface PanelProps {
 }
 
 const STATUS_DOT =
-  "h-1.5 w-1.5 rounded-full border border-neutral-950";
+  "h-1.5 w-1.5 rounded-full";
 
 /** Chip label: the first user message, whitespace-collapsed and truncated;
  *  "chat N" before the session has said anything. */
@@ -57,6 +59,7 @@ function chatTitle(list: ChatMessage[], index: number): string {
 export function Panel({
   busy,
   globalBusy,
+  unreadCompletion,
   status,
   view,
   onViewChange,
@@ -86,7 +89,9 @@ export function Panel({
       ? "bg-[#4f8dff] animate-daimon-pulse"
       : !status?.running
         ? "bg-red-400"
-        : "bg-neutral-600";
+        : unreadCompletion
+          ? "bg-emerald-400"
+          : "bg-neutral-600";
   const statusTitle = status ? `agent on port ${status.port}${status.adopted ? " (adopted)" : ""}` : "agent offline";
 
   return (
@@ -101,7 +106,7 @@ export function Panel({
           getCurrentWindow().startDragging();
         }}
       >
-        <img src="/logo.svg" alt="" draggable={false} className="h-5 w-5 invert" />
+        <img src="/logo.svg" alt="" draggable={false} className="h-5 w-5" />
         <span className="text-sm font-semibold tracking-tight text-neutral-50">daimon</span>
         <span className={`${STATUS_DOT} ${dot}`} title={statusTitle} />
         {/* Dictation state inline — SoundWave while recording, spinner while

@@ -10,14 +10,14 @@ import { invoke } from "@tauri-apps/api/core";
 export const PILL_SIZE = { width: 56, height: 56 };
 // Deliberately above MIN_PANEL_SIZE, not equal to it — opening straight into
 // a panel already pinned to its own floor reads as cramped.
-export const EXPANDED_SIZE = { width: 760, height: 520 };
+export const EXPANDED_SIZE = { width: 760, height: 500 };
 
 // The panel is user-resizable (the pill is not — see collapseToPill/
 // expandToPanel below, which toggle `setResizable` to match); these bound
 // how far a manual drag can shrink/grow it. The width floor has to fit the
 // header's tab row (chat/terminal + collapse) without wrapping.
-export const MIN_PANEL_SIZE = { width: 720, height: 360 };
-export const MAX_PANEL_SIZE = { width: 960, height: 800 };
+export const MIN_PANEL_SIZE = { width: 720, height: 500 };
+export const MAX_PANEL_SIZE = { width: 1152, height: 800 };
 
 const SCREEN_MARGIN = 20;
 const ANIMATION_MS = 220;

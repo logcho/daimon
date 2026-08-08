@@ -27,15 +27,25 @@ interface Props {
   agentDown: boolean;
   /** The last turn errored — red dot. */
   hasError: boolean;
+  /** A turn finished while the panel was collapsed — green dot. */
+  unreadCompletion?: boolean;
   onExpand: () => void;
   /** Voice dictation state — driven by Rust-side Fn-key events. */
   dictation?: DictationStatus;
 }
 
-export function Pill({ busy, agentDown, hasError, onExpand, dictation }: Props) {
+export function Pill({ busy, agentDown, hasError, unreadCompletion, onExpand, dictation }: Props) {
   const mouseDownAt = useRef<{ x: number; y: number } | null>(null);
 
-  const status = busy ? "running" : hasError ? "error" : agentDown ? "down" : "idle";
+  const status = busy
+    ? "running"
+    : hasError
+      ? "error"
+      : agentDown
+        ? "down"
+        : unreadCompletion
+          ? "done"
+          : "idle";
   const dotClass =
     status === "running"
       ? "bg-[#4f8dff] animate-daimon-pulse"
@@ -45,7 +55,9 @@ export function Pill({ busy, agentDown, hasError, onExpand, dictation }: Props) 
       ? "Daimon — thinking…"
       : status === "error"
         ? "Daimon — something went wrong"
-        : "Daimon — ready when you are";
+        : status === "done"
+          ? "Daimon — turn complete"
+          : "Daimon — ready when you are";
 
   // Dictation can be active while the pill is collapsed — take over the
   // icon area and add border glow distinct from the existing session-status
@@ -126,18 +138,18 @@ export function Pill({ busy, agentDown, hasError, onExpand, dictation }: Props) 
             src="/logo.svg"
             alt="Daimon"
             draggable={false}
-            className="h-8 w-8 opacity-70 invert transition group-hover:opacity-90"
+            className="h-8 w-8 opacity-70 transition group-hover:opacity-90"
           />
         )}
         <span
-          className={`absolute right-1 top-1 h-2.5 w-2.5 rounded-full border border-neutral-950 ${dotClass}`}
+          className={`absolute right-1 top-1 h-2.5 w-2.5 rounded-full ${dotClass}`}
         />
         {dictation?.type === "error" && (
           // Recording/transcribing already have their own unmistakable
           // icon-area visual (the wave / spinner above) — this small corner
           // dot is only still needed for the error state, which doesn't
           // replace the logo.
-          <span className="absolute left-0.5 top-0.5 h-2.5 w-2.5 rounded-full border border-neutral-950 bg-red-400" />
+          <span className="absolute left-0.5 top-0.5 h-2.5 w-2.5 rounded-full bg-red-400" />
         )}
       </button>
     </div>

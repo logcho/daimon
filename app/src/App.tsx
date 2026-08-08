@@ -71,6 +71,7 @@ export default function App() {
   // Tauri listener), so a ref mirrors the state. commitSessions is the only
   // writer, keeping the two in lockstep.
   const sessionsRef = useRef<Record<string, ChatMessage[]>>({});
+  const expandedRef = useRef(false);
   const commitSessions = useCallback(
     (updater: (prev: Record<string, ChatMessage[]>) => Record<string, ChatMessage[]>) => {
       setSessions((prev) => {
@@ -90,6 +91,9 @@ export default function App() {
   const busy = isSessionBusy(messages);
   const anyBusy = (status?.busy ?? false) || sessionOrder.some((sid) => isSessionBusy(sessions[sid] ?? []));
   const hasError = sessionOrder.some((sid) => (sessions[sid] ?? []).some((m) => m.error));
+  // Green "success" dot: a turn finished while the panel was collapsed.
+  // Cleared when the user expands — they've seen the result.
+  const [unreadCompletion, setUnreadCompletion] = useState(false);
   // External (CLI) sessions the app doesn't own — surfaced as read-only chips
   // in the panel so the user sees CLI activity in the dashboard.
   const cliSessions = (status?.sessions ?? []).filter((sid) => !(sid in sessionsRef.current));
@@ -102,11 +106,14 @@ export default function App() {
 
   const expand = useCallback(() => {
     setExpanded(true);
+    expandedRef.current = true;
+    setUnreadCompletion(false); // user has seen the result
     void expandToPanel();
   }, []);
 
   const collapse = useCallback(() => {
     setExpanded(false);
+    expandedRef.current = false;
     void collapseToPill();
   }, []);
 
@@ -193,6 +200,9 @@ export default function App() {
       commitSessions((prev) => ({ ...prev, [sid]: applyEvent(prev[sid], event) }));
       if (event.type === "done" || event.type === "error") {
         refreshStatus();
+        // If the panel is collapsed, light the green "success" dot so the user
+        // knows a result is waiting — cleared when they expand to read it.
+        if (!expandedRef.current) setUnreadCompletion(true);
       }
     },
     [commitSessions, refreshStatus, expand],
@@ -308,6 +318,7 @@ export default function App() {
         <Panel
           busy={busy}
           globalBusy={anyBusy}
+          unreadCompletion={unreadCompletion}
           status={status}
           view={view}
           onViewChange={setView}
@@ -337,6 +348,7 @@ export default function App() {
           busy={anyBusy}
           agentDown={!status?.running}
           hasError={hasError}
+          unreadCompletion={unreadCompletion}
           onExpand={expand}
           dictation={dictation}
         />
