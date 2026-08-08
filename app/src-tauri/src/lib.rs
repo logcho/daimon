@@ -1,7 +1,9 @@
 mod agent;
+mod fn_key;
 mod session;
 mod terminal;
 mod vibrancy;
+mod voice;
 
 use agent::{AgentManager, AgentStatus};
 use serde::Serialize;
@@ -54,6 +56,11 @@ async fn close_agent(state: tauri::State<'_, AgentManager>) -> Result<(), String
 }
 
 #[tauri::command]
+fn accessibility_trusted() -> bool {
+    fn_key::accessibility_trusted()
+}
+
+#[tauri::command]
 async fn set_window_vibrancy<R: tauri::Runtime>(app: tauri::AppHandle<R>, radius: f64) -> Result<(), String> {
     vibrancy::apply(&app, radius).await
 }
@@ -71,9 +78,18 @@ pub fn run() {
             terminal::start_terminal,
             terminal::write_to_terminal,
             terminal::resize_terminal,
-            terminal::close_terminal
+            terminal::close_terminal,
+            voice::voice_model_status,
+            voice::download_voice_model,
+            voice::start_dictation,
+            voice::stop_dictation,
+            accessibility_trusted,
         ])
         .setup(|app| {
+            voice::init(app.handle());
+            #[cfg(target_os = "macos")]
+            fn_key::install_fn_key_monitors(app.handle().clone());
+
             // SIGTERM (e.g. `kill` from a terminal, or the dev watcher) does
             // not fire RunEvent::Exit on its own — exit cleanly instead so
             // the Exit handler sweeps the agent server.

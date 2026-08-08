@@ -1,10 +1,11 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AgentStatus, ChatMessage, View } from "../types";
+import type { AgentStatus, ChatMessage, DictationStatus, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
 import { isSessionBusy } from "../sessionEvents";
 import { ChatInput } from "./ChatInput";
 import { ErrorBanner } from "./ErrorBanner";
 import { MessageList } from "./MessageList";
 import { TerminalPanel } from "./TerminalPanel";
+import { VoiceIndicator } from "./VoiceIndicator";
 
 interface PanelProps {
   /** Active session only — gates ChatInput. */
@@ -33,6 +34,11 @@ interface PanelProps {
   onAddTerminal: () => void;
   /** CLI/external session ids the app doesn't own — read-only chips. */
   cliSessions?: string[];
+  /** Voice dictation state + model — drives the mic chip. */
+  dictation: DictationStatus;
+  voiceModel: VoiceModelStatus | null;
+  voiceModelDownload: VoiceModelDownloadPayload | null;
+  onRefreshVoiceModel: () => void;
 }
 
 const STATUS_DOT =
@@ -68,6 +74,10 @@ export function Panel({
   onCloseTerminal,
   onAddTerminal,
   cliSessions,
+  dictation,
+  voiceModel,
+  voiceModelDownload,
+  onRefreshVoiceModel,
 }: PanelProps) {
   const dot =
     globalBusy
@@ -114,6 +124,12 @@ export function Panel({
             terminal
           </button>
         </nav>
+        <VoiceIndicator
+          dictation={dictation}
+          model={voiceModel}
+          modelDownload={voiceModelDownload}
+          onRefreshModel={onRefreshVoiceModel}
+        />
         <button
           onClick={onCollapse}
           title="Collapse to pill"

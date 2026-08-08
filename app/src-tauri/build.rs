@@ -11,6 +11,16 @@ fn main() {
             "start_chat",
             "send_message",
             "close_agent",
+            "set_window_vibrancy",
+            "start_terminal",
+            "write_to_terminal",
+            "resize_terminal",
+            "close_terminal",
+            "voice_model_status",
+            "download_voice_model",
+            "start_dictation",
+            "stop_dictation",
+            "accessibility_trusted",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }

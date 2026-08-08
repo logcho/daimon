@@ -1,8 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { agentStatus, closeTerminal, sendMessage, setWindowVibrancy, startChat } from "./api";
+import {
+  agentStatus,
+  closeTerminal,
+  onDictationStatus,
+  onVoiceModelDownload,
+  sendMessage,
+  setWindowVibrancy,
+  startChat,
+  voiceModelStatus,
+} from "./api";
 import { applyEvent, isSessionBusy, onSessionStatus } from "./sessionEvents";
 import { collapseToPill, expandToPanel } from "./lib/window";
-import type { AgentStatus, ChatMessage, SessionStatusPayload, View } from "./types";
+import type {
+  AgentStatus,
+  ChatMessage,
+  DictationStatus,
+  SessionStatusPayload,
+  View,
+  VoiceModelDownloadPayload,
+  VoiceModelStatus,
+} from "./types";
+import { insertText } from "./lib/voice";
 import { Panel } from "./components/Panel";
 import { Pill } from "./components/Pill";
 
@@ -36,6 +54,16 @@ export default function App() {
   // actually started" commands for tabs the *agent* opened (via a `ui_action`
   // event on the session-status stream — see handleEvent below).
   const [initialTerminalCommands, setInitialTerminalCommands] = useState<Record<string, string>>({});
+
+  // Voice dictation state — driven entirely by Rust-side events (Fn key
+  // gesture monitor + cpal recording thread + whisper-rs transcription).
+  const [dictation, setDictation] = useState<DictationStatus>({ type: "idle" });
+  const [voiceModel, setVoiceModel] = useState<VoiceModelStatus | null>(null);
+  const [voiceModelDownload, setVoiceModelDownload] = useState<VoiceModelDownloadPayload | null>(null);
+
+  const refreshVoiceModel = useCallback(() => {
+    voiceModelStatus().then(setVoiceModel).catch(() => {});
+  }, []);
 
   // The event listener must read the session map without re-subscribing on
   // every streamed chunk (the listener registers once against a stable
@@ -183,6 +211,43 @@ export default function App() {
     };
   }, [handleEvent]);
 
+  // Dictation event subscription — driven by the Fn-key gesture monitor and
+  // the cpal recording thread (both Rust-side). Routes transcribed text to the
+  // focused input and auto-expands the panel when recording starts so the
+  // VoiceIndicator is visible.
+  useEffect(() => {
+    let unlistenDictation: (() => void) | undefined;
+    let unlistenDownload: (() => void) | undefined;
+    let cancelled = false;
+
+    onDictationStatus((status) => {
+      setDictation(status);
+      if (status.type === "recording" || status.type === "transcribing") {
+        expand();
+      }
+      if (status.type === "result") {
+        insertText(status.text);
+      }
+    }).then((u) => {
+      if (cancelled) u();
+      else unlistenDictation = u;
+    });
+
+    onVoiceModelDownload((payload) => {
+      setVoiceModelDownload(payload);
+      if (payload.done) refreshVoiceModel();
+    }).then((u) => {
+      if (cancelled) u();
+      else unlistenDownload = u;
+    });
+
+    return () => {
+      cancelled = true;
+      unlistenDictation?.();
+      unlistenDownload?.();
+    };
+  }, [expand, refreshVoiceModel]);
+
   // On mount: collapse to the pill, install the native vibrancy material
   // behind the window (28px = a circle at the pill size and the panel's
   // rounded corner when expanded, so one value covers both states), report
@@ -193,6 +258,7 @@ export default function App() {
     void collapseToPill();
     void setWindowVibrancy(28);
     refreshStatus();
+    refreshVoiceModel();
     const poll = setInterval(refreshStatus, 1500);
     startChat().then((sid) => {
       commitSessions((prev) => ({ ...prev, [sid]: [] }));
@@ -260,6 +326,10 @@ export default function App() {
           onCloseTerminal={closeTerminalTab}
           onAddTerminal={openNewTerminalTab}
           cliSessions={cliSessions}
+          dictation={dictation}
+          voiceModel={voiceModel}
+          voiceModelDownload={voiceModelDownload}
+          onRefreshVoiceModel={refreshVoiceModel}
         />
       ) : (
         <Pill

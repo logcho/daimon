@@ -90,3 +90,31 @@ export interface TerminalExitedPayload {
 }
 
 export type View = "chat" | "terminal";
+
+// --- Voice dictation -------------------------------------------------------
+
+export interface VoiceModelStatus {
+  downloaded: boolean;
+  modelName: string;
+}
+
+export interface VoiceModelDownloadPayload {
+  downloadedBytes: number;
+  totalBytes: number | null;
+  done: boolean;
+}
+
+export type DictationStatus =
+  | { type: "idle" }
+  | { type: "recording"; locked: boolean }
+  | { type: "transcribing" }
+  | { type: "result"; text: string }
+  | { type: "no_speech" }
+  | { type: "error"; message: string }
+  | { type: "locked_updated"; locked: boolean };
+
+/** Insert target: which input receives dictated text. */
+export type InsertTarget =
+  | { kind: "chat"; setText: (text: string) => void }
+  | { kind: "terminal"; paste: (text: string) => void }
+  | null;

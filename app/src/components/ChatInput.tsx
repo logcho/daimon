@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { setInsertTarget, clearInsertTarget } from "../lib/voice";
 
 interface Props {
   onSend: (text: string) => void;
@@ -40,6 +41,14 @@ export function ChatInput({ onSend, disabled }: Props) {
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={onKeyDown}
+        onFocus={() =>
+          setInsertTarget({
+            kind: "chat",
+            // Append dictated text to whatever the user has already typed
+            setText: (t: string) => setText((prev) => (prev ? `${prev} ${t}` : t)),
+          })
+        }
+        onBlur={() => clearInsertTarget()}
         rows={1}
         placeholder={disabled ? "Working…" : "Message Daimon (Enter to send)"}
         disabled={disabled}
