@@ -27,6 +27,7 @@ fn main() {
             "list_vault_files",
             "read_vault_file",
             "get_config",
+            "update_config",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }

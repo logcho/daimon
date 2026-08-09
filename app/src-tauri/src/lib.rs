@@ -65,6 +65,16 @@ async fn get_config(
 }
 
 #[tauri::command]
+async fn update_config(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    api_key: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::update_config(status.port, &api_key).await
+}
+
+#[tauri::command]
 async fn close_agent(state: tauri::State<'_, AgentManager>) -> Result<(), String> {
     state.shutdown().await
 }
@@ -96,6 +106,7 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             start_chat,
             send_message,
             get_config,
+            update_config,
             close_agent,
             set_window_vibrancy,
             activate_and_focus_window,

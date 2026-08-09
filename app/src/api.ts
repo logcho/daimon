@@ -21,6 +21,7 @@ export interface AgentConfig {
   model: string;
   flash_model: string;
   api_base: string;
+  api_key_configured: boolean;
   workspace: string;
   vault: string;
   port: number;
@@ -35,6 +36,9 @@ export interface AgentConfig {
 
 export const fetchConfig = (): Promise<AgentConfig> =>
   invoke<AgentConfig>("get_config");
+
+export const updateConfig = (apiKey: string): Promise<{ ok: boolean }> =>
+  invoke<{ ok: boolean }>("update_config", { apiKey });
 
 export const agentStatus = (): Promise<AgentStatus> => invoke<AgentStatus>("agent_status");
 

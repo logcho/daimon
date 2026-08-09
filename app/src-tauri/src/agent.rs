@@ -235,6 +235,25 @@ pub async fn fetch_config(port: u16) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("invalid config response: {e}"))
 }
 
+/// Update agent configuration (currently: api_key).
+pub async fn update_config(port: u16, api_key: &str) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/config"))
+        .json(&serde_json::json!({ "api_key": api_key }))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("config update failed ({status}): {body}"));
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("invalid config response: {e}"))
+}
+
 async fn health(port: u16) -> Result<(), String> {
     reqwest::get(format!("http://127.0.0.1:{port}/health"))
         .await

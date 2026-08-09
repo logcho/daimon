@@ -396,6 +396,7 @@ async def create_app(
             "model": s.model,
             "flash_model": s.resolved_flash_model,
             "api_base": s.api_base or "(default)",
+            "api_key_configured": bool(s.api_key),
             "workspace": str(s.resolved_workspace_dir.resolve()),
             "vault": str(s.vault_dir.resolve()),
             "port": s.port,
@@ -408,13 +409,58 @@ async def create_app(
             "pinchtab_healthy": pinchtab_ok,
         })
 
+    async def config_update_handler(request: web.Request) -> web.Response:
+        """POST /config — update configuration (currently: api_key only).
+        Writes to the .env file so the change survives restarts."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid json body")
+
+        api_key = body.get("api_key")
+        if api_key is not None:
+            if not isinstance(api_key, str) or not api_key.strip():
+                return web.Response(status=400, text="api_key must be a non-empty string")
+            env_path = Path.cwd() / ".env"
+            _patch_env_file(env_path, "DEEPSEEK_API_KEY", api_key.strip())
+            # Update in-memory settings so the change takes effect immediately.
+            request.app["settings"] = replace(
+                request.app["settings"], api_key=api_key.strip()
+            )
+            # Rebuild the router so model calls use the new key.
+            request.app["router"] = ModelRouter(request.app["settings"])
+            return web.json_response({"ok": True})
+
+        return web.Response(status=400, text="no config fields to update")
+
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
     app.router.add_get("/workspace", workspace_handler)
     app.router.add_get("/tools", tools_handler)
     app.router.add_get("/config", config_handler)
+    app.router.add_post("/config", config_update_handler)
     app.router.add_post("/task", task)
     return app
+
+
+def _patch_env_file(path: Path, key: str, value: str) -> None:
+    """Update or append a KEY=VALUE line in a dotenv file, preserving comments."""
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        updated = False
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(f"{key}=") or stripped.startswith(f"# {key}="):
+                new_lines.append(f"{key}={value}")
+                updated = True
+            else:
+                new_lines.append(line)
+        if not updated:
+            new_lines.append(f"{key}={value}")
+        path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    else:
+        path.write_text(f"{key}={value}\n", encoding="utf-8")
 
 
 def main() -> None:

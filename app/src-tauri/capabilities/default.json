@@ -9,6 +9,7 @@
     "allow-start-chat",
     "allow-send-message",
     "allow-get-config",
+    "allow-update-config",
     "allow-close-agent",
     "allow-set-window-vibrancy",
     "allow-activate-and-focus-window",
