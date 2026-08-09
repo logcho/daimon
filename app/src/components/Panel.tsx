@@ -167,14 +167,13 @@ export function Panel({
         </button>
         <button
           onClick={() => onViewChange("settings")}
-          title="settings"
-          className={`rounded-full px-2 py-1 text-sm transition duration-200 ${
+          className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
             view === "settings"
               ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
               : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
           }`}
         >
-          ⚙
+          settings
         </button>
         <VoiceIndicator
           model={voiceModel}

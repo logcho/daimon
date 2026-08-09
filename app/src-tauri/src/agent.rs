@@ -222,6 +222,19 @@ pub async fn fetch_busy_state(port: u16) -> BusyState {
     resp.json::<BusyState>().await.unwrap_or_default()
 }
 
+/// Fetch the agent's non-secret configuration (settings tab).
+pub async fn fetch_config(port: u16) -> Result<serde_json::Value, String> {
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/config"))
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("config endpoint returned {}", resp.status()));
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("invalid config response: {e}"))
+}
+
 async fn health(port: u16) -> Result<(), String> {
     reqwest::get(format!("http://127.0.0.1:{port}/health"))
         .await

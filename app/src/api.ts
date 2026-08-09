@@ -33,17 +33,8 @@ export interface AgentConfig {
   pinchtab_healthy: boolean;
 }
 
-const configPort = (): number => {
-  // The agent server is always on this port — the Rust layer ensures it.
-  // When the user sets PORT in agents/.env, that becomes the probe target.
-  return 4711;
-};
-
-export const fetchConfig = async (): Promise<AgentConfig> => {
-  const resp = await fetch(`http://127.0.0.1:${configPort()}/config`);
-  if (!resp.ok) throw new Error(`config endpoint returned ${resp.status}`);
-  return resp.json();
-};
+export const fetchConfig = (): Promise<AgentConfig> =>
+  invoke<AgentConfig>("get_config");
 
 export const agentStatus = (): Promise<AgentStatus> => invoke<AgentStatus>("agent_status");
 
