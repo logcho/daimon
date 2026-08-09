@@ -162,6 +162,75 @@ def _cmd_workspace(text: str, session_name: str | None) -> list[str]:
     ]
 
 
+def _cmd_setup(text: str, session_name: str | None) -> list[str]:
+    """``/setup`` — check configuration and show how to set up the agent."""
+    import os
+    from pathlib import Path
+
+    from ..banner import workspace_full
+    from ..config import Settings
+
+    settings = Settings.from_env()
+
+    # Detect where the key comes from
+    env_file = Path.cwd() / ".env"
+    has_env_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    has_settings_key = bool(settings.api_key)
+    key_ok = has_env_key or has_settings_key
+
+    lines: list[str] = []
+    lines.append("")
+    lines.append(f"{_DIM}── setup{_RESET}")
+    lines.append("")
+
+    # API key
+    if key_ok:
+        src = (
+            "environment variable"
+            if has_env_key and not has_settings_key
+            else ".env file" if has_settings_key and not has_env_key
+            else ".env + environment"
+        )
+        lines.append(f"  {_DIM}api key{_RESET}    ✓ {_DIM}configured ({src}){_RESET}")
+    else:
+        lines.append(f"  {_DIM}api key{_RESET}    {_RED}✗ not set{_RESET}")
+        lines.append(f"            {_DIM}add DEEPSEEK_API_KEY=sk-... to {env_file}{_RESET}")
+
+    # Model
+    lines.append(f"  {_DIM}model{_RESET}       {settings.model}")
+    if settings.resolved_flash_model != settings.model:
+        lines.append(f"  {_DIM}flash{_RESET}      {settings.resolved_flash_model}")
+
+    # Workspace
+    ws = workspace_full()
+    lines.append(f"  {_DIM}workspace{_RESET}   {ws}")
+
+    # API base
+    api_base = settings.api_base or "(default)"
+    lines.append(f"  {_DIM}api base{_RESET}   {api_base}")
+
+    # PinchTab
+    pinch_ok = settings.pinchtab_token is not None
+    if pinch_ok:
+        lines.append(f"  {_DIM}pinchtab{_RESET}    ✓ {settings.pinchtab_base}")
+    else:
+        lines.append(f"  {_DIM}pinchtab{_RESET}    {_DIM}not configured{_RESET}")
+
+    lines.append("")
+    lines.append(f"  {_DIM}config file{_RESET} {env_file}")
+    if not key_ok:
+        lines.append("")
+        lines.append(f"  {_BOLD}To get started:{_RESET}")
+        lines.append(f"  1. Get an API key from {_BLUE}platform.deepseek.com{_RESET}")
+        lines.append(f"  2. Add it to {_DIM}{env_file}{_RESET}:")
+        lines.append(f"     {_DIM}DEEPSEEK_API_KEY=sk-...{_RESET}")
+        lines.append(f"  3. Restart the daimon server or run {_BLUE}daimon --stop{_RESET} first")
+    lines.append("")
+    if key_ok:
+        lines.append(f"  {_DIM}Ready. Type a question to start.{_RESET}")
+    return lines
+
+
 # Register built-in commands
 register("help", "show available commands", _cmd_help)
 register("clear", "clear the output", _cmd_clear)
@@ -169,3 +238,4 @@ register("status", "session and terminal info", _cmd_status)
 register("model", "current model configuration", _cmd_model)
 register("tools", "list available tools", _cmd_tools)
 register("workspace", "show or change the workspace directory", _cmd_workspace)
+register("setup", "check configuration and setup guide", _cmd_setup)

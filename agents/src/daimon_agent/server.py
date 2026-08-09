@@ -392,11 +392,15 @@ async def create_app(
         """GET /config — non-secret agent configuration for the app's settings tab."""
         s = request.app["settings"]
         pinchtab_ok = await _pinchtab_healthy(s)
+        # api_key may be set via the Settings object OR directly in the OS
+        # environment (e.g. the SDK's own fallback) — check both so the
+        # settings tab shows the real state.
+        key_configured = bool(s.api_key or os.environ.get("DEEPSEEK_API_KEY"))
         return web.json_response({
             "model": s.model,
             "flash_model": s.resolved_flash_model,
             "api_base": s.api_base or "(default)",
-            "api_key_configured": bool(s.api_key),
+            "api_key_configured": key_configured,
             "workspace": str(s.resolved_workspace_dir.resolve()),
             "vault": str(s.vault_dir.resolve()),
             "port": s.port,
