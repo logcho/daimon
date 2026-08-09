@@ -173,7 +173,12 @@ async def test_run_turn_emits_bracketed_sequence(settings, tmp_path) -> None:
         "label": "Thinking",
         "status": "done",
     }
-    assert events[-1] == {"type": "done", "result": "final answer"}
+    # `done` carries the turn's usage totals alongside the result. The scripted
+    # model reports no usage, so the counters are zero — the key's presence is
+    # the contract, not the numbers.
+    assert events[-1]["type"] == "done"
+    assert events[-1]["result"] == "final answer"
+    assert events[-1]["usage"]["input_tokens"] == 0
 
 
 async def test_run_turn_error_is_exclusive(settings, tmp_path) -> None:

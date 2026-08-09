@@ -78,7 +78,7 @@ def print_banner(stream: object, *, session_name: str | None = None) -> None:
     print(blue(bold("daimon", stream), stream), file=stream)
     print(f"  {dim('Workspace:', stream)} {ws}", file=stream)
 
-    hint = "Enter submit  ·  Alt+Enter newline  ·  Ctrl-D exit  ·  Shift+↑↓ scroll"
+    hint = "Enter submit  ·  Alt+Enter newline  ·  Esc cancel  ·  Ctrl-D exit"
     if session_name:
         hint += f"  [{session_name}]"
     hint += "  ·  /help  ·  /tools  ·  /workspace"
@@ -100,7 +100,7 @@ def banner_lines(session_name: str | None = None) -> list[str]:
     line0 = f"{BLUE}{BOLD}daimon{RESET}"
     line1 = f"  {DIM}Workspace:{RESET} {ws}"
 
-    hint = "Enter submit  ·  Alt+Enter newline  ·  Ctrl-D exit  ·  Shift+↑↓ scroll"
+    hint = "Enter submit  ·  Alt+Enter newline  ·  Esc cancel  ·  Ctrl-D exit"
     if session_name:
         hint += f"  [{session_name}]"
     hint += "  ·  /help  ·  /tools  ·  /workspace"
@@ -141,7 +141,7 @@ def full_banner_lines(session_name: str | None = None) -> list[str]:
         elif i == 1:
             info = f"  {DIM}Workspace:{RESET} {ws}"
         elif i == 2:
-            hint = "Enter submit  ·  Alt+Enter newline  ·  Ctrl-D exit  ·  Shift+↑↓ scroll"
+            hint = "Enter submit  ·  Alt+Enter newline  ·  Esc cancel  ·  Ctrl-D exit"
             if session_name:
                 hint += f"  [{session_name}]"
             hint += "  ·  /help  ·  /tools  ·  /workspace"

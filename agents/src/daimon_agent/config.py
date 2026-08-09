@@ -17,10 +17,17 @@ from dotenv import dotenv_values
 @dataclass(frozen=True)
 class Settings:
     # Models. `model` is the Pro (main) role; `flash_model` defaults to it.
+    # Either may be a bare name (resolved against `provider`) or an explicit
+    # `provider:model` spec — that is how the main agent runs on a strong model
+    # while subagents and summarization stay on a cheap one.
     model: str = "deepseek-chat"
     flash_model: str | None = None
-    api_key: str | None = None
+    #: Default provider for bare model names.
+    provider: str = "deepseek"
+    api_key: str | None = None  # DeepSeek
     api_base: str | None = None
+    anthropic_api_key: str | None = None
+    anthropic_api_base: str | None = None
 
     # Workspace / data dirs.
     vault_dir: Path = Path("./vault")
@@ -48,7 +55,15 @@ class Settings:
     # Post-turn reflection (tool-using turns only) and token-threshold
     # compaction (main agent only, summarized via flash).
     reflect: bool = True
+    #: Compaction fires above this many *tokens* of conversation. Real usage
+    #: numbers from the last model call drive it; `compaction_chars` is only
+    #: the cold-start estimate for the very first call of a session, before
+    #: any usage has been reported.
+    compaction_tokens: int = 60000
     compaction_chars: int = 40000
+    #: Denominator for the context-usage indicator. Not a hard limit — the
+    #: provider enforces the real one; this is what "34% full" is a share of.
+    context_window: int = 128000
 
     # Search.
     tavily_api_key: str | None = None
@@ -109,8 +124,11 @@ class Settings:
         return cls(
             model=get("DAIMON_MODEL") or "deepseek-chat",
             flash_model=get("DAIMON_FLASH_MODEL"),
+            provider=get("DAIMON_PROVIDER") or "deepseek",
             api_key=get("DEEPSEEK_API_KEY"),
             api_base=api_base,
+            anthropic_api_key=get("ANTHROPIC_API_KEY"),
+            anthropic_api_base=get("ANTHROPIC_API_BASE"),
             vault_dir=Path(get("DAIMON_VAULT_DIR") or "./vault"),
             workspace_dir=Path(get("DAIMON_WORKSPACE_DIR")) if get("DAIMON_WORKSPACE_DIR") else None,
             memory_db=Path(get("DAIMON_MEMORY_DB") or "./memory/daimon.db"),
@@ -121,6 +139,8 @@ class Settings:
             port=int(get("PORT") or "4711"),
             live_frames=get_bool("DAIMON_LIVE_FRAMES", False),
             reflect=get_bool("DAIMON_REFLECT", True),
+            compaction_tokens=int(get("DAIMON_COMPACTION_TOKENS") or "60000"),
             compaction_chars=int(get("DAIMON_COMPACTION_CHARS") or "40000"),
+            context_window=int(get("DAIMON_CONTEXT_WINDOW") or "128000"),
             tavily_api_key=get("TAVILY_API_KEY"),
         )

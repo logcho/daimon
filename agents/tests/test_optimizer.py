@@ -152,10 +152,10 @@ async def test_validate_rollouts_only_vary_the_skill_tail(settings) -> None:
 
     prompts = [str(call[0].content) for call in router._pro.calls]
     assert len(prompts) == 2
-    # Same rules prefix (up to the timestamped date line, which may tick
+    # Same rules prefix (up to the date line, which could tick over midnight
     # between rollouts), different skill tails — nothing else varies.
     def prefix(p: str) -> str:
-        return p.split("Current date/time")[0]
+        return p.split("Current date")[0]
     assert prefix(prompts[0]) == prefix(prompts[1])
     assert "candidate body" in prompts[0] and "baseline body" not in prompts[0]
     assert "baseline body" in prompts[1] and "candidate body" not in prompts[1]

@@ -7,47 +7,66 @@
 - `.judge()` — the SkillOpt optimizer's judge role. Temperature 0.7, and it
                is deliberately a *separate model instance* (the SkillOpt rule:
                optimizer is its own role, not the agent's).
+
+Each role names its model with a spec (`providers.parse_spec`), so the roles
+can sit on different providers — a strong pro model with cheap flash subagents
+is the whole point of keeping them separate.
 """
 
 from __future__ import annotations
 
-from langchain_deepseek import ChatDeepSeek
+from typing import Any
 
 from .config import Settings
+from .providers import build_chat_model, parse_spec
 
 
 class ModelRouter:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._pro: ChatDeepSeek | None = None
-        self._flash: ChatDeepSeek | None = None
-        self._judge: ChatDeepSeek | None = None
+        # Keyed by (spec, temperature, streaming): a role asked for streaming
+        # and the same role asked for a plain call are different clients, and
+        # building one is not free.
+        self._cache: dict[tuple[str, float, bool], Any] = {}
 
-    def _build(self, model: str, temperature: float) -> ChatDeepSeek:
-        s = self._settings
-        kwargs: dict = {
-            "model": model,
-            "api_key": s.api_key,
-            "temperature": temperature,
-            "max_tokens": s.max_tokens,
-            "max_retries": s.max_retries,
-            "timeout": s.request_timeout,
-        }
-        if s.api_base:  # None fails ChatDeepSeek's pydantic validation
-            kwargs["api_base"] = s.api_base
-        return ChatDeepSeek(**kwargs)
+    def _build(self, spec: str, temperature: float, streaming: bool = False) -> Any:
+        key = (spec, temperature, streaming)
+        if key not in self._cache:
+            self._cache[key] = build_chat_model(
+                spec,
+                temperature=temperature,
+                settings=self._settings,
+                streaming=streaming,
+            )
+        return self._cache[key]
 
-    def pro(self) -> ChatDeepSeek:
-        if self._pro is None:
-            self._pro = self._build(self._settings.model, self._settings.temperature)
-        return self._pro
+    # --- roles ---------------------------------------------------------------
 
-    def flash(self) -> ChatDeepSeek:
-        if self._flash is None:
-            self._flash = self._build(self._settings.resolved_flash_model, self._settings.temperature)
-        return self._flash
+    def pro(self, *, streaming: bool = False) -> Any:
+        return self._build(self._settings.model, self._settings.temperature, streaming)
 
-    def judge(self) -> ChatDeepSeek:
-        if self._judge is None:
-            self._judge = self._build(self._settings.model, 0.7)
-        return self._judge
+    def flash(self, *, streaming: bool = False) -> Any:
+        return self._build(
+            self._settings.resolved_flash_model, self._settings.temperature, streaming
+        )
+
+    def judge(self) -> Any:
+        return self._build(self._settings.model, 0.7)
+
+    def for_role(self, role: str, *, streaming: bool = False) -> Any:
+        """The model a graph role should use. `role` is "pro" or "flash"."""
+        return self.pro(streaming=streaming) if role == "pro" else self.flash(streaming=streaming)
+
+    # --- introspection -------------------------------------------------------
+
+    def spec_for_role(self, role: str) -> str:
+        return (
+            self._settings.model
+            if role == "pro"
+            else self._settings.resolved_flash_model
+        )
+
+    def model_name(self, role: str) -> str:
+        """The bare model name for a role, without the provider prefix — what
+        the pricing table and the status bar want."""
+        return parse_spec(self.spec_for_role(role), self._settings.provider)[1]

@@ -66,18 +66,20 @@ def _cmd_help(text: str, session_name: str | None) -> list[str]:
             f"{' ' * (12 - len(name))}"
             f"{_DIM}{desc}{_RESET}"
         )
-    lines.append(
-        f"  {_DIM}Enter{_RESET}      {_DIM}submit{_RESET}"
-    )
-    lines.append(
-        f"  {_DIM}Alt+Enter{_RESET}   {_DIM}newline{_RESET}"
-    )
-    lines.append(
-        f"  {_DIM}Ctrl-D{_RESET}      {_DIM}exit{_RESET}"
-    )
-    lines.append(
-        f"  {_DIM}Shift+↑↓{_RESET}  {_DIM}scroll output{_RESET}"
-    )
+    lines.append("")
+    for key, desc in (
+        ("Enter", "submit"),
+        ("Alt+Enter", "newline"),
+        ("↑ ↓", "previous inputs"),
+        ("Esc", "cancel the running turn"),
+        ("Ctrl-C", "cancel, or exit when idle"),
+        ("Ctrl-D", "exit"),
+        ("wheel", "scroll the transcript"),
+        ("PgUp PgDn", "scroll a page"),
+        ("Shift+↑↓", "scroll a line"),
+        ("Ctrl-End", "jump to the newest output"),
+    ):
+        lines.append(f"  {_DIM}{key}{_RESET}{' ' * max(12 - len(key), 1)}{_DIM}{desc}{_RESET}")
     return lines
 
 
@@ -124,6 +126,11 @@ def _cmd_tools(text: str, session_name: str | None) -> list[str]:
     return [""]  # never reached; the TUI intercepts before dispatch
 
 
+def _cmd_plan(text: str, session_name: str | None) -> list[str]:
+    """``/plan`` — handled by the TUI directly (it owns the session's mode)."""
+    return [""]  # never reached; the TUI intercepts before dispatch
+
+
 def _cmd_workspace(text: str, session_name: str | None) -> list[str]:
     """``/workspace [path]`` — show or change the agent's workspace directory.
     Without a path, shows the current workspace.  With a path, sets a new
@@ -163,16 +170,19 @@ def _cmd_workspace(text: str, session_name: str | None) -> list[str]:
 
 
 def _cmd_setup(text: str, session_name: str | None) -> list[str]:
-    """``/setup`` — check configuration and show how to set up the agent."""
+    """``/setup [key]`` — check configuration and set the API key.
+
+    - ``/setup`` — show status. If the key is missing, show how to set it.
+    - ``/setup sk-...`` — write the key to .env immediately.
+    """
     import os
     from pathlib import Path
 
     from ..banner import workspace_full
     from ..config import Settings
+    from ..envfile import patch_env_file
 
     settings = Settings.from_env()
-
-    # Detect where the key comes from
     env_file = Path.cwd() / ".env"
     has_env_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
     has_settings_key = bool(settings.api_key)
@@ -183,7 +193,23 @@ def _cmd_setup(text: str, session_name: str | None) -> list[str]:
     lines.append(f"{_DIM}── setup{_RESET}")
     lines.append("")
 
-    # API key
+    # --- /setup sk-... — paste-to-configure path ---------------------------
+    args = text.strip().split(maxsplit=1)
+    if len(args) >= 2:
+        raw = args[1].strip()
+        # Accept anything that looks like an API key (starts with sk- or is a
+        # long token) — don't force the user to know the prefix.
+        if raw.startswith("sk-") or len(raw) >= 20:
+            key = raw
+            patch_env_file(env_file, "DEEPSEEK_API_KEY", key)
+            os.environ["DEEPSEEK_API_KEY"] = key
+            lines.append(f"  {_DIM}api key{_RESET}    ✓ {_DIM}saved to {env_file}{_RESET}")
+            lines.append("")
+            lines.append(f"  {_DIM}The agent server will pick up the new key on the next turn.{_RESET}")
+            lines.append(f"  {_DIM}Type a question to start.{_RESET}")
+            return lines
+
+    # --- /setup (no args) — status display ---------------------------------
     if key_ok:
         src = (
             "environment variable"
@@ -194,7 +220,6 @@ def _cmd_setup(text: str, session_name: str | None) -> list[str]:
         lines.append(f"  {_DIM}api key{_RESET}    ✓ {_DIM}configured ({src}){_RESET}")
     else:
         lines.append(f"  {_DIM}api key{_RESET}    {_RED}✗ not set{_RESET}")
-        lines.append(f"            {_DIM}add DEEPSEEK_API_KEY=sk-... to {env_file}{_RESET}")
 
     # Model
     lines.append(f"  {_DIM}model{_RESET}       {settings.model}")
@@ -221,10 +246,9 @@ def _cmd_setup(text: str, session_name: str | None) -> list[str]:
     if not key_ok:
         lines.append("")
         lines.append(f"  {_BOLD}To get started:{_RESET}")
-        lines.append(f"  1. Get an API key from {_BLUE}platform.deepseek.com{_RESET}")
-        lines.append(f"  2. Add it to {_DIM}{env_file}{_RESET}:")
-        lines.append(f"     {_DIM}DEEPSEEK_API_KEY=sk-...{_RESET}")
-        lines.append(f"  3. Restart the daimon server or run {_BLUE}daimon --stop{_RESET} first")
+        lines.append(f"  1. Get an API key → {_BLUE}https://platform.deepseek.com/api_keys{_RESET}")
+        lines.append(f"  2. Paste it here:  {_BOLD}/setup sk-your-key-here{_RESET}")
+        lines.append(f"     {_DIM}(the key is written to .env and the server picks it up){_RESET}")
     lines.append("")
     if key_ok:
         lines.append(f"  {_DIM}Ready. Type a question to start.{_RESET}")
@@ -237,5 +261,6 @@ register("clear", "clear the output", _cmd_clear)
 register("status", "session and terminal info", _cmd_status)
 register("model", "current model configuration", _cmd_model)
 register("tools", "list available tools", _cmd_tools)
+register("plan", "toggle plan mode — confirm a plan before changes", _cmd_plan)
 register("workspace", "show or change the workspace directory", _cmd_workspace)
 register("setup", "check configuration and setup guide", _cmd_setup)

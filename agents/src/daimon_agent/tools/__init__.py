@@ -1,8 +1,14 @@
-"""The 30-tool registry. Plain names (no `mcp__daimon__` prefix — legacy's
+"""The tool registry. Plain names (no `mcp__daimon__` prefix — legacy's
 final form), flat string-only args (the DeepSeek tool-calling mitigation:
 no nested object schemas). Descriptions ported from tools.ts where the tool
 survived; fresh ones in the same voice for the new file/shell/repl/skills
-shapes."""
+shapes.
+
+Four tools here have no working body on purpose. `research` and `task` are
+intercepted by the graph, which turns them into concurrent sub-agent runs;
+`ask_user` and `present_plan` are resolved by a LangGraph interrupt before the
+tools node executes anything. They are declared here so their schemas reach the
+model — the graph is where they actually happen."""
 
 from __future__ import annotations
 
@@ -21,10 +27,12 @@ from ..emitter import emit
 from ..events import ui_action_event
 from ..memory import MemoryStore
 from ..workspace import Confinement
+from . import ask as _ask
 from . import files as _files
 from . import host as _host
 from . import search as _search
 from . import skills_tools as _skills
+from . import todo as _todo
 from . import web as _web
 from .repl import get_repl
 from . import shell as _shell
@@ -112,7 +120,50 @@ class CommandArgs(BaseModel):
 class ResearchArgs(BaseModel):
     queries: str = Field(
         description="One research question per line. Each line is delegated to a separate "
-        "research subagent running in parallel with a research-only tool set."
+        "research subagent, all of which run concurrently with a research-only tool set."
+    )
+
+
+class TaskArgs(BaseModel):
+    agent_type: str = Field(
+        description="Which kind of sub-agent: 'explore' (read-only code search), "
+        "'research' (web), or 'general' (full tool set)."
+    )
+    prompt: str = Field(
+        description="The complete task for the sub-agent. It shares no context with you, "
+        "so state the goal, the constraints, and exactly what to report back."
+    )
+
+
+class TodoArgs(BaseModel):
+    todos: str = Field(
+        description="The whole list, one item per line as 'status|task', where status is "
+        "pending, in_progress, or done. Replaces the previous list."
+    )
+
+
+class AskUserArgs(BaseModel):
+    question: str = Field(description="The question, phrased so it can be answered directly")
+    options: str = Field(
+        default="",
+        description="One option per line as 'label|short description'. 2-4 options, best first.",
+    )
+    header: str = Field(
+        default="", description="Two or three words naming the choice, e.g. 'Auth method'"
+    )
+    multi_select: str = Field(
+        default="", description="'true' when several options can be chosen together"
+    )
+
+
+class PresentPlanArgs(BaseModel):
+    plan: str = Field(description="The plan in markdown — steps, files touched, assumptions")
+    question: str = Field(
+        default="", description="What you're asking them to decide (defaults to approval)"
+    )
+    options: str = Field(
+        default="",
+        description="One option per line as 'label|short description'. Empty = approve/revise.",
     )
 
 
@@ -415,7 +466,7 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
             "    sys.exit(1)\n"
         )
         env = dict(os.environ)
-        for key in _SECRET_ENV:
+        for key in _shell._SECRET_ENV:
             env.pop(key, None)
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-c", script,
@@ -436,6 +487,10 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
         if proc.returncode != 0:
             return f"Debug — execution failed:\n\n{err}{out}" if err else f"Debug — execution failed (exit {proc.returncode}):\n{out}"
         return out or "(no output — code ran successfully)"
+
+    def update_todos(todos: str) -> str:
+        """Replace this session's visible task list and broadcast it."""
+        return _todo.set_todos(session_id, todos)
 
     async def run_tests(path: str) -> str:
         """Run pytest in the workspace. Falls back if pytest isn't installed."""
@@ -631,13 +686,53 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
         ),
         _tool(
             "research",
-            "Research a set of questions by fanning each out to a parallel research subagent "
+            "Research a set of questions by fanning each out to its own research subagent "
             "(flash model, research-only tools, its own step budget). Put one research question "
-            "per line — each line is delegated separately, so split independent questions apart "
-            "to parallelize. The combined findings return as tool results. Use this for "
-            "multi-part or open-ended investigation instead of a long single-query search.",
+            "per line — each line is delegated separately and they all run at the same time, so "
+            "splitting independent questions apart costs nothing extra. The combined findings "
+            "return as tool results. Use this for multi-part or open-ended investigation "
+            "instead of a long single-query search.",
             ResearchArgs,
             lambda queries: "research is handled by the graph's subagent fan-out",
+        ),
+        _tool(
+            "task",
+            "Delegate a self-contained piece of work to a sub-agent and get back only its "
+            "conclusion — the sub-agent's own tool output never enters your context, which is "
+            "what makes this worth doing for anything that would take many reads. "
+            "agent_type picks its tools: 'explore' reads and searches code, 'research' browses "
+            "the web, 'general' gets the full set. The sub-agent starts fresh with no memory of "
+            "this conversation, so the prompt must be complete on its own and say what to report. "
+            "Issue several task calls in one message to run them concurrently. Sub-agents cannot "
+            "spawn further sub-agents or ask the user questions.",
+            TaskArgs,
+            lambda agent_type, prompt: "task is handled by the graph's subagent fan-out",
+        ),
+        _tool(
+            "update_todos",
+            _todo.UPDATE_TODOS_DESCRIPTION,
+            TodoArgs,
+            update_todos,
+        ),
+        # ---- conferring with the user ---------------------------------------
+        # Bodies are unreachable: the graph resolves both via interrupt() before
+        # the tools node executes anything. They exist so the schema reaches the
+        # model, and are only offered when the client says it can answer.
+        _tool(
+            "ask_user",
+            _ask.ASK_USER_DESCRIPTION,
+            AskUserArgs,
+            lambda question, options="", header="", multi_select="": (
+                "ask_user is resolved by the graph's interrupt"
+            ),
+        ),
+        _tool(
+            "present_plan",
+            _ask.PRESENT_PLAN_DESCRIPTION,
+            PresentPlanArgs,
+            lambda plan, question="", options="": (
+                "present_plan is resolved by the graph's interrupt"
+            ),
         ),
         # ---- directory ops, code quality, debugging, tests -------------------
         _tool(

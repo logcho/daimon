@@ -62,7 +62,12 @@ function upsertStep(steps: Step[], ev: StepEvent): Step[] {
 
 /**
  * Fold one agent event into the message list. Pure — returns a new list.
- * chat-only scope: ui_action / host_action / live_frame events are ignored.
+ *
+ * chat-only scope: ui_action / host_action / live_frame are ignored, as are
+ * the streaming-detail events the CLI renders (assistant_delta, usage, todo,
+ * compaction) — `done` still carries the complete result, so the app converges
+ * on the same state without them. `ask` never reaches the app: the server only
+ * offers the ask tools to clients that advertise the capability on /task.
  */
 export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMessage[] {
   const idx = lastAssistant(messages);

@@ -20,6 +20,12 @@ dependencies = [
     "trafilatura>=2.0",
 ]
 
+[project.optional-dependencies]
+# Optional provider. Imported lazily by providers.py, so a DeepSeek-only
+# install never pays for it: `uv sync --extra anthropic` to enable
+# `DAIMON_MODEL=anthropic:claude-sonnet-5`.
+anthropic = ["langchain-anthropic>=1.0"]
+
 [project.scripts]
 daimon-agent = "daimon_agent.server:main"
 daimon-chat = "daimon_agent.cli:main"

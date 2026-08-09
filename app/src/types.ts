@@ -12,16 +12,94 @@ export interface StepEvent {
   parent_step_id?: string;
   /** Research query text that spawned this sub-agent. */
   subagent_query?: string;
+  /** Short summary of the call's arguments (a path, a query) for display. */
+  detail?: string;
+  elapsed_ms?: number;
+  /** Sub-agent this step belongs to, so concurrent agents group instead of interleave. */
+  agent_id?: string;
+  agent_label?: string;
+}
+
+/** A chunk of assistant text as the model writes it. The full text still
+ *  arrives on `done`, so ignoring these loses nothing. */
+export interface AssistantDeltaEvent {
+  type: "assistant_delta";
+  text: string;
+  /** Absent means the answer itself; "reasoning" is the model's thinking trace. */
+  channel?: "reasoning";
+  agent_id?: string;
+}
+
+/** Token usage for one model call. `cost_usd` is absent for an unpriced model. */
+export interface UsageEvent {
+  type: "usage";
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd?: number;
+  role?: string;
+  agent_id?: string;
+}
+
+export type TodoStatus = "pending" | "in_progress" | "done";
+
+export interface TodoItem {
+  id: string;
+  text: string;
+  status: TodoStatus;
+}
+
+/** The whole checklist every time — a snapshot, not a patch. */
+export interface TodoEvent {
+  type: "todo";
+  items: TodoItem[];
+}
+
+export interface CompactionEvent {
+  type: "compaction";
+  before_tokens: number;
+  after_tokens: number;
+  dropped: number;
+}
+
+export interface UsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd?: number;
 }
 
 export interface DoneEvent {
   type: "done";
   result: string;
+  usage?: UsageTotals;
 }
 
 export interface ErrorEvent {
   type: "error";
   message: string;
+}
+
+export interface AskOption {
+  label: string;
+  description: string;
+}
+
+/** Terminal event: the turn suspended on an interrupt and is awaiting an
+ *  answer. Reply with POST /resume carrying this `id`; the turn continues from
+ *  where it paused. */
+export interface AskEvent {
+  type: "ask";
+  id: string;
+  kind: "question" | "plan";
+  question: string;
+  options: AskOption[];
+  multi_select: boolean;
+  plan?: string;
+  header?: string;
 }
 
 export interface UiActionEvent {
@@ -43,8 +121,13 @@ export interface LiveFrameEvent {
 
 export type AgentEvent =
   | StepEvent
+  | AssistantDeltaEvent
+  | UsageEvent
+  | TodoEvent
+  | CompactionEvent
   | DoneEvent
   | ErrorEvent
+  | AskEvent
   | UiActionEvent
   | HostActionEvent
   | LiveFrameEvent;

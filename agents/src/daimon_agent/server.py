@@ -28,11 +28,13 @@ from dotenv import dotenv_values
 from . import live_frames
 from .browser import aclose_browser, build_browser
 from .config import Settings
-from .events import error_event
+from .envfile import patch_env_file
+from .events import TERMINAL_TYPES, error_event
 from .graph import build_graph, close_checkpointer, make_sqlite_checkpointer
 from .memory import MemoryStore
 from .model import ModelRouter
-from .run import run_turn
+from .providers import KNOWN_PROVIDERS, provider_available
+from .run import resume_turn, run_turn
 from .skills.injector import discover_skills
 from .tools import build_tools
 from .tools.repl import close_all_repls
@@ -248,40 +250,43 @@ async def create_app(
             "workspace": str(s.resolved_workspace_dir.resolve()),
         })
 
-    async def task(request: web.Request) -> web.StreamResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.Response(status=400, text="invalid json body")
-        instruction = body.get("instruction")
-        if not isinstance(instruction, str) or not instruction.strip():
-            return web.Response(status=400, text="instruction is required")
-        session_id = str(body.get("session_id") or "default")
-        # agent parameter is accepted for backward compat but ignored —
-        # there is a single unified agent now.
-        print(f"[daimon-agent] received task: {instruction}", file=sys.stderr)
+    async def _stream_turn_response(
+        request: web.Request,
+        session_id: str,
+        run: Any,  # Callable[[Callable[[dict], None]], Awaitable[Any]]
+    ) -> web.StreamResponse:
+        """Run one unit of turn work and stream its TaskEvents as NDJSON.
 
-        graph = app["graph"]
-
+        Shared by /task (a new turn) and /resume (continuing a turn that
+        suspended on an interrupt): they differ only in what `run` does, so
+        everything subtle about the streaming lives here once — the ordered
+        queue, the terminal-chunk close, the turn registry, and the
+        per-session lock.
+        """
         response = web.StreamResponse(headers={"content-type": NDJSON})
         await response.prepare(request)
 
         # Events must be emitted from sync graph-node context in order, so the
         # emit closure enqueues and a single writer task drains the queue.
         queue: asyncio.Queue[tuple[bytes, bool] | None] = asyncio.Queue()
-        # `terminal_emitted` — a done|error event was enqueued (done|error is
-        # exclusive per the contract). The writer closes the body right after
-        # the terminal event itself, so the client's stream ends at the result
-        # instead of staying open through reflection/teardown (a connection
-        # that dies in that window made the client's final read fail with
-        # hyper's "incomplete message", surfacing as a spurious stream error
-        # after the result). The terminal-ness rides on the *chunk*, not this
-        # flag: the flag is set as soon as the terminal event is enqueued,
+        # `terminal_emitted` — a done|error|ask event was enqueued (they are
+        # mutually exclusive per the contract). The writer closes the body
+        # right after the terminal event itself, so the client's stream ends at
+        # the result instead of staying open through reflection/teardown (a
+        # connection that dies in that window made the client's final read fail
+        # with hyper's "incomplete message", surfacing as a spurious stream
+        # error after the result). The terminal-ness rides on the *chunk*, not
+        # this flag: the flag is set as soon as the terminal event is enqueued,
         # which can happen while earlier chunks are still queued — checking
         # the flag after every write would drop those earlier chunks' tails
         # and the done itself. FIFO + synchronous emit keeps everything before
         # the terminal event ahead of it in the queue.
         terminal_emitted = False
+        # Set when the client hangs up mid-turn (the user pressed Esc, or the
+        # app quit). The writer notices first, because it is the only thing
+        # touching the socket — it cancels the work rather than letting an
+        # abandoned turn keep burning tokens.
+        client_gone = asyncio.Event()
 
         async def writer() -> None:
             while True:
@@ -289,7 +294,11 @@ async def create_app(
                 if item is None:
                     break
                 chunk, is_terminal = item
-                await response.write(chunk)
+                try:
+                    await response.write(chunk)
+                except (ConnectionResetError, ClientConnectionResetError):
+                    client_gone.set()
+                    break
                 if is_terminal:
                     break
 
@@ -297,15 +306,12 @@ async def create_app(
 
         def emit(event: dict) -> None:
             nonlocal terminal_emitted
-            is_terminal = event.get("type") in ("done", "error")
+            is_terminal = event.get("type") in TERMINAL_TYPES
             if is_terminal:
                 terminal_emitted = True
             queue.put_nowait(
                 (json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n", is_terminal)
             )
-
-        def frame_task(emit_fn) -> asyncio.Task | None:
-            return live_frames.start(emit_fn, build_browser(settings), settings)
 
         # Register the turn globally *before* acquiring the per-session lock —
         # a turn queued behind another for the same session is still activity
@@ -318,26 +324,35 @@ async def create_app(
 
         lock = app["locks"].setdefault(session_id, asyncio.Lock())
         async with lock:  # one turn per session at a time, like legacy's queue
+            work = asyncio.create_task(run(emit))
+            disconnect = asyncio.create_task(client_gone.wait())
             try:
-                await run_turn(
-                    instruction,
-                    session_id,
-                    settings,
-                    emit,
-                    graph=graph,
-                    memory=app["memory"],
-                    skills=app["skills"],
-                    router=app["router"],
-                    live_frames=frame_task,
+                # Race the work against the client hanging up. run_turn owns
+                # its own error handling, so a cancel here is the only way the
+                # work ends early.
+                await asyncio.wait(
+                    {work, disconnect}, return_when=asyncio.FIRST_COMPLETED
                 )
+                if not work.done():
+                    work.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await work
+                    print(
+                        f"[daimon-agent] client disconnected — cancelled turn "
+                        f"for session {session_id}",
+                        file=sys.stderr,
+                    )
+                else:
+                    await work  # re-raise anything run_turn let escape
             except Exception as exc:  # last-ditch backstop, port of server.ts's .catch
                 print(f"[daimon-agent] unhandled error running task: {exc}", file=sys.stderr)
-                if not terminal_emitted:  # done|error is exclusive per the contract
+                if not terminal_emitted:  # done|error|ask is exclusive per the contract
                     try:
                         emit(error_event(str(exc)))
                     except Exception:
                         pass  # response may already be closed
             finally:
+                disconnect.cancel()
                 # De-register the turn so /status stops reporting busy.
                 async with reg["lock"]:
                     reg["count"] -= 1
@@ -349,14 +364,85 @@ async def create_app(
                 await queue.put(None)
                 await writer_task
                 # The terminal chunk has been written; the client ends its
-                # read at the done|error line and closes the connection right
-                # after (stream-end-is-the-result contract), so this final
-                # chunk-footer write can race the close — a reset here is
+                # read at the done|error|ask line and closes the connection
+                # right after (stream-end-is-the-result contract), so this
+                # final chunk-footer write can race the close — a reset here is
                 # expected, not an error. Best-effort, like the terminal
                 # write above.
-                with contextlib.suppress(ClientConnectionResetError):
+                with contextlib.suppress(ClientConnectionResetError, ConnectionResetError):
                     await response.write_eof()
         return response
+
+    def _frame_task(emit_fn) -> asyncio.Task | None:
+        return live_frames.start(emit_fn, build_browser(app["settings"]), app["settings"])
+
+    async def task(request: web.Request) -> web.StreamResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid json body")
+        instruction = body.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            return web.Response(status=400, text="instruction is required")
+        session_id = str(body.get("session_id") or "default")
+        # What the client can render. "ask" is the one that matters: the agent
+        # is only offered ask_user/present_plan when somebody is there to
+        # answer, so a one-shot CLI or the chat app never gets asked a question
+        # it would hang on.
+        raw_caps = body.get("capabilities")
+        capabilities = [str(c) for c in raw_caps] if isinstance(raw_caps, list) else []
+        mode = body.get("mode") if body.get("mode") in ("plan", "normal") else "normal"
+        # agent parameter is accepted for backward compat but ignored —
+        # there is a single unified agent now.
+        print(f"[daimon-agent] received task: {instruction}", file=sys.stderr)
+
+        graph = app["graph"]
+
+        async def run(emit) -> Any:
+            return await run_turn(
+                instruction,
+                session_id,
+                app["settings"],
+                emit,
+                graph=graph,
+                memory=app["memory"],
+                skills=app["skills"],
+                router=app["router"],
+                live_frames=_frame_task,
+                capabilities=capabilities,
+                mode=mode,
+            )
+
+        return await _stream_turn_response(request, session_id, run)
+
+    async def resume(request: web.Request) -> web.StreamResponse:
+        """POST /resume — answer a question the agent asked and continue the
+        turn from exactly where it suspended. The checkpointer holds the state,
+        so this survives the client reconnecting or the turn being answered
+        much later."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid json body")
+        session_id = str(body.get("session_id") or "default")
+        if "answer" not in body:
+            return web.Response(status=400, text="answer is required")
+        answer = body["answer"]
+        graph = app["graph"]
+
+        async def run(emit) -> Any:
+            return await resume_turn(
+                answer,
+                session_id,
+                app["settings"],
+                emit,
+                graph=graph,
+                memory=app["memory"],
+                router=app["router"],
+                live_frames=_frame_task,
+            )
+
+        return await _stream_turn_response(request, session_id, run)
 
     async def status(request: web.Request) -> web.Response:
         """Global busy state — the pill polls this to drive its activity dot.
@@ -396,9 +482,26 @@ async def create_app(
         # environment (e.g. the SDK's own fallback) — check both so the
         # settings tab shows the real state.
         key_configured = bool(s.api_key or os.environ.get("DEEPSEEK_API_KEY"))
+        anthropic_key = bool(
+            s.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+        )
         return web.json_response({
             "model": s.model,
             "flash_model": s.resolved_flash_model,
+            "provider": s.provider,
+            # What this install can actually run, and which keys it holds —
+            # the two failure modes (package missing vs. key missing) are
+            # different problems with different fixes.
+            "providers": {
+                name: {
+                    "installed": provider_available(name),
+                    "key_configured": {
+                        "deepseek": key_configured,
+                        "anthropic": anthropic_key,
+                    }[name],
+                }
+                for name in KNOWN_PROVIDERS
+            },
             "api_base": s.api_base or "(default)",
             "api_key_configured": key_configured,
             "workspace": str(s.resolved_workspace_dir.resolve()),
@@ -414,28 +517,39 @@ async def create_app(
         })
 
     async def config_update_handler(request: web.Request) -> web.Response:
-        """POST /config — update configuration (currently: api_key only).
+        """POST /config — update configuration (API keys).
         Writes to the .env file so the change survives restarts."""
         try:
             body = await request.json()
         except Exception:
             return web.Response(status=400, text="invalid json body")
 
-        api_key = body.get("api_key")
-        if api_key is not None:
-            if not isinstance(api_key, str) or not api_key.strip():
-                return web.Response(status=400, text="api_key must be a non-empty string")
-            env_path = Path.cwd() / ".env"
-            _patch_env_file(env_path, "DEEPSEEK_API_KEY", api_key.strip())
-            # Update in-memory settings so the change takes effect immediately.
-            request.app["settings"] = replace(
-                request.app["settings"], api_key=api_key.strip()
-            )
-            # Rebuild the router so model calls use the new key.
-            request.app["router"] = ModelRouter(request.app["settings"])
-            return web.json_response({"ok": True})
+        # field name in the request → (Settings attribute, env var)
+        writable = {
+            "api_key": ("api_key", "DEEPSEEK_API_KEY"),
+            "anthropic_api_key": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+        }
+        updates: dict[str, str] = {}
+        for field_name, (attr, env_var) in writable.items():
+            value = body.get(field_name)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                return web.Response(
+                    status=400, text=f"{field_name} must be a non-empty string"
+                )
+            patch_env_file(Path.cwd() / ".env", env_var, value.strip())
+            os.environ[env_var] = value.strip()
+            updates[attr] = value.strip()
 
-        return web.Response(status=400, text="no config fields to update")
+        if not updates:
+            return web.Response(status=400, text="no config fields to update")
+
+        # Update in-memory settings so the change takes effect immediately, and
+        # rebuild the router so model calls use the new key.
+        request.app["settings"] = replace(request.app["settings"], **updates)
+        request.app["router"] = ModelRouter(request.app["settings"])
+        return web.json_response({"ok": True})
 
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
@@ -444,27 +558,9 @@ async def create_app(
     app.router.add_get("/config", config_handler)
     app.router.add_post("/config", config_update_handler)
     app.router.add_post("/task", task)
+    app.router.add_post("/resume", resume)
     return app
 
-
-def _patch_env_file(path: Path, key: str, value: str) -> None:
-    """Update or append a KEY=VALUE line in a dotenv file, preserving comments."""
-    if path.exists():
-        lines = path.read_text(encoding="utf-8").splitlines()
-        updated = False
-        new_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith(f"{key}=") or stripped.startswith(f"# {key}="):
-                new_lines.append(f"{key}={value}")
-                updated = True
-            else:
-                new_lines.append(line)
-        if not updated:
-            new_lines.append(f"{key}={value}")
-        path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    else:
-        path.write_text(f"{key}={value}\n", encoding="utf-8")
 
 
 def main() -> None:

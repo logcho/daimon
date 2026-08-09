@@ -1,26 +1,40 @@
 """Fake models for CI tests — no network, no API keys. A ScriptedModel pops
 queued AIMessages per call; a FakeRouter routes pro/flash/judge roles to
-independently-scripted instances and records which roles were used."""
+independently-scripted instances and records which roles were used.
+
+ScriptedModel implements `_astream` as well as `_generate`, because the agent
+node streams: without it BaseChatModel would fall back to wrapping `_generate`
+in a single chunk, which works but wouldn't exercise the accumulation path the
+real models take. `usage_metadata` can be scripted per message so the usage
+accounting is testable without a provider.
+"""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, Optional
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.tools import BaseTool
 
 
 class ScriptedModel(BaseChatModel):
-    """Pops the next queued AIMessage per _generate; answers "Task complete."
+    """Pops the next queued AIMessage per call; answers "Task complete."
     when the script runs dry. Records every call's message list."""
 
     model_name: str = "scripted"  # BaseChatModel requires it
     script: list[AIMessage] = []
     calls: list[list[BaseMessage]] = []
     raise_on_call: bool = False
+    #: Seconds to sleep inside _astream, so a test can prove two subagents
+    #: overlap in time rather than merely both finishing.
+    delay: float = 0.0
 
     def __init__(self, script: Optional[list[AIMessage]] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -31,6 +45,14 @@ class ScriptedModel(BaseChatModel):
         # Scripted models don't need real tool schemas — the graph only asks.
         return self
 
+    def _next(self, messages: list[BaseMessage]) -> AIMessage:
+        if self.raise_on_call:
+            raise RuntimeError("model exploded")
+        self.calls.append(list(messages))
+        if self.script:
+            return self.script.pop(0)
+        return AIMessage(content="Task complete.")
+
     def _generate(
         self,
         messages: list[BaseMessage],
@@ -38,14 +60,41 @@ class ScriptedModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        if self.raise_on_call:
-            raise RuntimeError("model exploded")
-        self.calls.append(list(messages))
-        if self.script:
-            message = self.script.pop(0)
-        else:
-            message = AIMessage(content="Task complete.")
-        return ChatResult(generations=[ChatGeneration(message=message)])
+        return ChatResult(generations=[ChatGeneration(message=self._next(messages))])
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: Optional[list[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        import asyncio
+
+        message = self._next(messages)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        text = message.content if isinstance(message.content, str) else ""
+        # Split the text so consumers see more than one delta — a single-chunk
+        # stream would hide ordering bugs in the accumulation.
+        pieces = [text[i : i + 8] for i in range(0, len(text), 8)] or [""]
+        for i, piece in enumerate(pieces):
+            last = i == len(pieces) - 1
+            chunk = AIMessageChunk(
+                content=piece,
+                # Tool calls and usage ride the final chunk, as they do for a
+                # real provider.
+                tool_calls=message.tool_calls if last else [],
+                usage_metadata=getattr(message, "usage_metadata", None) if last else None,
+                # A scripted message's own metadata wins, so a test can name
+                # the model it wants priced.
+                response_metadata=(
+                    {"model_name": self.model_name, **(message.response_metadata or {})}
+                    if last
+                    else {}
+                ),
+            )
+            yield ChatGenerationChunk(message=chunk)
 
     @property
     def _llm_type(self) -> str:
@@ -69,7 +118,11 @@ class FakeTool(BaseTool):
 
 
 class FakeRouter:
-    """Pro/flash/judge roles, each a ScriptedModel with its own script."""
+    """Pro/flash/judge roles, each a ScriptedModel with its own script.
+
+    Mirrors ModelRouter's surface, including the `streaming` keyword the graph
+    passes — a scripted model streams either way, so it is accepted and
+    ignored."""
 
     def __init__(
         self,
@@ -77,18 +130,27 @@ class FakeRouter:
         flash_script: Optional[list[AIMessage]] = None,
         judge_script: Optional[list[AIMessage]] = None,
     ) -> None:
-        self._pro = ScriptedModel(pro_script)
-        self._flash = ScriptedModel(flash_script)
-        self._judge = ScriptedModel(judge_script)
+        self._pro = ScriptedModel(pro_script, model_name="scripted-pro")
+        self._flash = ScriptedModel(flash_script, model_name="scripted-flash")
+        self._judge = ScriptedModel(judge_script, model_name="scripted-judge")
 
-    def pro(self) -> ScriptedModel:
+    def pro(self, *, streaming: bool = False) -> ScriptedModel:
         return self._pro
 
-    def flash(self) -> ScriptedModel:
+    def flash(self, *, streaming: bool = False) -> ScriptedModel:
         return self._flash
 
     def judge(self) -> ScriptedModel:
         return self._judge
+
+    def for_role(self, role: str, *, streaming: bool = False) -> ScriptedModel:
+        return self._pro if role == "pro" else self._flash
+
+    def spec_for_role(self, role: str) -> str:
+        return "scripted-pro" if role == "pro" else "scripted-flash"
+
+    def model_name(self, role: str) -> str:
+        return self.spec_for_role(role)
 
 
 def tool_call(name: str, args: dict, id: str | None = None, content: str = "") -> AIMessage:

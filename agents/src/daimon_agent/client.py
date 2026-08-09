@@ -11,7 +11,8 @@ and stop one:
   (`daimon-agent.pid`, env `DAIMON_PIDFILE`) so the pidfile always names the
   live server — no spawner-side write race.
 - `stream_turn` streams one `/task` turn (line-framed NDJSON, terminal event
-  = `done`/`error`) through a caller-provided `aiohttp.ClientSession`.
+  = `done`/`error`/`ask`) through a caller-provided `aiohttp.ClientSession`;
+  `resume_turn` answers an `ask` and streams the continuation the same way.
 - `stop_server` kills only a server that *we* spawned: pidfile present AND
   pid alive AND the recorded port still answers `/health` (never a recycled
   pid). Adopted and app-managed servers are left alone.
@@ -41,6 +42,7 @@ from typing import Any, Callable
 import aiohttp
 
 from .config import Settings
+from .events import TERMINAL_TYPES
 
 # The CLI-owned run dir. Deliberately NOT the Tauri app's run dir, whose
 # orphan sweep would kill our server on app exit.
@@ -294,32 +296,20 @@ async def stop_server(run_dir: Path | None = None) -> tuple[bool, str]:
 
 # --- the task stream ---------------------------------------------------------
 
-async def stream_turn(
+async def _stream_ndjson(
     http: aiohttp.ClientSession,
-    port: int,
-    session_id: str,
-    instruction: str,
+    url: str,
+    body: dict,
     emit: Callable[[dict[str, Any]], None],
-    agent: str | None = None,  # deprecated — single unified agent; kept for backward compat
-) -> str | None:
-    """POST one `/task` and stream the NDJSON events to `emit`. Returns the
-    `done` result, or None on an `error` event. Raises ClientError on
-    transport failure, HTTP rejection, malformed events, or a stream that
-    ends without a terminal event. The caller owns `http` (the CLI keeps one
-    long-lived session for the whole loop; tests pass TestClient.session).
-    """
+) -> dict[str, Any]:
+    """POST `body` and stream the NDJSON response to `emit`, returning the
+    terminal event. Shared by `stream_turn` and `resume_turn` — they differ
+    only in endpoint and payload."""
     try:
-        body: dict = {"instruction": instruction, "session_id": session_id}
-        if agent:
-            body["agent"] = agent  # backward compat — server ignores it
-        async with http.post(
-            f"http://127.0.0.1:{port}/task",
-            json=body,
-        ) as resp:
+        async with http.post(url, json=body) as resp:
             if resp.status != 200:
                 raise ClientError(f"server rejected the task (HTTP {resp.status})")
-            result: str | None = None
-            terminal = False
+            terminal_event: dict[str, Any] | None = None
             # Frame the stream ourselves: resp.content yields raw chunks that
             # can split an event mid-line (and the server writes one event
             # per \n-terminated line), so buffer partial lines between reads.
@@ -339,20 +329,75 @@ async def stream_turn(
                     except json.JSONDecodeError as exc:
                         raise ClientError(f"bad event from server: {line[:120]!r}") from exc
                     emit(event)
-                    etype = event.get("type")
-                    if etype in ("done", "error"):
-                        result = event.get("result") if etype == "done" else None
-                        terminal = True
+                    if event.get("type") in TERMINAL_TYPES:
+                        terminal_event = event
                         break
-                if terminal:
+                if terminal_event is not None:
                     break
-            if not terminal:
+            if terminal_event is None:
                 # Stream ended without a terminal event (e.g. the server
                 # died mid-turn and the connection just EOF'd).
                 raise ClientError("stream ended without a done/error event")
-            return result
+            return terminal_event
     except aiohttp.ClientError as exc:
         raise ClientError(f"could not reach the daimon server: {exc}") from exc
+
+
+async def stream_turn(
+    http: aiohttp.ClientSession,
+    port: int,
+    session_id: str,
+    instruction: str,
+    emit: Callable[[dict[str, Any]], None],
+    agent: str | None = None,  # deprecated — single unified agent; kept for backward compat
+    *,
+    capabilities: list[str] | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """POST one `/task` and stream the NDJSON events to `emit`.
+
+    Returns the terminal event dict — `done` (with `result`), `error` (with
+    `message`), or `ask` (the turn suspended awaiting an answer; reply with
+    `resume_turn`). Use `turn_result()` when all you want is the text.
+
+    Raises ClientError on transport failure, HTTP rejection, malformed events,
+    or a stream that ends without a terminal event. The caller owns `http` (the
+    CLI keeps one long-lived session for the whole loop; tests pass
+    TestClient.session).
+
+    `capabilities` advertises what this client can render — passing "ask" is
+    what makes the server offer the agent its ask_user/present_plan tools, so a
+    client that can't answer a question never gets asked one.
+    """
+    body: dict = {"instruction": instruction, "session_id": session_id}
+    if agent:
+        body["agent"] = agent  # backward compat — server ignores it
+    if capabilities:
+        body["capabilities"] = capabilities
+    if mode:
+        body["mode"] = mode
+    return await _stream_ndjson(http, f"http://127.0.0.1:{port}/task", body, emit)
+
+
+async def resume_turn(
+    http: aiohttp.ClientSession,
+    port: int,
+    session_id: str,
+    ask_id: str,
+    answer: Any,
+    emit: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Answer a suspended `ask` and stream the rest of the turn. Same return
+    contract as `stream_turn` — the continuation can itself end in another
+    `ask`, so callers loop until they see `done` or `error`."""
+    body = {"session_id": session_id, "ask_id": ask_id, "answer": answer}
+    return await _stream_ndjson(http, f"http://127.0.0.1:{port}/resume", body, emit)
+
+
+def turn_result(terminal: dict[str, Any]) -> str | None:
+    """The result text from a terminal event, or None for error/ask. Keeps the
+    old `stream_turn` return shape available to callers that only want text."""
+    return terminal.get("result") if terminal.get("type") == "done" else None
 
 
 # --- introspection -----------------------------------------------------------

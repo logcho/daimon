@@ -133,3 +133,111 @@ async def test_config_endpoint(client: TestClient) -> None:
     assert isinstance(body["compaction_chars"], int)
     assert isinstance(body["temperature"], (int, float))
     assert isinstance(body["pinchtab_healthy"], bool)
+
+
+# --- /resume: answering a question the agent asked ---------------------------
+
+async def _post(client: TestClient, path: str, body: dict) -> list[dict]:
+    resp = await client.post(path, json=body)
+    assert resp.status == 200, await resp.text()
+    data = await resp.read()
+    return [json.loads(line) for line in data.decode().splitlines() if line.strip()]
+
+
+async def test_task_ending_in_ask_then_resume_finishes_the_turn(client: TestClient) -> None:
+    """The full bidirectional loop over the wire: /task closes on an `ask`,
+    /resume carries the answer back and the same turn completes."""
+    from fakes import tool_call
+
+    graph = client.app["graph"]
+    graph.router._pro.script = [
+        tool_call("ask_user", {"question": "Which?", "options": "A|first\nB|second"}, id="c-ask"),
+        AIMessage(content="Going with A."),
+    ]
+
+    events = await _post(client, "/task", {
+        "instruction": "pick one", "session_id": "resume-1", "capabilities": ["ask"],
+    })
+    assert events[-1]["type"] == "ask"
+    assert events[-1]["question"] == "Which?"
+    assert [o["label"] for o in events[-1]["options"]] == ["A", "B"]
+    # `ask` is terminal and exclusive — no done alongside it.
+    assert not any(e["type"] == "done" for e in events)
+
+    events = await _post(client, "/resume", {
+        "session_id": "resume-1", "ask_id": events[-1]["id"], "answer": "A",
+    })
+    assert events[-1]["type"] == "done"
+    assert events[-1]["result"] == "Going with A."
+
+
+async def test_ask_tools_are_withheld_from_clients_that_cannot_answer(client: TestClient) -> None:
+    """No `capabilities` means no way to answer, so the turn must finish
+    rather than park on a question — this is what keeps the chat app working
+    unchanged against the same server."""
+    from fakes import tool_call
+
+    graph = client.app["graph"]
+    graph.router._pro.script = [
+        tool_call("ask_user", {"question": "Which?", "options": "A|x"}, id="c-ask"),
+        AIMessage(content="decided myself"),
+    ]
+    events = await _post(client, "/task", {"instruction": "go", "session_id": "nocap-1"})
+    assert events[-1]["type"] == "done"
+    assert not any(e["type"] == "ask" for e in events)
+
+
+async def test_resume_requires_an_answer(client: TestClient) -> None:
+    resp = await client.post("/resume", json={"session_id": "x"})
+    assert resp.status == 400
+
+
+async def test_resume_bad_json_returns_400(client: TestClient) -> None:
+    resp = await client.post(
+        "/resume", data=b"not json", headers={"content-type": "application/json"}
+    )
+    assert resp.status == 400
+
+
+async def test_done_carries_usage_totals(client: TestClient) -> None:
+    graph = client.app["graph"]
+    graph.router._pro.script = [AIMessage(content="hi")]
+    events = await _post(client, "/task", {"instruction": "hi", "session_id": "usage-1"})
+    assert "usage" in events[-1]
+    assert "input_tokens" in events[-1]["usage"]
+
+
+async def test_client_disconnect_cancels_the_turn(settings) -> None:
+    """Esc in the CLI aborts the request. The server must treat that as a
+    cancel — an abandoned turn otherwise keeps calling the model and billing
+    for output nobody will read."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_graph_builder(settings, *, memory=None):
+        graph, checkpointer, router = await fake_graph_builder(settings, memory=memory)
+        original = router._pro._astream
+
+        async def blocking(*args, **kwargs):
+            started.set()
+            await release.wait()  # never released — the disconnect must win
+            async for chunk in original(*args, **kwargs):
+                yield chunk
+
+        router._pro._astream = blocking
+        return graph, checkpointer, router
+
+    app = await create_app(settings, graph_builder=slow_graph_builder)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/task", json={"instruction": "slow", "session_id": "cancel-1"}
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        resp.close()  # the user pressed Esc
+
+        # The registry drains, which only happens if the turn was cancelled.
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if app["turn_registry"]["count"] == 0:
+                break
+        assert app["turn_registry"]["count"] == 0, "the abandoned turn kept running"

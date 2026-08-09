@@ -61,10 +61,12 @@ class _FakeSession:
         self._response = response
         self._raise_err = raise_err
         self.posted: list[dict] = []
+        self.urls: list[str] = []
 
     def post(self, url, json=None):
         if self._raise_err is not None:
             raise self._raise_err
+        self.urls.append(url)
         self.posted.append(json)
         return self._response
 
@@ -93,10 +95,53 @@ async def test_stream_turn_posts_body_and_returns_done_result():
     done = {"type": "done", "result": "The answer is 42."}
     session = _FakeSession(_FakeResponse(chunks=[_ndjson(done)]))
     events: list[dict] = []
-    result = await client.stream_turn(session, 4711, "cli", "q", events.append)
-    assert result == "The answer is 42."
+    terminal = await client.stream_turn(session, 4711, "cli", "q", events.append)
+    assert client.turn_result(terminal) == "The answer is 42."
     assert events == [done]
     assert session.posted == [{"instruction": "q", "session_id": "cli"}]
+
+
+async def test_stream_turn_advertises_capabilities_and_mode():
+    """The server gates the ask tools on the client saying it can answer, so
+    what goes in the body decides whether the agent may ask a question."""
+    done = {"type": "done", "result": "ok"}
+    session = _FakeSession(_FakeResponse(chunks=[_ndjson(done)]))
+    await client.stream_turn(
+        session, 4711, "cli", "q", lambda e: None, capabilities=["ask"], mode="plan"
+    )
+    assert session.posted == [
+        {"instruction": "q", "session_id": "cli", "capabilities": ["ask"], "mode": "plan"}
+    ]
+
+
+async def test_stream_turn_returns_an_ask_as_terminal():
+    """`ask` closes the stream like done/error — the turn is parked in the
+    checkpointer waiting for resume_turn, not finished."""
+    ask = {
+        "type": "ask",
+        "id": "a1",
+        "kind": "question",
+        "question": "Which one?",
+        "options": [{"label": "A", "description": ""}],
+        "multi_select": False,
+    }
+    session = _FakeSession(_FakeResponse(chunks=[_ndjson(ask)]))
+    terminal = await client.stream_turn(session, 4711, "cli", "q", lambda e: None)
+    assert terminal == ask
+    assert client.turn_result(terminal) is None
+
+
+async def test_resume_turn_posts_the_answer():
+    done = {"type": "done", "result": "done after answering"}
+    session = _FakeSession(_FakeResponse(chunks=[_ndjson(done)]))
+    terminal = await client.resume_turn(
+        session, 4711, "cli", "a1", "Option A", lambda e: None
+    )
+    assert client.turn_result(terminal) == "done after answering"
+    assert session.urls == ["http://127.0.0.1:4711/resume"]
+    assert session.posted == [
+        {"session_id": "cli", "ask_id": "a1", "answer": "Option A"}
+    ]
 
 
 async def test_stream_turn_multiple_events_in_one_chunk():
@@ -104,8 +149,8 @@ async def test_stream_turn_multiple_events_in_one_chunk():
     done = {"type": "done", "result": "ok"}
     session = _FakeSession(_FakeResponse(chunks=[_ndjson(step, done)]))
     events: list[dict] = []
-    result = await client.stream_turn(session, 4711, "cli", "q", events.append)
-    assert result == "ok"
+    terminal = await client.stream_turn(session, 4711, "cli", "q", events.append)
+    assert client.turn_result(terminal) == "ok"
     assert events == [step, done]
 
 
@@ -117,8 +162,8 @@ async def test_stream_turn_event_split_across_chunks():
     mid = len(raw) // 2
     session = _FakeSession(_FakeResponse(chunks=[raw[:mid], raw[mid:]]))
     events: list[dict] = []
-    result = await client.stream_turn(session, 4711, "cli", "q", events.append)
-    assert result == "fin"
+    terminal = await client.stream_turn(session, 4711, "cli", "q", events.append)
+    assert client.turn_result(terminal) == "fin"
     assert events == [running, finished, done]
 
 
@@ -126,15 +171,16 @@ async def test_stream_turn_non_ascii_round_trip():
     done = {"type": "done", "result": "héllo — 中文 ✓"}
     session = _FakeSession(_FakeResponse(chunks=[_ndjson(done)]))
     events: list[dict] = []
-    result = await client.stream_turn(session, 4711, "cli", "q", events.append)
-    assert result == "héllo — 中文 ✓"
+    terminal = await client.stream_turn(session, 4711, "cli", "q", events.append)
+    assert client.turn_result(terminal) == "héllo — 中文 ✓"
 
 
-async def test_stream_turn_error_event_returns_none():
+async def test_stream_turn_error_event_returns_the_error():
     err = {"type": "error", "message": "boom"}
     session = _FakeSession(_FakeResponse(chunks=[_ndjson(err)]))
-    result = await client.stream_turn(session, 4711, "cli", "q", lambda e: None)
-    assert result is None
+    terminal = await client.stream_turn(session, 4711, "cli", "q", lambda e: None)
+    assert terminal == err
+    assert client.turn_result(terminal) is None
 
 
 async def test_stream_turn_truncated_stream_raises():
@@ -164,10 +210,10 @@ async def test_stream_turn_against_real_server(settings):
     async with TestClient(TestServer(app)) as http:
         app["graph"].router._pro.script = [AIMessage(content="The answer is 42.")]
         events: list[dict] = []
-        result = await client.stream_turn(
+        terminal = await client.stream_turn(
             http.session, http.port, "integ", "What is 2+2?", events.append
         )
-        assert result == "The answer is 42."
+        assert client.turn_result(terminal) == "The answer is 42."
         types = [e["type"] for e in events]
         assert types[0] == "step"
         assert types[-1] == "done"

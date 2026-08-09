@@ -8,25 +8,52 @@ bodies, which the prebuilt doesn't expose. The era-1 lesson stands: the
 anti-loop machinery lives in the graph (guardrails.py, applied here), and the
 checkpointer owns conversation history, so there is no module-global
 conversation array and no rollback hack.
+
+Three things here are worth knowing before editing:
+
+- **The agent node streams.** Text reaches the user as the model writes it,
+  which is also why the model call is wrapped rather than a bare `ainvoke`.
+- **Sub-agents run concurrently**, one asyncio task each. Event routing works
+  because a task inherits a *copy* of the context, so each sub-agent's
+  `set_active_emit` is invisible to its siblings.
+- **`ask_user`/`present_plan` suspend the graph** via `interrupt()`, resolved
+  at the *top* of the tools node before anything executes. Resuming re-runs
+  the node from the start, so no tool may have run yet or it would run twice.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import aiosqlite
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    AnyMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import interrupt
 
 from .compaction import compact_if_needed
 from .emitter import _active, emit, set_active_emit
-from .events import step_event
+from .events import (
+    ask_event,
+    assistant_delta_event,
+    compaction_event,
+    step_event,
+    usage_event,
+)
 from .guardrails import (
     check_near_duplicate,
     check_page_unchanged,
@@ -37,6 +64,8 @@ from .guardrails import (
 from .model import ModelRouter
 from .prompts import build_system_prompt
 from .state import AgentState
+from .tools.ask import ASK_TOOLS, parse_options
+from .usage import extract_usage, record
 from collections.abc import Callable
 
 # Era-1 value, kept.
@@ -45,8 +74,43 @@ RECURSION_LIMIT = 40
 # work, not a second full agent run.
 SUBAGENT_RECURSION_LIMIT = 15
 MAX_RESEARCH_FAN_OUT = 3
+# `task` spawns are a little more generous than `research`: they do real work
+# rather than one search each, and they now run concurrently, so the cost of
+# one more is latency-free.
+MAX_SUBAGENT_FAN_OUT = 4
+
 # The research-only tool set delegated to each subagent (no nested research).
 RESEARCH_SUBAGENT_TOOLS = frozenset({"web_search", "open_url", "read_page", "extract_text", "web_fetch"})
+# Read-only file tools — an `explore` subagent maps the codebase and reports
+# back without the parent paying context for everything it read.
+EXPLORE_SUBAGENT_TOOLS = frozenset({"read_file", "glob_files", "grep_files", "list_directory"})
+# Tools no subagent ever gets: spawning (no nesting — a fan-out of fan-outs
+# has no budget that holds) and asking (only the main agent talks to the user).
+NON_DELEGABLE_TOOLS = frozenset({"research", "task"}) | ASK_TOOLS
+
+#: agent_type → the tools it gets. None means "everything delegable".
+SUBAGENT_TOOLSETS: dict[str, frozenset[str] | None] = {
+    "research": RESEARCH_SUBAGENT_TOOLS,
+    "explore": EXPLORE_SUBAGENT_TOOLS,
+    "general": None,
+}
+DEFAULT_AGENT_TYPE = "research"
+
+#: Tools that change something outside the conversation. In plan mode these
+#: are gated behind an approved plan — enforced here rather than left to the
+#: prompt, because a model that ignores an instruction to ask first has
+#: already done the thing by the time you find out.
+MUTATING_TOOLS = frozenset({
+    "write_file", "edit_file", "delete_file", "move_file", "mkdir",
+    "run_shell", "kernel_execute", "save_skill", "stage_terminal_command",
+})
+
+PLAN_REQUIRED = (
+    "Plan mode is on and you have not had a plan approved yet, so {tool} did not "
+    "run and nothing was changed. Call present_plan with what you intend to do — "
+    "the steps, the files you'll touch, anything you're assuming — and wait for "
+    "the user's answer before trying again. Reading and searching are still fine."
+)
 
 
 def _tool_result_text(content: Any) -> str:
@@ -61,6 +125,25 @@ def _tool_result_text(content: Any) -> str:
                 parts.append(str(block))
         return "\n".join(parts)
     return str(content)
+
+
+#: Per-tool, the argument worth showing next to the tool name. First match
+#: wins; a tool with no entry shows no detail rather than a dump of its args.
+_DETAIL_KEYS = ("path", "file_path", "query", "queries", "command", "url", "pattern", "prompt")
+
+
+def _call_detail(args: dict, limit: int = 72) -> str | None:
+    """A one-line summary of a tool call's arguments — the path, the query, the
+    command. This is the difference between "read_file" and "read_file
+    src/daimon_agent/graph.py" in the transcript."""
+    if not isinstance(args, dict):
+        return None
+    for key in _DETAIL_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            text = " ".join(value.split())
+            return text[: limit - 1] + "…" if len(text) > limit else text
+    return None
 
 
 async def make_sqlite_checkpointer(path: Path) -> AsyncSqliteSaver:
@@ -85,32 +168,147 @@ async def close_checkpointer(checkpointer: Any) -> None:
         await conn.close()
 
 
-def _repair_orphaned_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
-    """Inject synthetic error ToolMessages for any AIMessage tool_calls that
-    aren't followed by the corresponding ToolMessages. This heals state that
-    was interrupted mid-turn (killed process, crashed checkpointer, etc.) so
-    the model API doesn't reject the conversation with 'insufficient tool
-    messages following tool_calls message'."""
+def sanitize_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Make a conversation structurally valid for the model API.
+
+    The API enforces a strict pairing: every tool_call gets exactly one
+    response, and every tool response answers a call that came before it.
+    Three ways a history breaks that, all of which happen in practice:
+
+    - **Unanswered calls.** The process was killed mid-turn, so the tool
+      results never landed. Rejected as "insufficient tool messages following
+      tool_calls message". Repaired by injecting a synthetic result.
+    - **Orphaned responses.** Compaction dropped the AIMessage but kept its
+      results — the cut has to land somewhere. Rejected as "must be a response
+      to a preceding message with 'tool_calls'". Repaired by dropping them.
+    - **Duplicate responses.** Two results for one call id. Same rejection.
+      Repaired by keeping the first.
+
+    This runs before every model call *and* before compaction persists its
+    result. The second one matters more than it looks: compaction now rewrites
+    stored history, so an invalid list isn't one bad request — it is a session
+    that can never make a valid request again.
+    """
     repaired: list[AnyMessage] = []
-    for i, msg in enumerate(messages):
-        repaired.append(msg)
-        if not isinstance(msg, AIMessage) or not msg.tool_calls:
-            continue
-        # Collect tool_call_ids that have a corresponding ToolMessage after
-        required = {call["id"] for call in msg.tool_calls}
-        for later in messages[i + 1:]:
-            if isinstance(later, ToolMessage) and later.tool_call_id in required:
-                required.discard(later.tool_call_id)
-        # Inject a synthetic error for each orphaned call
-        for missing_id in sorted(required):
+    # tool_call_ids opened by the last AIMessage that nothing has answered yet.
+    # A dict rather than a set so synthetic results come out in call order.
+    open_calls: dict[str, None] = {}
+
+    def close_batch() -> None:
+        """Answer whatever the last AIMessage left hanging. Called when the run
+        of tool responses ends, so synthetics land *after* the real ones."""
+        for call_id in open_calls:
             repaired.append(
                 ToolMessage(
-                    content="(This tool call was interrupted — the agent process was killed or restarted before it could complete.)",
-                    tool_call_id=missing_id,
+                    content=(
+                        "(This tool call was interrupted — the agent process was "
+                        "killed or restarted before it could complete.)"
+                    ),
+                    tool_call_id=call_id,
                     name="unknown",
                 )
             )
+        open_calls.clear()
+
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            # Keep it only if it answers a call that is open. Anything else is
+            # an orphan or a duplicate, and either makes the request invalid.
+            if msg.tool_call_id in open_calls:
+                del open_calls[msg.tool_call_id]
+                repaired.append(msg)
+            continue
+
+        close_batch()
+        repaired.append(msg)
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            open_calls = {call["id"]: None for call in msg.tool_calls}
+
+    close_batch()
     return repaired
+
+
+#: Old name, kept because the behaviour it described is a subset of this one.
+_repair_orphaned_tool_calls = sanitize_messages
+
+
+def _chunk_reasoning(chunk: Any) -> str:
+    """The model's own reasoning text on a chunk, across provider spellings:
+    DeepSeek puts `reasoning_content` in additional_kwargs; Anthropic emits
+    thinking content blocks."""
+    extra = getattr(chunk, "additional_kwargs", None) or {}
+    text = extra.get("reasoning_content") or extra.get("reasoning")
+    if isinstance(text, str):
+        return text
+    content = getattr(chunk, "content", None)
+    if isinstance(content, list):
+        parts = [
+            str(block.get("thinking", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "thinking"
+        ]
+        return "".join(parts)
+    return ""
+
+
+def _chunk_text(chunk: Any) -> str:
+    """The answer text on a chunk, ignoring non-text content blocks."""
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "".join(parts)
+    return ""
+
+
+def _as_message(final: AIMessageChunk) -> AIMessage:
+    """Convert the accumulated chunk into a plain AIMessage for the state.
+    Storing chunks would work but leaks a streaming detail into the
+    checkpointed history that every reader would then have to handle."""
+    return AIMessage(
+        content=final.content,
+        tool_calls=list(final.tool_calls),
+        invalid_tool_calls=list(final.invalid_tool_calls),
+        additional_kwargs=dict(final.additional_kwargs),
+        response_metadata=dict(final.response_metadata),
+        usage_metadata=final.usage_metadata,
+        id=final.id,
+    )
+
+
+async def stream_model(
+    model: Any,
+    messages: list[AnyMessage],
+    *,
+    emit_deltas: bool = True,
+    agent_id: str | None = None,
+) -> AIMessage:
+    """Run one model call, streaming its output to the event bus.
+
+    Chunks accumulate with `+`, which is what correctly reassembles tool calls
+    arriving as fragments across chunks. `emit_deltas` is off for sub-agents:
+    two agents' narration interleaved in one transcript is noise, and the UI
+    shows their tool steps instead.
+    """
+    final: AIMessageChunk | None = None
+    async for chunk in model.astream(messages):
+        final = chunk if final is None else final + chunk
+        if not emit_deltas:
+            continue
+        reasoning = _chunk_reasoning(chunk)
+        if reasoning:
+            emit(assistant_delta_event(reasoning, channel="reasoning", agent_id=agent_id))
+        text = _chunk_text(chunk)
+        if text:
+            emit(assistant_delta_event(text, agent_id=agent_id))
+    if final is None:  # a model that yielded nothing at all
+        return AIMessage(content="")
+    return _as_message(final)
 
 
 def build_graph(
@@ -118,7 +316,6 @@ def build_graph(
     router: ModelRouter,
     tools: list[BaseTool],
     *,
-    memory: Any = None,
     checkpointer: Any = None,
     role: str = "pro",
     prompt_builder: Callable[..., str] | None = None,
@@ -132,55 +329,203 @@ def build_graph(
     doctrine)."""
 
     tool_by_name = {t.name: t for t in tools}
-    subgraph = None
-    if role == "pro":
-        research_tools = [t for t in tools if t.name in RESEARCH_SUBAGENT_TOOLS]
-        subgraph = build_graph(settings, router, research_tools, role="flash")
+    is_main = role == "pro"
+
+    # One subgraph per agent type, built once here rather than per spawn.
+    # The recursive calls pass role="flash", so a subgraph has no `subagents`
+    # node at all — nesting is structurally impossible, not merely discouraged.
+    subgraphs: dict[str, CompiledStateGraph] = {}
+    if is_main:
+        for agent_type, allowed in SUBAGENT_TOOLSETS.items():
+            subset = [
+                t
+                for t in tools
+                if t.name not in NON_DELEGABLE_TOOLS
+                and (allowed is None or t.name in allowed)
+            ]
+            subgraphs[agent_type] = build_graph(settings, router, subset, role="flash")
+
+    def _visible_tools(state: AgentState) -> list[BaseTool]:
+        """The tools this turn may use. Asking is gated on the client having
+        said it can answer — an agent that asks a question nobody will ever
+        answer has hung, not paused."""
+        if "ask" in (state.get("capabilities") or []):
+            return tools
+        return [t for t in tools if t.name not in ASK_TOOLS]
 
     async def agent_node(state: AgentState) -> dict:
         # Lazy: the model is constructed on the first call, not at graph-build
         # time, so a keyless process can still boot and serve /health. The
         # router caches instances; bind_tools per node call is cheap.
-        model = (router.pro() if role == "pro" else router.flash()).bind_tools(tools)
+        visible = _visible_tools(state)
+        model = router.for_role(role, streaming=True).bind_tools(visible)
         _build_prompt = prompt_builder or build_system_prompt
-        system_prompt = _build_prompt(settings, skills_block=state.get("skills_block", ""))
+        system_prompt = _build_prompt(
+            settings,
+            skills_block=state.get("skills_block", ""),
+            mode=state.get("mode", "normal"),
+        )
+
+        update: dict = {}
         # Compaction (token-threshold summarization via flash) applies only to
         # the main agent — subgraph turns are bounded by their own recursion.
-        messages = (
+        compaction = (
             await compact_if_needed(settings, router, state["messages"])
-            if role == "pro"
-            else list(state["messages"])
+            if is_main
+            else None
         )
-        # Heal interrupted state — if the last turn was killed mid-execution,
-        # orphaned tool_calls would cause the model API to reject the request.
-        messages = _repair_orphaned_tool_calls(messages)
+        if compaction is not None:
+            # Sanitize *before* persisting, not just before the call: the cut
+            # can land inside a tool batch and orphan its results, and a
+            # compacted history is stored, so an invalid one would break every
+            # future turn in this session rather than a single request.
+            compaction.messages = sanitize_messages(compaction.messages)
+            compaction.replacement = sanitize_messages(compaction.replacement)
+            messages = list(compaction.messages)
+            # Persist it, so the next hop starts from the compacted history
+            # instead of re-summarizing the same prefix.
+            update["messages"] = compaction.as_update()
+            emit(
+                compaction_event(
+                    compaction.before_tokens, compaction.after_tokens, compaction.dropped
+                )
+            )
+        else:
+            messages = list(state["messages"])
+
+        # Last line of defence before the request goes out.
+        messages = sanitize_messages(messages)
         messages = [SystemMessage(content=system_prompt), *messages]
-        response = await model.ainvoke(messages)
-        # When the model sends text alongside tool calls (e.g. "Let me first
-        # read the file to understand it"), surface it as a reasoning step so
-        # the user sees the agent's plan before it starts executing.
-        if response.content and isinstance(response.content, str):
-            text = response.content.strip()
-            if text and response.tool_calls:
-                emit(step_event(str(uuid4()), f"Reasoning: {text[:200]}", "done", None))
+
+        response = await stream_model(
+            model,
+            messages,
+            emit_deltas=is_main,
+            agent_id=state.get("agent_id"),
+        )
+        # Close the streamed block. Without this the preamble before a tool
+        # call ("Let me read the file first") runs straight into whatever the
+        # next model call writes, since neither ends with a newline of its own.
+        if is_main and _chunk_text(response).strip():
+            emit(assistant_delta_event("\n", agent_id=state.get("agent_id")))
+
+        # Usage: the main agent's input count is also the live context size.
+        call_usage = extract_usage(response, fallback_model=router.model_name(role))
+        record(call_usage, is_context=is_main)
+        if call_usage is not None:
+            emit(
+                usage_event(
+                    call_usage.model,
+                    call_usage.input_tokens,
+                    call_usage.output_tokens,
+                    cache_read_tokens=call_usage.cache_read_tokens,
+                    cache_write_tokens=call_usage.cache_write_tokens,
+                    cost_usd=call_usage.cost_usd(),
+                    role=role,
+                    agent_id=state.get("agent_id"),
+                )
+            )
+
         for call in response.tool_calls:
             name = call.get("name", "tool")
-            emit(step_event(call["id"], name, "running", name))
-        return {"messages": [response]}
+            emit(
+                step_event(
+                    call["id"],
+                    name,
+                    "running",
+                    name,
+                    detail=_call_detail(call.get("args") or {}),
+                    agent_id=state.get("agent_id"),
+                )
+            )
+
+        update["messages"] = [*update.get("messages", []), response]
+        return update
 
     async def tools_node(state: AgentState) -> dict:
         last: AIMessage = state["messages"][-1]
         results: list[ToolMessage] = []
-        pending: list[tuple[str, str, str]] = list(state.get("research_pending", []))
+        pending: list[tuple[str, str, str, str, str]] = list(state.get("research_pending", []))
         research_used = state.get("research_used", 0)
         call_log = list(state.get("call_log", []))
         last_sig = state.get("last_read_signature")
+        agent_id = state.get("agent_id")
+
+        # --- questions first, before anything executes ---------------------
+        # interrupt() suspends the graph here; resuming re-runs this node from
+        # the top, and the already-answered interrupts replay their recorded
+        # values while the next unanswered one suspends again. Resolving them
+        # ahead of the execution loop is what makes that re-entry safe: if a
+        # tool had already run, the re-run would run it a second time.
+        #
+        # The capability is re-checked here and not only at bind time: a model
+        # that names a tool it wasn't offered would otherwise suspend the turn
+        # on a question no client is listening for, which looks like a hang.
+        ask_enabled = "ask" in (state.get("capabilities") or [])
+        plan_approved = bool(state.get("plan_approved"))
+        gate_plan = state.get("mode") == "plan" and ask_enabled and not plan_approved
+        answers: dict[str, Any] = {}
+        for call in last.tool_calls:
+            if call.get("name") not in ASK_TOOLS:
+                continue
+            if not ask_enabled:
+                continue
+            answers[call.get("id", "")] = interrupt(
+                _ask_payload(call.get("name", ""), call.get("args") or {})
+            )
+            # An answered plan unlocks the mutating tools for the rest of the
+            # turn. Rejecting it ("Revise it") leaves the gate shut, so a
+            # revised plan has to be approved on its own terms.
+            if call.get("name") == "present_plan" and _is_approval(
+                answers[call.get("id", "")]
+            ):
+                plan_approved = True
+                gate_plan = False
 
         for call in last.tool_calls:
             name = call.get("name", "")
             args = call.get("args") or {}
             tool = tool_by_name.get(name)
             call_id = call.get("id", f"call_{len(results)}")
+            detail = _call_detail(args)
+
+            # --- the user's answer, already collected above -----------------
+            if name in ASK_TOOLS:
+                results.append(
+                    ToolMessage(
+                        content=(
+                            _format_answer(answers.get(call_id))
+                            if ask_enabled
+                            else (
+                                f"{name} is not available here — this session has no way to "
+                                f"reach the user mid-turn. Decide it yourself, state the "
+                                f"assumption you made, and continue."
+                            )
+                        ),
+                        tool_call_id=call_id,
+                        name=name,
+                        **({} if ask_enabled else {"status": "error"}),
+                    )
+                )
+                emit(
+                    step_event(
+                        call_id, name, "done" if ask_enabled else "error", name,
+                        agent_id=agent_id,
+                    )
+                )
+                continue
+
+            # --- plan gate (never executes without an approved plan) --------
+            if gate_plan and name in MUTATING_TOOLS:
+                results.append(
+                    ToolMessage(
+                        content=PLAN_REQUIRED.format(tool=name),
+                        tool_call_id=call_id,
+                        name=name,
+                    )
+                )
+                emit(step_event(call_id, name, "error", name, detail=detail, agent_id=agent_id))
+                continue
 
             # --- guardrail pre-check (never executes on a warning) ----------
             if name in RESEARCH_TOOLS:
@@ -192,29 +537,59 @@ def build_graph(
                     warning = warning or check_near_duplicate(str(args.get("query", "")), call_log)
                 if warning:
                     results.append(ToolMessage(content=warning, tool_call_id=call_id, name=name))
-                    emit(step_event(call_id, name, "done", name))
+                    emit(step_event(call_id, name, "done", name, detail=detail, agent_id=agent_id))
                     continue
 
-            # --- research fan-out: delegated to subagents, not executed here -
-            if name == "research":
-                queries = [
-                    q.strip()
-                    for q in str(args.get("queries", "")).splitlines()
-                    if q.strip()
-                ][:MAX_RESEARCH_FAN_OUT]
-                if not queries:
+            # --- fan-out: delegated to subagents, not executed here ---------
+            if name in ("research", "task"):
+                if name == "research":
+                    # `research` fans out: one line, one sub-agent.
+                    queries = [
+                        q.strip()
+                        for q in str(args.get("queries", "")).splitlines()
+                        if q.strip()
+                    ][:MAX_RESEARCH_FAN_OUT]
+                    agent_type = "research"
+                else:
+                    # `task` is one job per call, multi-line prompt and all.
+                    # Concurrency comes from the model issuing several `task`
+                    # calls in one message — they all land in `pending` and the
+                    # subagent node gathers them together.
+                    prompt = str(args.get("prompt", "")).strip()
+                    queries = [prompt] if prompt else []
+                    agent_type = str(args.get("agent_type", DEFAULT_AGENT_TYPE)).strip().lower()
+                    if agent_type not in SUBAGENT_TOOLSETS:
+                        agent_type = DEFAULT_AGENT_TYPE
+                if len(pending) >= MAX_SUBAGENT_FAN_OUT:
                     results.append(
                         ToolMessage(
-                            content="research: no queries found — put one research question per line.",
+                            content=(
+                                f"{name}: already spawning {len(pending)} sub-agents this "
+                                f"step (the cap is {MAX_SUBAGENT_FAN_OUT}). Wait for these "
+                                f"to report back before spawning more."
+                            ),
                             tool_call_id=call_id,
                             name=name,
                         )
                     )
-                    emit(step_event(call_id, name, "done", name))
+                    emit(step_event(call_id, name, "done", name, agent_id=agent_id))
+                    continue
+                if not queries:
+                    results.append(
+                        ToolMessage(
+                            content=(
+                                f"{name}: no queries found — put one research question per line."
+                                if name == "research"
+                                else f"{name}: prompt is required."
+                            ),
+                            tool_call_id=call_id,
+                            name=name,
+                        )
+                    )
+                    emit(step_event(call_id, name, "done", name, agent_id=agent_id))
                     continue
                 for i, query in enumerate(queries):
-                    sub_id = f"{call_id}-{i}"
-                    pending.append((call_id, sub_id, name, query))
+                    pending.append((call_id, f"{call_id}-{i}", name, query, agent_type))
                 # One budget slot for the fan-out, like any other research call.
                 research_used += 1
                 call_log.append((name, json.dumps(args, sort_keys=True, default=str)))
@@ -225,9 +600,10 @@ def build_graph(
                 results.append(
                     ToolMessage(content=message, tool_call_id=call_id, name=name, status="error")
                 )
-                emit(step_event(call_id, name, "error", name))
+                emit(step_event(call_id, name, "error", name, detail=detail, agent_id=agent_id))
                 continue
 
+            started = time.monotonic()
             try:
                 content = _tool_result_text(await tool.ainvoke(args))
             except Exception as exc:  # a tool failure is a message, not a crash
@@ -235,7 +611,14 @@ def build_graph(
                 results.append(
                     ToolMessage(content=message, tool_call_id=call_id, name=name, status="error")
                 )
-                emit(step_event(call_id, name, "error", name))
+                emit(
+                    step_event(
+                        call_id, name, "error", name,
+                        detail=detail,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        agent_id=agent_id,
+                    )
+                )
                 continue
 
             # --- post-execution bookkeeping for research tools ---------------
@@ -250,7 +633,14 @@ def build_graph(
                         content = warning
 
             results.append(ToolMessage(content=content, tool_call_id=call_id, name=name))
-            emit(step_event(call_id, name, "done", name))
+            emit(
+                step_event(
+                    call_id, name, "done", name,
+                    detail=detail,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    agent_id=agent_id,
+                )
+            )
 
         return {
             "messages": results,
@@ -258,64 +648,124 @@ def build_graph(
             "call_log": call_log,
             "last_read_signature": last_sig,
             "research_pending": pending,
+            "plan_approved": plan_approved,
         }
 
     async def subagent_node(state: AgentState) -> dict:
-        """Drain the research fan-out: one flash-model subgraph run per query.
-        Each run has its own recursion budget and a research-only tool set;
-        results rejoin the main conversation as ToolMessages.
+        """Drain the fan-out: one flash-model subgraph run per pending query,
+        all of them concurrently.
 
-        Spawn and completion events use *sub_id* (unique per query) so the TUI
-        can independently track each sub-agent's lifecycle.  The emit wrapper
-        attaches ``parent_step_id`` and ``subagent_query`` to every event the
-        subgraph produces — tool steps, Thinking, etc. — so the TUI can render
-        them indented beneath the spawn line."""
-        results: list[ToolMessage] = []
-        for call_id, sub_id, name, query in state.get("research_pending", []):
-            # Spawn event — TUI shows "→ research: query..." while running.
-            # No tool field so the TUI renders `name = label` with the query text.
-            emit(step_event(sub_id, f"research: {query[:60]}", "running"))
+        Concurrency is what makes the emitter wrapper simple. Each sub-agent
+        runs in its own asyncio task, and a task starts from a *copy* of the
+        current context — so `set_active_emit` inside one is invisible to its
+        siblings and to the parent, with no save/restore around it. The spawn
+        and completion events deliberately go through the captured parent emit
+        so they land at the top level rather than nested under themselves.
+        """
+        parent_emit = _active.get()
+        pending = list(state.get("research_pending", []))
 
-            # Wrap emit so every event from inside the subgraph carries parent
-            # context — the TUI uses this to indent sub-agent tool steps.
-            original_emit = _active.get()
+        async def run_one(entry: tuple) -> ToolMessage:
+            call_id, sub_id, name, query, agent_type = entry
+            label = f"{agent_type}: {query[:60]}"
+            started = time.monotonic()
+            if parent_emit is not None:
+                parent_emit(
+                    step_event(
+                        sub_id, label, "running",
+                        detail=query[:120],
+                        agent_id=sub_id,
+                        agent_label=agent_type,
+                    )
+                )
+
+            # Everything the subgraph emits is stamped with its parent and its
+            # own agent id, so a UI can group concurrent agents instead of
+            # interleaving their steps into one unreadable list.
             def sub_emit(event: dict) -> None:
                 if event.get("type") == "step":
                     event["parent_step_id"] = sub_id
                     event["subagent_query"] = query[:80]
-                if original_emit is not None:
-                    original_emit(event)
+                if parent_emit is not None:
+                    parent_emit(event)
 
             set_active_emit(sub_emit)
             status = "done"
             try:
-                final = await subgraph.ainvoke(
+                final = await subgraphs[agent_type].ainvoke(
                     {
                         "messages": [HumanMessage(content=query)],
                         "instruction": query,
                         "session_id": f"subagent-{sub_id}",
+                        "agent_id": sub_id,
+                        # A subagent never asks the user, whatever the parent's
+                        # client can do — it has no channel back.
+                        "capabilities": [],
                     },
                     {"recursion_limit": SUBAGENT_RECURSION_LIMIT},
                 )
-                answer = extract_result(final["messages"])
-                results.append(ToolMessage(content=answer, tool_call_id=call_id, name=name))
+                message = ToolMessage(
+                    content=extract_result(final["messages"]), tool_call_id=call_id, name=name
+                )
             except Exception as exc:
-                results.append(
-                    ToolMessage(
-                        content=f"research sub-agent failed: {exc}",
-                        tool_call_id=call_id,
-                        name=name,
-                        status="error",
-                    )
+                message = ToolMessage(
+                    content=f"{agent_type} sub-agent failed: {exc}",
+                    tool_call_id=call_id,
+                    name=name,
+                    status="error",
                 )
                 status = "error"
-            finally:
-                set_active_emit(original_emit)
 
-            # Done/error event at the top level (after restoring emit) so the
-            # TUI replaces the spawn line — sub_id matches the running event.
-            emit(step_event(sub_id, name, status, name))
-        return {"messages": results, "research_pending": []}
+            if parent_emit is not None:
+                parent_emit(
+                    step_event(
+                        sub_id, name, status, name,
+                        detail=query[:120],
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        agent_id=sub_id,
+                        agent_label=agent_type,
+                    )
+                )
+            return message
+
+        if not pending:
+            return {"messages": [], "research_pending": []}
+        # gather preserves input order, so results rejoin the conversation in
+        # the order the model asked for them regardless of who finished first.
+        results = await asyncio.gather(*(run_one(entry) for entry in pending))
+
+        # One ToolMessage per tool_call, however many sub-agents that call
+        # spawned. A `research` call with three queries is still *one* tool
+        # call, and answering it three times produces a conversation the API
+        # rejects outright ("must be a response to a preceding message with
+        # tool_calls") — the extra answers correspond to nothing.
+        merged: dict[str, list[tuple[str, ToolMessage]]] = {}
+        for (call_id, _sub_id, _name, query, _agent_type), message in zip(pending, results):
+            merged.setdefault(call_id, []).append((query, message))
+
+        out: list[ToolMessage] = []
+        for call_id, parts in merged.items():
+            if len(parts) == 1:
+                out.append(parts[0][1])
+                continue
+            # Label each finding with the question that produced it, or the
+            # model has several answers and no way to tell them apart.
+            body = "\n\n".join(
+                f"[{query}]\n{message.content}" for query, message in parts
+            )
+            out.append(
+                ToolMessage(
+                    content=body,
+                    tool_call_id=call_id,
+                    name=parts[0][1].name,
+                    status=(
+                        "error"
+                        if all(m.status == "error" for _, m in parts)
+                        else "success"
+                    ),
+                )
+            )
+        return {"messages": out, "research_pending": []}
 
     def route_after_agent(state: AgentState) -> str:
         last = state["messages"][-1]
@@ -331,11 +781,11 @@ def build_graph(
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tools_node)
-    if subgraph is not None:
+    if subgraphs:
         graph.add_node("subagents", subagent_node)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", route_after_agent, {"tools": "tools", END: END})
-    if subgraph is not None:
+    if subgraphs:
         graph.add_conditional_edges(
             "tools", route_after_tools, {"subagents": "subagents", "agent": "agent"}
         )
@@ -345,6 +795,64 @@ def build_graph(
     compiled = graph.compile(checkpointer=checkpointer)
     compiled.tools = tools  # attached for the /tools HTTP endpoint
     return compiled
+
+
+# --- ask payloads ------------------------------------------------------------
+
+def _ask_payload(name: str, args: dict) -> dict:
+    """The interrupt value for an ask tool — the same shape the `ask` event
+    carries, so run.py can forward it without re-deriving anything."""
+    options = parse_options(str(args.get("options", "")))
+    if name == "present_plan":
+        plan = str(args.get("plan", "")).strip()
+        return ask_event(
+            str(uuid4()),
+            "plan",
+            str(args.get("question", "") or "Ready to go with this plan?"),
+            options
+            or [
+                {"label": "Go ahead", "description": "Implement the plan as written."},
+                {"label": "Revise it", "description": "I'll say what to change."},
+            ],
+            plan=plan,
+            header="Plan",
+        )
+    return ask_event(
+        str(uuid4()),
+        "question",
+        str(args.get("question", "")).strip(),
+        options,
+        multi_select=str(args.get("multi_select", "")).strip().lower()
+        in ("1", "true", "yes", "on"),
+        header=str(args.get("header", "") or "") or None,
+    )
+
+
+#: Answers that mean "yes, do it". Anything else — including a written-out
+#: revision — leaves the plan gate shut, which is the safe direction to err in.
+_APPROVALS = ("go ahead", "approve", "yes", "proceed", "do it", "looks good", "ok", "okay")
+
+
+def _is_approval(answer: Any) -> bool:
+    if isinstance(answer, list):
+        return any(_is_approval(a) for a in answer)
+    text = str(answer or "").strip().lower()
+    return any(text.startswith(word) or text == word for word in _APPROVALS)
+
+
+def _format_answer(answer: Any) -> str:
+    """The user's answer as a tool result. Declining is stated plainly rather
+    than left as an empty string the model has to interpret."""
+    if answer is None:
+        return "The user did not answer."
+    if isinstance(answer, list):
+        return (
+            "The user chose: " + ", ".join(str(a) for a in answer)
+            if answer
+            else "The user did not answer."
+        )
+    text = str(answer).strip()
+    return f"The user answered: {text}" if text else "The user did not answer."
 
 
 def run_config(session_id: str) -> dict:

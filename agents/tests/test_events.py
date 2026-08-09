@@ -116,3 +116,79 @@ def test_all_events_are_json_serializable() -> None:
     for event in events:
         decoded = json.loads(json.dumps(event))
         assert decoded == event
+
+
+# --- additions since the port ------------------------------------------------
+# New event *types* rather than changed shapes, and new keys omitted when None
+# — the same discipline the original port established, so a consumer written
+# against the old contract keeps working.
+
+from daimon_agent.events import (  # noqa: E402
+    TERMINAL_TYPES,
+    ask_event,
+    assistant_delta_event,
+    compaction_event,
+    todo_event,
+    usage_event,
+)
+
+
+def test_ask_joins_done_and_error_as_terminal() -> None:
+    assert set(TERMINAL_TYPES) == {"done", "error", "ask"}
+
+
+def test_step_optional_keys_are_omitted_when_absent() -> None:
+    """The existing call sites must serialize byte-for-byte as before."""
+    event = step_event("s1", "Thinking", "running")
+    assert event == {"type": "step", "id": "s1", "label": "Thinking", "status": "running"}
+
+
+def test_step_carries_detail_and_agent_attribution() -> None:
+    event = step_event(
+        "s1", "read_file", "done", "read_file",
+        detail="src/graph.py", elapsed_ms=420, agent_id="sub-1", agent_label="explore",
+    )
+    assert event["detail"] == "src/graph.py"
+    assert event["elapsed_ms"] == 420
+    assert event["agent_id"] == "sub-1"
+    assert event["agent_label"] == "explore"
+
+
+def test_assistant_delta_omits_the_default_channel() -> None:
+    assert assistant_delta_event("hi") == {"type": "assistant_delta", "text": "hi"}
+    assert assistant_delta_event("hm", channel="reasoning")["channel"] == "reasoning"
+
+
+def test_usage_omits_cost_for_an_unpriced_model() -> None:
+    """Absent means unknown. A zero would read as free."""
+    event = usage_event("mystery", 100, 10)
+    assert "cost_usd" not in event
+    assert usage_event("deepseek-chat", 100, 10, cost_usd=0.001)["cost_usd"] == 0.001
+
+
+def test_todo_carries_the_whole_list() -> None:
+    items = [{"id": "1", "text": "a", "status": "done"}]
+    assert todo_event(items) == {"type": "todo", "items": items}
+
+
+def test_done_carries_optional_usage_totals() -> None:
+    assert done_event("hi") == {"type": "done", "result": "hi"}
+    assert done_event("hi", usage={"input_tokens": 5})["usage"] == {"input_tokens": 5}
+
+
+def test_ask_event_shape() -> None:
+    event = ask_event(
+        "a1", "question", "Which?", [{"label": "A", "description": "first"}],
+        header="Choice",
+    )
+    assert event["type"] == "ask"
+    assert event["kind"] == "question"
+    assert event["multi_select"] is False
+    assert "plan" not in event  # omitted for a plain question
+    assert ask_event("a2", "plan", "Go?", [], plan="1. do it")["plan"] == "1. do it"
+
+
+def test_compaction_event_shape() -> None:
+    assert compaction_event(50000, 8000, 24) == {
+        "type": "compaction", "before_tokens": 50000, "after_tokens": 8000, "dropped": 24,
+    }

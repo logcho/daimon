@@ -56,6 +56,28 @@ login your current browser profile doesn't already have, stop and tell the user,
 result, to sign in once in a real, visible Chrome window (Daimon's "Login to browser" flow) — that \
 login then carries into all your future sessions without you ever handling the password.
 
+# Planning and delegation
+For work with three or more real steps, write the plan down with update_todos before you start, \
+and keep it current — the user watches it as a live checklist, so it is how they know what you're \
+doing and how much is left. Exactly one item in_progress at a time, and mark an item done the \
+moment it is done rather than batching updates at the end. Skip it entirely for single-step work.
+
+Delegate with `task` when a piece of work would otherwise flood your context — mapping an \
+unfamiliar codebase, chasing down where something is defined, investigating several independent \
+questions. A sub-agent shares none of your context and returns only its conclusion, so write its \
+prompt as if to someone who just walked in, and say what you want reported back. Several `task` \
+calls in one message run at the same time. Do the work yourself when you already know where to \
+look — delegation costs a round trip.
+
+# Asking the user
+ask_user and present_plan pause the turn until the user replies, so use them where the answer \
+actually changes what you build: a genuine ambiguity where two readings lead to different work, \
+or a decision that is theirs to make. Don't ask for permission to continue, don't ask what you can \
+find out by reading the project, and don't ask to confirm a routine judgment call — make it, say \
+what you assumed, and keep going. When you do ask, offer 2-4 concrete options with the one you'd \
+recommend first. If the user has already answered a question, or repeated an instruction after you \
+raised a concern, that is their decision — proceed with it rather than asking again.
+
 # Research discipline
 web_search, web_fetch, open_url, and read_page share a hard, enforced limit on how many times \
 they can be used in a single turn — treat each one as worth using deliberately, not for \
@@ -88,25 +110,51 @@ the instruction back to them. Markdown renders, so a short list is fine — but 
 in a chat bubble this size is not."""
 
 
+PLAN_MODE_RULES = """# Plan mode is on
+Before you create, edit, move, or delete anything, or run any command that changes state, work out \
+what you intend to do and put it to the user with present_plan. Read, search, and ask whatever you \
+need first — investigating is not changing anything. Once they approve, carry the plan out; if they \
+ask for changes, revise and present it again. This applies until the user turns plan mode off.
+
+This is enforced, not advisory: every tool that would change something refuses to run until a plan \
+of yours has been approved, and tells you so. If you find yourself reading that message, present a \
+plan rather than trying a different tool."""
+
+
 def date_line() -> str:
-    """Local time in one unambiguous line, so relative dates ("Friday", "in
+    """Local date in one unambiguous line, so relative dates ("Friday", "in
     two weeks") resolve against the user's own machine — the era-1 `new
-    Date().toString()` equivalent, kept in the same local frame."""
+    Date().toString()` equivalent, kept in the same local frame.
+
+    Day resolution, not seconds: this line sits at the head of the per-task
+    tail, and a timestamp that changes every second would break the prefix
+    cache on every single turn for the sake of precision nothing here uses.
+    """
     now = datetime.now().astimezone()
-    return f"Current date/time on the user's machine: {now.strftime('%a %b %d %Y %H:%M:%S %Z')}"
+    return f"Current date on the user's machine: {now.strftime('%a %b %d %Y %Z')}"
 
 
 def build_system_prompt(
     settings: Settings,
-    memory_context: str = "",
     skills_block: str = "",
     date_line_text: str | None = None,
+    mode: str = "normal",
 ) -> str:
-    """The frozen-prefix system prompt: constant rules first (DeepSeek prefix
-    cache), then the date, then per-task memory and skills tails."""
-    parts = [DAIMON_RULES, date_line_text or date_line()]
-    if memory_context:
-        parts.append(memory_context)
+    """The frozen-prefix system prompt: constant rules first (prefix cache),
+    then the date, then the per-task skills tail.
+
+    Mode rules go with the constant prefix rather than the tail — plan mode
+    holds for a whole session, so keeping it adjacent to DAIMON_RULES means a
+    session in plan mode has its own stable prefix instead of a cache miss on
+    every turn.
+
+    There is deliberately no memory block here. Stored notes and past tasks
+    reach the model through the `recall` tool, which the agent calls when it
+    decides it needs them — injecting them into every prompt would pay for
+    them on every turn whether or not they're relevant.
+    """
+    prefix = f"{DAIMON_RULES}\n\n{PLAN_MODE_RULES}" if mode == "plan" else DAIMON_RULES
+    parts = [prefix, date_line_text or date_line()]
     if skills_block:
         parts.append(skills_block)
     return "\n\n".join(parts)

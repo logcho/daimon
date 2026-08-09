@@ -28,37 +28,52 @@ _m = _sys.modules["daimon_agent.cli.main"]
 # ---------------------------------------------------------------------------
 
 class TestStreamDisplay:
-    def test_step_event_running_plain(self):
+    """The non-interactive progress display: steps to stderr as they finish,
+    so stdout stays clean enough to pipe."""
+
+    def test_finished_steps_are_printed_with_their_detail(self, capsys):
         sd = _m._StreamDisplay(tty=False)
         sd.on_event({
-            "type": "step", "id": "s1", "label": "searching the vault",
-            "status": "running", "tool": "vault_search",
+            "type": "step", "id": "s1", "label": "read_file", "status": "done",
+            "tool": "read_file", "detail": "notes.md",
         })
-        # Running events set _running, not _completed. In plain mode, they
-        # print directly to stderr. Just verify thinking is off.
-        assert sd._thinking is False
+        err = capsys.readouterr().err
+        assert "read_file" in err and "notes.md" in err
 
-    def test_step_event_done_plain(self):
+    def test_running_steps_are_not_printed(self, capsys):
+        """Only finished steps print — a `running` line would have to be
+        rewritten later, and this path may be writing to a pipe."""
         sd = _m._StreamDisplay(tty=False)
-        sd.on_event({"type": "step", "id": "s1", "label": "thinking", "status": "done"})
-        # Done events go to _completed
-        assert sd._thinking is False
+        sd.on_event({
+            "type": "step", "id": "s1", "label": "read_file",
+            "status": "running", "tool": "read_file",
+        })
+        assert capsys.readouterr().err == ""
 
-    def test_error_event_plain(self):
-        sd = _m._StreamDisplay(tty=False)
-        sd.on_event({"type": "error", "message": "boom"})
-        assert sd._thinking is False
-
-    def test_thinking_step_start(self):
+    def test_thinking_steps_are_never_printed(self, capsys):
         sd = _m._StreamDisplay(tty=False)
         sd.on_event({"type": "step", "id": "t1", "label": "Thinking", "status": "running"})
-        assert sd._thinking is True
-
-    def test_thinking_step_done(self):
-        sd = _m._StreamDisplay(tty=False)
-        sd._thinking = True
         sd.on_event({"type": "step", "id": "t1", "label": "Thinking", "status": "done"})
-        assert sd._thinking is False
+        assert capsys.readouterr().err == ""
+
+    def test_error_event_is_printed(self, capsys):
+        sd = _m._StreamDisplay(tty=False)
+        sd.on_event({"type": "error", "message": "boom"})
+        assert "boom" in capsys.readouterr().err
+
+    def test_nothing_reaches_stdout(self, capsys):
+        """stdout carries the result and only the result."""
+        sd = _m._StreamDisplay(tty=False)
+        sd.on_event({"type": "step", "id": "s", "label": "t", "status": "done", "tool": "t"})
+        sd.on_event({"type": "error", "message": "boom"})
+        sd.finish()
+        assert capsys.readouterr().out == ""
+
+    def test_unknown_events_are_ignored(self):
+        sd = _m._StreamDisplay(tty=False)
+        sd.on_event({"type": "usage", "input_tokens": 1})
+        sd.on_event({"type": "assistant_delta", "text": "hi"})
+        sd.finish()
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +158,10 @@ def fake_client(monkeypatch):
         calls["ensure"] += 1
         return 4711, False
 
-    async def fake_stream(http, port, session_id, instruction, emit, agent=None):
+    async def fake_stream(http, port, session_id, instruction, emit, agent=None, **kwargs):
         calls["stream"] = (session_id, instruction, agent)
-        return f"result for {session_id}"
+        # stream_turn returns the terminal event, not the bare result string.
+        return {"type": "done", "result": f"result for {session_id}"}
 
     async def fake_stop(run_dir=None):
         calls["stop"] = True
@@ -173,8 +189,8 @@ async def test_amain_named_session(fake_client, capsys):
 
 
 async def test_amain_error_turn_returns_1(fake_client, monkeypatch):
-    async def fake_stream(http, port, session_id, instruction, emit, agent="general"):
-        return None  # the server emitted an error event
+    async def fake_stream(http, port, session_id, instruction, emit, agent="general", **kwargs):
+        return {"type": "error", "message": "boom"}  # the server emitted an error event
     monkeypatch.setattr(_m.client, "stream_turn", fake_stream)
     code = await _m._amain(["boom"])
     assert code == 1
@@ -233,63 +249,67 @@ async def test_amain_no_agent_flag(fake_client, capsys):
 # TUI integration test (FakeApp)
 # ---------------------------------------------------------------------------
 
-async def test_amain_interactive_tui(fake_client, monkeypatch):
-    """Full-screen TUI: FakeApp simulates typing 'hello' + Ctrl+Enter,
-    then runs the background task and verifies the stream call."""
+async def test_amain_interactive_tui(fake_client, monkeypatch, capsys):
+    """The interactive path: FakeApp stands in for the prompt_toolkit
+    Application, types 'hello', fires the enter binding, and verifies the turn
+    reached the client with the CLI's capabilities attached."""
     monkeypatch.setattr(_m.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(_m.sys.stderr, "isatty", lambda: True)
     # Workspace confirmation prompt: simulate pressing Enter (empty = default).
     monkeypatch.setattr("builtins.input", lambda: "")
 
-    import prompt_toolkit as pt
-    import prompt_toolkit.application
-    import prompt_toolkit.output
     from prompt_toolkit.keys import Keys
+
+    from daimon_agent.cli import tui as tui_mod
 
     class FakeKeyEvent:
         def __init__(self, app):
             self.app = app
 
-    class FakeOutput:
-        def get_size(self):
-            return (24, 80)
-        def fileno(self):
-            return 2
-        def write(self, data):
-            pass
-        def flush(self):
-            pass
-
     class FakeApp:
-        def __init__(self, layout=None, key_bindings=None,
-                     full_screen=False, style=None):
+        """Matches the real Application's constructor keywords — including
+        the two the inline design turns *off* on purpose."""
+
+        def __init__(self, layout=None, key_bindings=None, full_screen=False,
+                     mouse_support=False, erase_when_done=False, style=None):
             self.layout = layout
             self._kb = key_bindings
             self._bg_tasks: list = []
-            self.output = FakeOutput()
             self.current_buffer = None
-            self.before_render = []
+            self.full_screen = full_screen
+            self.mouse_support = mouse_support
+            self.printed: list = []
 
         async def run_async(self):
-            # Layout: HSplit(output, divider, input, status)
+            # Find the prompt by its control type rather than its index, so
+            # rearranging the layout doesn't silently break this test.
+            from prompt_toolkit.layout.controls import BufferControl
+
             hs = self.layout.container.content
-            input_buf = hs.children[2].content.buffer
+            input_buf = next(
+                child.content.buffer
+                for child in hs.children
+                if isinstance(getattr(child, "content", None), BufferControl)
+            )
             self.current_buffer = input_buf
             input_buf.text = "hello"
             input_buf.cursor_position = len("hello")
 
-            # Fire the enter handler: find the binding with Keys.Enter
+            # Plain Enter only — `escape enter` (newline) is also keyed on
+            # Enter, and `enter` while a question is open is a different
+            # handler again, so match on the exact single-key binding whose
+            # filter is currently active.
             for binding in self._kb.bindings:
-                if Keys.Enter in binding.keys:
+                if binding.keys == (Keys.Enter,) and binding.filter():
                     binding.handler(FakeKeyEvent(self))
                     break
 
             # Let background tasks run (non-blocking pulse — don't await
             # infinite-loop tasks like the ticker).
             await asyncio.sleep(0)
+            await asyncio.sleep(0)
             for task in self._bg_tasks:
                 if task.done():
-                    # Collect any exception / result
                     try:
                         task.result()
                     except Exception:
@@ -303,23 +323,44 @@ async def test_amain_interactive_tui(fake_client, monkeypatch):
             self._bg_tasks.append(task)
             return task
 
+        def print_text(self, text):
+            self.printed.append(text)
+
         def exit(self):
             pass
 
         def invalidate(self):
             pass
 
-    monkeypatch.setattr(pt.application, "Application", FakeApp)
-    monkeypatch.setattr(pt.application, "create_app_session",
-                        lambda **kw: contextlib.nullcontext())
-    monkeypatch.setattr(pt.output, "create_output", lambda **kw: None)
+    captured: dict = {}
+    real_app = tui_mod.Application
+
+    def _capture(*args, **kwargs):
+        app = FakeApp(*args, **kwargs)
+        captured["app"] = app
+        return app
+
+    monkeypatch.setattr(tui_mod, "Application", _capture)
 
     code = await _m._amain([])
     assert code == 0
     assert fake_client["stream"][0] == "cli"
     assert fake_client["stream"][1] == "hello"
-    assert fake_client["stream"][2] is None
     assert fake_client["ensure"] == 1
+    # Full-screen, with the mouse captured so the wheel scrolls the
+    # transcript — leaving mouse_support off is half of why scrolling never
+    # worked in the original version.
+    assert captured["app"].full_screen is True
+    assert captured["app"].mouse_support is True
+    assert real_app is not FakeApp  # sanity: we patched the name we meant to
+
+
+async def test_tui_advertises_the_ask_capability():
+    """Without this the server withholds ask_user/present_plan, and the agent
+    can never confer with the user."""
+    from daimon_agent.cli import tui as tui_mod
+
+    assert "ask" in tui_mod.CAPABILITIES
 
 
 # ---------------------------------------------------------------------------
@@ -392,3 +433,68 @@ def test_completer_start_position():
     completions = list(completer.get_completions(doc, None))
     assert len(completions) == 1
     assert completions[0].start_position == -2  # "he" length
+
+
+# ---------------------------------------------------------------------------
+# Transcript viewport — the scroll model
+# ---------------------------------------------------------------------------
+
+class TestTranscript:
+    """The transcript stores pre-wrapped rows so one row == one rendered row.
+    Scrolling is exact only because of that equality."""
+
+    def _transcript(self, width=40):
+        from daimon_agent.cli.tui import Transcript
+
+        return Transcript(width)
+
+    def test_rows_are_prewrapped_to_width(self):
+        from daimon_agent.cli.render import visible_len
+
+        t = self._transcript(20)
+        t.append(["x" * 100])
+        assert len(t.rows) == 5
+        assert all(visible_len(r) <= 20 for r in t.rows)
+
+    def test_row_count_matches_rendered_lines(self):
+        """`text()` is what the window renders; its line count must equal
+        `len(rows)` or every scroll offset is wrong."""
+        t = self._transcript(20)
+        t.append(["short", "y" * 55, "also short"])
+        assert t.text().count("\n") + 1 == len(t.rows)
+
+    def test_resize_rewraps_from_the_logical_lines(self):
+        t = self._transcript(20)
+        t.append(["z" * 60])
+        assert len(t.rows) == 3
+        t.set_width(60)
+        assert len(t.rows) == 1  # re-wrapped from source, not from the rows
+        t.set_width(20)
+        assert len(t.rows) == 3
+
+    def test_resize_to_the_same_width_is_a_noop(self):
+        t = self._transcript(20)
+        t.append(["a" * 40])
+        before = list(t.rows)
+        t.set_width(20)
+        assert t.rows == before
+
+    def test_clear_resets_and_refollows(self):
+        t = self._transcript()
+        t.append(["a", "b"])
+        t.follow = False
+        t.clear()
+        assert t.rows == [] and t.text() == "" and t.follow is True
+
+    def test_history_is_capped_and_stays_consistent(self):
+        """Old output is dropped rather than growing without bound — and the
+        rows must be recomputed to match, not left stale."""
+        from daimon_agent.cli import tui as tui_mod
+        from daimon_agent.cli.render import visible_len
+
+        t = self._transcript(20)
+        t.append([f"line {i}" for i in range(tui_mod.MAX_TRANSCRIPT_LINES + 500)])
+        assert len(t.rows) <= tui_mod.MAX_TRANSCRIPT_LINES
+        assert t.text().count("\n") + 1 == len(t.rows)
+        assert all(visible_len(r) <= 20 for r in t.rows)
+        assert t.rows[-1] == f"line {tui_mod.MAX_TRANSCRIPT_LINES + 499}"

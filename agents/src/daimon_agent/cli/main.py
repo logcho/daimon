@@ -75,108 +75,44 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 class _StreamDisplay:
-    """Renders step/error events during a turn to stderr.
+    """Progress for the non-interactive paths — one-shot and piped stdin.
 
-    On a TTY: animated Rich ``Live`` display with spinner + step lines.
-    Not on a TTY: plain one-line-per-event prints (no escape codes).
+    Steps are printed to stderr as they *finish*, one line each, so the result
+    on stdout stays clean and pipeable. There is no animation and no rewriting:
+    this path may be writing to a file or a pipe, where escape codes are noise.
+    The interactive TUI is the one that animates.
     """
 
     def __init__(self, *, tty: bool) -> None:
         self._tty = tty
-        self._console = display.make_console(stderr=True, plain=not tty)
-        self._completed: list[str] = []
-        self._running: str | None = None
-        self._thinking = True
+        self._marks = {"done": "✓", "error": "✗"}
 
     def on_event(self, event: dict) -> None:
         etype = event.get("type")
         if etype == "step":
             status = event.get("status")
-            label = event.get("label", "")
-            tool = event.get("tool")
-            name = tool or label
-
-            if name == "Thinking":
-                if status == "running":
-                    self._thinking = True
-                elif status == "done":
-                    self._thinking = False
+            name = event.get("tool") or event.get("label", "")
+            if name == "Thinking" or status not in self._marks:
                 return
-
-            self._thinking = False
-
-            if status == "running":
-                mark = "→"
-            elif status == "done":
-                mark = "✓"
-            elif status == "error":
-                mark = "✗"
-            else:
-                return
-
-            line = f"  {mark} {name}"
-            if tool and label and label != tool:
-                line += f" {label}"
-
-            if self._tty:
-                if status == "running":
-                    self._running = line
-                else:
-                    if self._running:
-                        self._completed.append(line)
-                        self._running = None
-                    else:
-                        self._completed.append(line)
-                self._render_live()
-            else:
-                styled_mark = mark
-                if mark == "→":
-                    styled_mark = dim(mark, sys.stderr)
-                elif mark == "✓":
-                    styled_mark = dim(mark, sys.stderr)
-                elif mark == "✗":
-                    styled_mark = red(mark, sys.stderr)
-                print(
-                    erase_line(sys.stderr) + f"  {styled_mark} {name}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            mark = self._marks[status]
+            styled = red(mark, sys.stderr) if status == "error" else dim(mark, sys.stderr)
+            line = f"  {styled} {name}"
+            detail = event.get("detail")
+            if detail:
+                line += f" {dim(str(detail), sys.stderr)}"
+            print(erase_line(sys.stderr) + line, file=sys.stderr, flush=True)
 
         elif etype == "error":
-            self._thinking = False
-            msg = event.get("message", "")
-            if self._tty:
-                self._completed.append(f"  ✗ {msg}")
-                self._render_live()
-            else:
-                print(
-                    erase_line(sys.stderr)
-                    + f"  {red('✖ Error:', sys.stderr)} {msg}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-    def _render_live(self) -> None:
-        """Rebuild the live display from completed + running lines."""
-        parts = list(self._completed)
-        if self._running:
-            parts.append(self._running)
-        if self._thinking and not parts:
-            # Still thinking, no steps yet — show spinner
-            spinner = display.render_thinking(console=self._console)
-            if spinner:
-                parts.append(spinner)
-        # Print all lines — Rich handles the terminal already
-        # For simplicity in non-Live mode, just print to stderr
-        # (Live would need more state management; this is simpler)
-        pass  # In the simplified path we just accumulate
+            print(
+                erase_line(sys.stderr)
+                + f"  {red('✖ Error:', sys.stderr)} {event.get('message', '')}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def finish(self, *, elapsed: float | None = None) -> None:
         """Called when the turn completes (done/error event received)."""
-        if self._tty and self._running:
-            # Flush the last running line as completed
-            self._completed.append(self._running.replace("→", "✓"))
-            self._running = None
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +199,13 @@ async def _amain(argv: list[str]) -> int:
                 stream.on_event(event)
 
             try:
-                result = await client.stream_turn(
+                # No "ask" capability advertised: a one-shot invocation has
+                # nobody to answer a question, so the server withholds the
+                # ask tools and every turn ends in done|error.
+                terminal = await client.stream_turn(
                     http, port, args.name, instruction, emit
                 )
+                result = client.turn_result(terminal)
                 if result is None:
                     return 1
                 # Print result to stdout
