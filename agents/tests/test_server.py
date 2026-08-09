@@ -117,3 +117,19 @@ async def test_task_missing_instruction_returns_400(client: TestClient) -> None:
     resp = await client.post("/task", json={"session_id": "x"})
     assert resp.status == 400
     assert await resp.text() == "instruction is required"
+
+
+async def test_config_endpoint(client: TestClient) -> None:
+    """GET /config returns non-secret settings as JSON."""
+    resp = await client.get("/config")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["model"] == "deepseek-chat"
+    assert body["port"] == 4711
+    assert "workspace" in body
+    assert body["workspace"].endswith("vault")
+    assert isinstance(body["live_frames"], bool)
+    assert isinstance(body["reflect"], bool)
+    assert isinstance(body["compaction_chars"], int)
+    assert isinstance(body["temperature"], (int, float))
+    assert isinstance(body["pinchtab_healthy"], bool)

@@ -8,6 +8,10 @@ export interface StepEvent {
   label: string;
   status: StepStatus;
   tool: string | null;
+  /** Set when this step came from a research sub-agent — id of the spawn step. */
+  parent_step_id?: string;
+  /** Research query text that spawned this sub-agent. */
+  subagent_query?: string;
 }
 
 export interface DoneEvent {
@@ -55,6 +59,10 @@ export interface Step {
   label: string;
   tool: string | null;
   status: StepStatus;
+  /** Set when this step came from a research sub-agent — id of the spawn step. */
+  parent_step_id?: string;
+  /** Research query text that spawned this sub-agent. */
+  subagent_query?: string;
 }
 
 export interface ChatMessage {
@@ -89,9 +97,7 @@ export interface TerminalExitedPayload {
   code: number | null;
 }
 
-export type View = "chat" | "terminal" | "vault";
-
-export type AgentKind = "general" | "coding";
+export type View = "chat" | "terminal" | "vault" | "settings";
 
 // --- Vault ------------------------------------------------------------------
 

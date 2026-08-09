@@ -1,7 +1,7 @@
 """Live screenshot frames — port of `run.ts`'s LIVE_FRAME_INTERVAL_MS poller.
 
 Best-effort by contract: a failed or absent frame never fails the turn. Gated
-by `DAIMON_LIVE_FRAMES` (off by default) and only runs when a browser client
+by `DAIMON_LIVE_FRAMES` (on by default) and only runs when a browser client
 exists. `start(emit)` returns a task the turn loop cancels in its `finally` —
 the frame stream is strictly turn-scoped.
 """

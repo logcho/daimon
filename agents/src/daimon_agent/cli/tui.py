@@ -127,6 +127,7 @@ class TuiState:
         self._verb_idx: int = 0
         self._verb_elapsed: float = 0.0
         self._thinking_start: float | None = None
+        self._turn_count_for_verb: int = 0
         self._thinking_lines: tuple[int, int] | None = None  # (start, end) in output_lines
         self._running_steps: dict[str, int] = {}  # step_id → line_index
         self._redraw: Any = lambda: None
@@ -490,6 +491,10 @@ async def run_tui(
         the user sees the agent's plan through its actions.  The thinking panel
         stays visible through tool execution and collapses when the agent
         finishes.
+
+        Sub-agent steps (events with ``parent_step_id``) are indented beneath
+        a spawn line and suppress their own Thinking events — the main agent's
+        thinking panel already covers the turn.
         """
         etype = event.get("type")
         if etype == "step":
@@ -497,8 +502,14 @@ async def run_tui(
             label = event.get("label", "")
             tool = event.get("tool")
             step_id = event.get("id", "")
+            parent_id = event.get("parent_step_id")
             name = tool or label
 
+            # --- Sub-agent Thinking: suppress (main agent already shows a panel)
+            if parent_id is not None and name == "Thinking":
+                return
+
+            # --- Main-agent Thinking panel ----------------------------------
             if name == "Thinking":
                 if status == "running":
                     # Start thinking panel
@@ -540,8 +551,7 @@ async def run_tui(
                                     state._running_steps[sid] -= shift
                 return
 
-            # Tool step — show inline beneath the thinking panel so the user
-            # sees the agent's plan unfold through its actions.
+            # --- Tool step markers ------------------------------------------
             if status == "running":
                 mark = f"{_DIM}→{_RESET}"
             elif status == "done":
@@ -551,7 +561,15 @@ async def run_tui(
             else:
                 return
 
-            line = f"  {mark} {_MAGENTA}{name}{_RESET}"
+            # --- Sub-agent steps: indented with ↳ prefix ----------------------
+            if parent_id is not None:
+                indent = "    "  # 4-space indent beneath the spawn line
+                prefix = f"{_DIM}↳{_RESET}"
+            else:
+                indent = "  "
+                prefix = ""
+
+            line = f"{indent}{prefix} {mark} {_MAGENTA}{name}{_RESET}"
             if tool and label and label != tool:
                 line += f" {_DIM}{label}{_RESET}"
 

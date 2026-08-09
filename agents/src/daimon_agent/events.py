@@ -21,10 +21,17 @@ def step_event(
     label: str,
     status: StepStatus,
     tool: str | None = None,
+    *,
+    parent_step_id: str | None = None,
+    subagent_query: str | None = None,
 ) -> dict:
     event: dict = {"type": "step", "id": id, "label": label, "status": status}
     if tool is not None:
         event["tool"] = tool
+    if parent_step_id is not None:
+        event["parent_step_id"] = parent_step_id
+    if subagent_query is not None:
+        event["subagent_query"] = subagent_query
     return event
 
 

@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  AgentKind,
   AgentStatus,
   DictationStatus,
   TerminalExitedPayload,
@@ -13,8 +12,38 @@ import type {
 
 export const startChat = (): Promise<string> => invoke<string>("start_chat");
 
-export const sendMessage = (sessionId: string, instruction: string, agent: AgentKind = "general"): Promise<void> =>
-  invoke<void>("send_message", { sessionId, instruction, agent });
+export const sendMessage = (sessionId: string, instruction: string): Promise<void> =>
+  invoke<void>("send_message", { sessionId, instruction });
+
+// --- Agent configuration (settings tab) ------------------------------------
+
+export interface AgentConfig {
+  model: string;
+  flash_model: string;
+  api_base: string;
+  workspace: string;
+  vault: string;
+  port: number;
+  live_frames: boolean;
+  reflect: boolean;
+  compaction_chars: number;
+  temperature: number;
+  max_tokens: number;
+  pinchtab_base: string;
+  pinchtab_healthy: boolean;
+}
+
+const configPort = (): number => {
+  // The agent server is always on this port — the Rust layer ensures it.
+  // When the user sets PORT in agents/.env, that becomes the probe target.
+  return 4711;
+};
+
+export const fetchConfig = async (): Promise<AgentConfig> => {
+  const resp = await fetch(`http://127.0.0.1:${configPort()}/config`);
+  if (!resp.ok) throw new Error(`config endpoint returned ${resp.status}`);
+  return resp.json();
+};
 
 export const agentStatus = (): Promise<AgentStatus> => invoke<AgentStatus>("agent_status");
 

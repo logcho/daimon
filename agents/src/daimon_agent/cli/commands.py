@@ -26,13 +26,6 @@ Returns:
 """
 
 
-def _make_commands() -> dict[str, tuple[str, CommandHandler]]:
-    """Build the command table — returned as a function so the ``_RESET`` /
-    ``_BLUE`` / ``_DIM`` / ``_BOLD`` constants can be passed in from the TUI
-    or hard-coded here for shared access."""
-    return {}
-
-
 # Registry built by ``register()`` called at import time.
 _SLASH_COMMANDS: dict[str, tuple[str, CommandHandler]] = {}
 
@@ -59,6 +52,7 @@ _BOLD = "\x1b[1m"
 _DIM = "\x1b[2m"
 _MAGENTA = "\x1b[35m"
 _BLUE = "\x1b[38;2;79;141;255m"  # #4f8dff
+_RED = "\x1b[31m"
 
 
 def _cmd_help(text: str, session_name: str | None) -> list[str]:
@@ -73,10 +67,16 @@ def _cmd_help(text: str, session_name: str | None) -> list[str]:
             f"{_DIM}{desc}{_RESET}"
         )
     lines.append(
+        f"  {_DIM}Enter{_RESET}      {_DIM}submit{_RESET}"
+    )
+    lines.append(
+        f"  {_DIM}Alt+Enter{_RESET}   {_DIM}newline{_RESET}"
+    )
+    lines.append(
         f"  {_DIM}Ctrl-D{_RESET}      {_DIM}exit{_RESET}"
     )
     lines.append(
-        f"  {_DIM}Alt+Enter{_RESET}   {_DIM}submit (Enter = newline){_RESET}"
+        f"  {_DIM}Shift+↑↓{_RESET}  {_DIM}scroll output{_RESET}"
     )
     return lines
 

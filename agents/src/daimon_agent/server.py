@@ -388,10 +388,31 @@ async def create_app(
                 result.append({"name": name, "description": desc})
         return web.json_response(result)
 
+    async def config_handler(request: web.Request) -> web.Response:
+        """GET /config — non-secret agent configuration for the app's settings tab."""
+        s = request.app["settings"]
+        pinchtab_ok = await _pinchtab_healthy(s)
+        return web.json_response({
+            "model": s.model,
+            "flash_model": s.resolved_flash_model,
+            "api_base": s.api_base or "(default)",
+            "workspace": str(s.resolved_workspace_dir.resolve()),
+            "vault": str(s.vault_dir.resolve()),
+            "port": s.port,
+            "live_frames": s.live_frames,
+            "reflect": s.reflect,
+            "compaction_chars": s.compaction_chars,
+            "temperature": s.temperature,
+            "max_tokens": s.max_tokens,
+            "pinchtab_base": s.pinchtab_base,
+            "pinchtab_healthy": pinchtab_ok,
+        })
+
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
     app.router.add_get("/workspace", workspace_handler)
     app.router.add_get("/tools", tools_handler)
+    app.router.add_get("/config", config_handler)
     app.router.add_post("/task", task)
     return app
 

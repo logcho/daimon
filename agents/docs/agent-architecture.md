@@ -46,10 +46,10 @@ graph LR
 | Model | `settings.model` (DeepSeek Chat) | `settings.resolved_flash_model` |
 | Recursion limit | 40 | 15 |
 | Max research fan-out | — | 3 queries per `research` call |
-| Tool set | 29 tools (full) | 5 tools (research-only) |
+| Tool set | 30 tools (full) | 5 tools (research-only) |
 | Compaction | Yes (token-threshold via flash) | No (bounded by recursion) |
 
-## Unified Tool Set (29 tools)
+## Unified Tool Set (30 tools)
 
 ### File Operations
 | Tool | Description |

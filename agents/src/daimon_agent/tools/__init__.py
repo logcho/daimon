@@ -1,8 +1,8 @@
-"""The 21-tool registry. Plain names (no `mcp__daimon__` prefix — legacy's
+"""The 30-tool registry. Plain names (no `mcp__daimon__` prefix — legacy's
 final form), flat string-only args (the DeepSeek tool-calling mitigation:
 no nested object schemas). Descriptions ported from tools.ts where the tool
 survived; fresh ones in the same voice for the new file/shell/repl/skills
-shapes. `research` (Phase E's fan-out) is reserved."""
+shapes."""
 
 from __future__ import annotations
 
@@ -24,11 +24,10 @@ from ..workspace import Confinement
 from . import files as _files
 from . import host as _host
 from . import search as _search
-from . import shell as _shell
 from . import skills_tools as _skills
 from . import web as _web
 from .repl import get_repl
-from .shell import command_stays_in_workspace, STAGED_NOT_EXECUTED
+from . import shell as _shell
 
 BROWSER_UNAVAILABLE = (
     "The background browser is not available — PinchTab isn't configured for "
@@ -57,7 +56,7 @@ class RefTextArgs(BaseModel):
 
 
 class TabArgs(BaseModel):
-    tab_id: str = Field(description="Tab id from new_tab or list_tabs")
+    tab_id: str = Field(description="Tab id from new_tab")
 
 
 class QueryArgs(BaseModel):
@@ -254,39 +253,12 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
 
     # ---- shell + kernel --------------------------------------------------
 
-    _SECRET_ENV = {"DEEPSEEK_API_KEY", "PINCHTAB_TOKEN", "TAVILY_API_KEY"}
-
     async def run_shell(command: str) -> str:
         """Run a shell command. Workspace-confined commands execute directly.
         Commands that could reach outside (credentials, remote hosts, absolute
         paths elsewhere) are blocked — use stage_terminal_command instead so
         the user can review and run them."""
-        reason = command_stays_in_workspace(command, conf.root)
-        if reason is not None:
-            emit(ui_action_event(command))
-            return STAGED_NOT_EXECUTED.format(reason=reason)
-        env = dict(os.environ)
-        for key in _SECRET_ENV:
-            env.pop(key, None)
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(conf.root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env,
-        )
-        try:
-            output = await asyncio.wait_for(proc.communicate(), timeout=120.0)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return "Command timed out after 120s and was killed."
-        stdout = (output[0] or b"").decode("utf-8", errors="replace")
-        if len(stdout) > 8000:
-            stdout = stdout[:8000] + "\n…(output truncated)"
-        if proc.returncode != 0:
-            return f"Command exited with code {proc.returncode}:\n{stdout}"
-        return stdout or "(no output)"
+        return await _shell.run_shell(conf, command)
 
     async def kernel_execute(code: str) -> str:
         """Run Python code in the session's persistent IPython kernel."""
@@ -533,8 +505,7 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
         ),
         _tool(
             "switch_tab",
-            "Switch the background browser to an existing tab by id. Get tab ids from new_tab or "
-            "list_tabs.",
+            "Switch the background browser to an existing tab by id. Tab ids come from new_tab.",
             TabArgs,
             switch_tab,
         ),

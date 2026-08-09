@@ -39,6 +39,30 @@ def test_step_event_with_tool_includes_key() -> None:
     }
 
 
+def test_step_event_with_parent_context() -> None:
+    """Sub-agent steps carry parent_step_id and subagent_query for TUI indentation."""
+    assert step_event(
+        "id-3", "web_search", "running", "web_search",
+        parent_step_id="sub-1", subagent_query="latest react features",
+    ) == {
+        "type": "step",
+        "id": "id-3",
+        "label": "web_search",
+        "status": "running",
+        "tool": "web_search",
+        "parent_step_id": "sub-1",
+        "subagent_query": "latest react features",
+    }
+
+
+def test_step_event_parent_context_omitted_when_none() -> None:
+    """parent_step_id and subagent_query are omitted (not null) when not provided,
+    matching legacy JSON.stringify(undefined) behavior."""
+    ev = step_event("id-4", "Thinking", "running")
+    assert "parent_step_id" not in ev
+    assert "subagent_query" not in ev
+
+
 def test_done_and_error() -> None:
     assert done_event("the result") == {"type": "done", "result": "the result"}
     assert error_event("something broke") == {"type": "error", "message": "something broke"}

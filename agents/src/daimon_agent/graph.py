@@ -25,7 +25,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .compaction import compact_if_needed
-from .emitter import emit
+from .emitter import _active, emit, set_active_emit
 from .events import step_event
 from .guardrails import (
     check_near_duplicate,
@@ -212,8 +212,9 @@ def build_graph(
                     )
                     emit(step_event(call_id, name, "done", name))
                     continue
-                for query in queries:
-                    pending.append((call_id, name, query))
+                for i, query in enumerate(queries):
+                    sub_id = f"{call_id}-{i}"
+                    pending.append((call_id, sub_id, name, query))
                 # One budget slot for the fan-out, like any other research call.
                 research_used += 1
                 call_log.append((name, json.dumps(args, sort_keys=True, default=str)))
@@ -262,22 +263,58 @@ def build_graph(
     async def subagent_node(state: AgentState) -> dict:
         """Drain the research fan-out: one flash-model subgraph run per query.
         Each run has its own recursion budget and a research-only tool set;
-        results rejoin the main conversation as ToolMessages (the run.ts
-        label/tool reuse invariant holds: `done` reuses the running event's
-        id/label/tool)."""
+        results rejoin the main conversation as ToolMessages.
+
+        Spawn and completion events use *sub_id* (unique per query) so the TUI
+        can independently track each sub-agent's lifecycle.  The emit wrapper
+        attaches ``parent_step_id`` and ``subagent_query`` to every event the
+        subgraph produces — tool steps, Thinking, etc. — so the TUI can render
+        them indented beneath the spawn line."""
         results: list[ToolMessage] = []
-        for call_id, name, query in state.get("research_pending", []):
-            final = await subgraph.ainvoke(
-                {
-                    "messages": [HumanMessage(content=query)],
-                    "instruction": query,
-                    "session_id": f"subagent-{call_id}",
-                },
-                {"recursion_limit": SUBAGENT_RECURSION_LIMIT},
-            )
-            answer = extract_result(final["messages"])
-            results.append(ToolMessage(content=answer, tool_call_id=call_id, name=name))
-            emit(step_event(call_id, name, "done", name))
+        for call_id, sub_id, name, query in state.get("research_pending", []):
+            # Spawn event — TUI shows "→ research: query..." while running.
+            # No tool field so the TUI renders `name = label` with the query text.
+            emit(step_event(sub_id, f"research: {query[:60]}", "running"))
+
+            # Wrap emit so every event from inside the subgraph carries parent
+            # context — the TUI uses this to indent sub-agent tool steps.
+            original_emit = _active.get()
+            def sub_emit(event: dict) -> None:
+                if event.get("type") == "step":
+                    event["parent_step_id"] = sub_id
+                    event["subagent_query"] = query[:80]
+                if original_emit is not None:
+                    original_emit(event)
+
+            set_active_emit(sub_emit)
+            status = "done"
+            try:
+                final = await subgraph.ainvoke(
+                    {
+                        "messages": [HumanMessage(content=query)],
+                        "instruction": query,
+                        "session_id": f"subagent-{sub_id}",
+                    },
+                    {"recursion_limit": SUBAGENT_RECURSION_LIMIT},
+                )
+                answer = extract_result(final["messages"])
+                results.append(ToolMessage(content=answer, tool_call_id=call_id, name=name))
+            except Exception as exc:
+                results.append(
+                    ToolMessage(
+                        content=f"research sub-agent failed: {exc}",
+                        tool_call_id=call_id,
+                        name=name,
+                        status="error",
+                    )
+                )
+                status = "error"
+            finally:
+                set_active_emit(original_emit)
+
+            # Done/error event at the top level (after restoring emit) so the
+            # TUI replaces the spawn line — sub_id matches the running event.
+            emit(step_event(sub_id, name, status, name))
         return {"messages": results, "research_pending": []}
 
     def route_after_agent(state: AgentState) -> str:

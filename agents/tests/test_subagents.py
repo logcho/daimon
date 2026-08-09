@@ -61,11 +61,17 @@ async def test_research_step_spans_the_fan_out(settings) -> None:
     finally:
         set_active_emit(None)
 
-    running = [e for e in events if e.get("status") == "running" and e.get("label") == "research"]
+    # Spawn event: running, label="research: query...", no tool (so TUI shows the query)
+    running = [e for e in events if e.get("status") == "running"
+               and isinstance(e.get("label"), str) and e["label"].startswith("research:")]
+    # Done event: done, label="research", tool="research"
     done = [e for e in events if e.get("status") == "done" and e.get("label") == "research"]
     assert len(running) == len(done) == 1
-    assert running[0]["id"] == done[0]["id"] == "call-r1"
-    assert running[0]["tool"] == done[0]["tool"] == "research"
+    # Sub-id is "{call_id}-0" — the spawn and done events share the same id.
+    assert running[0]["id"] == done[0]["id"]
+    assert running[0]["id"] == "call-r1-0"
+    assert "tool" not in running[0]  # spawn omits tool so TUI renders the query text
+    assert done[0]["tool"] == "research"
 
 
 async def test_research_with_no_queries_is_a_tool_message(settings) -> None:

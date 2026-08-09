@@ -297,12 +297,11 @@ export default function App() {
     const sid = activeSessionId;
     if (!sid || busy || !text.trim()) return;
     setUnreadCompletion(false); // new turn starting → busy blue takes over
-    const agent = "general";
     const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false };
     const asstMsg: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: true };
     commitSessions((prev) => ({ ...prev, [sid]: [...(prev[sid] ?? []), userMsg, asstMsg] }));
     try {
-      await sendMessage(sid, text, agent);
+      await sendMessage(sid, text);
     } catch (err) {
       // Invoke failed before the stream could start (agent down, etc.).
       commitSessions((prev) => {

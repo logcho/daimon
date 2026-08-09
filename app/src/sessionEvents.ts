@@ -41,8 +41,23 @@ export function hasCompletedTurn(messages: ChatMessage[]): boolean {
 
 function upsertStep(steps: Step[], ev: StepEvent): Step[] {
   const idx = steps.findIndex((s) => s.id === ev.id);
-  if (idx < 0) return [...steps, { id: ev.id, label: ev.label, tool: ev.tool, status: ev.status }];
-  return steps.map((s, i) => (i === idx ? { ...s, status: ev.status, label: ev.label } : s));
+  if (idx < 0)
+    return [
+      ...steps,
+      {
+        id: ev.id,
+        label: ev.label,
+        tool: ev.tool,
+        status: ev.status,
+        parent_step_id: ev.parent_step_id,
+        subagent_query: ev.subagent_query,
+      },
+    ];
+  return steps.map((s, i) =>
+    i === idx
+      ? { ...s, status: ev.status, label: ev.label, parent_step_id: ev.parent_step_id, subagent_query: ev.subagent_query }
+      : s,
+  );
 }
 
 /**

@@ -25,6 +25,7 @@ class AgentState(TypedDict, total=False):
     # Injected skills tail (see skills/injector.py) — part of the prompt, not
     # the conversation. Passed per-run so rollouts can vary only the skill.
     skills_block: str
-    # (call_id, tool_name, query) — research fan-out requests stashed by the
-    # tools node, drained by the subagents node (Phase E).
-    research_pending: list[tuple[str, str, str]]
+    # (call_id, sub_id, tool_name, query) — research fan-out requests stashed
+    # by the tools node, drained by the subagents node (Phase E). sub_id is
+    # a unique step-id per query so the TUI can track spawn→done transitions.
+    research_pending: list[tuple[str, str, str, str]]

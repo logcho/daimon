@@ -4,6 +4,7 @@ import { hasCompletedTurn, isSessionBusy } from "../sessionEvents";
 import { ChatInput } from "./ChatInput";
 import { ErrorBanner } from "./ErrorBanner";
 import { MessageList } from "./MessageList";
+import { SettingsPanel } from "./SettingsPanel";
 import { SoundWave } from "./SoundWave";
 import { TerminalPanel } from "./TerminalPanel";
 import { VoiceIndicator } from "./VoiceIndicator";
@@ -164,6 +165,17 @@ export function Panel({
         >
           vault
         </button>
+        <button
+          onClick={() => onViewChange("settings")}
+          title="settings"
+          className={`rounded-full px-2 py-1 text-sm transition duration-200 ${
+            view === "settings"
+              ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+              : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
+          }`}
+        >
+          ⚙
+        </button>
         <VoiceIndicator
           model={voiceModel}
           modelDownload={voiceModelDownload}
@@ -312,6 +324,7 @@ export function Panel({
       )}
 
       {view === "vault" && <VaultPanel />}
+      {view === "settings" && <SettingsPanel />}
     </div>
   );
 }

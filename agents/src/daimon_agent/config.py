@@ -44,7 +44,7 @@ class Settings:
 
     # Turn loop.
     inactivity_timeout_s: float = 60.0
-    live_frames: bool = True
+    live_frames: bool = False
     # Post-turn reflection (tool-using turns only) and token-threshold
     # compaction (main agent only, summarized via flash).
     reflect: bool = True
@@ -119,7 +119,7 @@ class Settings:
             pinchtab_base=get("PINCHTAB_BASE") or "http://127.0.0.1:9867",
             pinchtab_token=get("PINCHTAB_TOKEN"),
             port=int(get("PORT") or "4711"),
-            live_frames=get_bool("DAIMON_LIVE_FRAMES", True),
+            live_frames=get_bool("DAIMON_LIVE_FRAMES", False),
             reflect=get_bool("DAIMON_REFLECT", True),
             compaction_chars=int(get("DAIMON_COMPACTION_CHARS") or "40000"),
             tavily_api_key=get("TAVILY_API_KEY"),

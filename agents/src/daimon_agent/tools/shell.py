@@ -87,7 +87,7 @@ def _child_env() -> dict[str, str]:
     return env
 
 
-async def run_shell(conf: Confinement, command: str, timeout_s: float = 60.0) -> str:
+async def run_shell(conf: Confinement, command: str, timeout_s: float = 120.0) -> str:
     reason = command_stays_in_workspace(command, conf.root)
     if reason is not None:
         emit(ui_action_event(command))

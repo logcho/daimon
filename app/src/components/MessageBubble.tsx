@@ -5,35 +5,41 @@ import { ThinkingIndicator } from "./ThinkingIndicator";
 
 function StepLine({ step }: { step: Step }) {
   const name = step.tool ?? step.label;
+  // Sub-agent steps are indented beneath their spawn line.
+  const isSub = step.parent_step_id !== undefined;
+  const isSpawn = step.tool === "research" && step.label.startsWith("research:");
+
+  const prefix = isSpawn ? "↳ " : isSub ? "  ↳ " : "";
+  const ml = isSub ? "ml-4" : "";
 
   if (step.status === "done") {
     return (
-      <span className="flex items-center gap-2 font-mono text-sm">
+      <span className={`flex items-center gap-2 font-mono text-sm ${ml}`}>
         <span className="text-emerald-400">✓</span>
-        <span className="text-neutral-400">{name}</span>
+        <span className="text-neutral-400">{prefix}{name}</span>
       </span>
     );
   }
   if (step.status === "error") {
     return (
-      <span className="flex items-center gap-2 font-mono text-sm">
+      <span className={`flex items-center gap-2 font-mono text-sm ${ml}`}>
         <span className="text-red-400">✕</span>
-        <span className="text-neutral-400">{name}</span>
+        <span className="text-neutral-400">{prefix}{name}</span>
       </span>
     );
   }
   if (step.status === "running") {
     return (
-      <span className="flex items-center gap-2 font-mono text-sm">
+      <span className={`flex items-center gap-2 font-mono text-sm ${ml}`}>
         <span className="block h-3 w-3 animate-spin rounded-full border-2 border-[#4f8dff]/25 border-t-[#4f8dff]" />
-        <span className="text-[#4f8dff]">{name}</span>
+        <span className="text-[#4f8dff]">{prefix}{name}</span>
       </span>
     );
   }
   return (
-    <span className="flex items-center gap-2 font-mono text-sm">
+    <span className={`flex items-center gap-2 font-mono text-sm ${ml}`}>
       <span className="block h-2 w-2 rounded-full border border-neutral-600" />
-      <span className="text-neutral-500">{name}</span>
+      <span className="text-neutral-500">{prefix}{name}</span>
     </span>
   );
 }
