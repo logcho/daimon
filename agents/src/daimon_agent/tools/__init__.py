@@ -105,12 +105,25 @@ class CodeArgs(BaseModel):
 
 class SkillNameArgs(BaseModel):
     name: str = Field(description="Skill name, e.g. 'submit-job-application'")
+    file: str = Field(
+        default="",
+        description="Optional file bundled with the skill (e.g. 'reference.md'), "
+        "relative to the skill's own directory. Empty reads its SKILL.md.",
+    )
 
 
 class SaveSkillArgs(BaseModel):
     name: str = Field(description="Short identifier, e.g. 'submit-job-application'")
-    description: str = Field(description="A generalized, parameterized description of the procedure")
+    description: str = Field(
+        description="One line saying when this skill applies — it is all you see when "
+        "deciding whether to read the skill later, so make it specific"
+    )
     content: str = Field(description="The full SKILL.md body — the reusable procedure itself")
+    scope: str = Field(
+        default="vault",
+        description="'vault' (default) to keep it across all projects, or 'project' "
+        "to store it with this repo in .daimon/skills so it can be committed",
+    )
 
 
 class CommandArgs(BaseModel):
@@ -132,6 +145,12 @@ class TaskArgs(BaseModel):
     prompt: str = Field(
         description="The complete task for the sub-agent. It shares no context with you, "
         "so state the goal, the constraints, and exactly what to report back."
+    )
+
+
+class FindSkillsArgs(BaseModel):
+    query: str = Field(
+        description="What the skill should do, in a few words — e.g. 'fill pdf forms'"
     )
 
 
@@ -320,11 +339,11 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
     def list_skills() -> str:
         return _skills.list_skills(settings)
 
-    def read_skill(name: str) -> str:
-        return _skills.read_skill(settings, name)
+    def read_skill(name: str, file: str = "") -> str:
+        return _skills.read_skill(settings, name, file)
 
-    def save_skill(name: str, description: str, content: str) -> str:
-        return _skills.save_skill(settings, memory, name, description, content)
+    def save_skill(name: str, description: str, content: str, scope: str = "vault") -> str:
+        return _skills.save_skill(settings, memory, name, description, content, scope)
 
     # ---- host ------------------------------------------------------------
 
@@ -487,6 +506,32 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
         if proc.returncode != 0:
             return f"Debug — execution failed:\n\n{err}{out}" if err else f"Debug — execution failed (exit {proc.returncode}):\n{out}"
         return out or "(no output — code ran successfully)"
+
+    async def find_skills(query: str) -> str:
+        """Search the public registry for a skill that already does this."""
+        from ..skills.registry import RegistryError, SkillRegistry
+
+        registry = SkillRegistry(settings.registry_cache_dir)
+        try:
+            hits = await registry.search(query, limit=8)
+        except RegistryError as exc:
+            return f"Skill search unavailable: {exc}"
+        if not hits:
+            return (
+                f'No published skill matches "{query}". Write the procedure '
+                f"yourself, and save it with save_skill if it's worth reusing."
+            )
+        lines = [
+            f'{len(hits)} published skill(s) matching "{query}" '
+            f"(★ = human-curated). You cannot install these yourself — tell the "
+            f"user the slug and that `/skills install <slug>` adds it:",
+        ]
+        for hit in hits:
+            mark = "★" if hit.featured else "-"
+            lines.append(
+                f"{mark} {hit.slug} ({hit.repo}, {hit.stars:,}★): {hit.description[:160]}"
+            )
+        return "\n".join(lines)
 
     def update_todos(todos: str) -> str:
         """Replace this session's visible task list and broadcast it."""
@@ -663,7 +708,10 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
         ),
         _tool(
             "read_skill",
-            "Read a skill's full SKILL.md content.",
+            "Read a skill's SKILL.md, or one of the files bundled with it. A skill is a "
+            "directory: many ship reference documents and scripts that their SKILL.md tells "
+            "you to open. Reading a skill lists what else is in it and where it lives on "
+            "disk; pass `file` to read one of those.",
             SkillNameArgs,
             read_skill,
         ),
@@ -673,6 +721,16 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
             "handled faster. Only for genuinely reusable procedures, not one-off tasks.",
             SaveSkillArgs,
             save_skill,
+        ),
+        _tool(
+            "find_skills",
+            "Search the public registry of published skills for one that already does what "
+            "you're about to write. Worth a call before working out any non-trivial reusable "
+            "procedure — someone has often already written it. Returns names, descriptions "
+            "and source repos. You cannot install them: report the slug to the user, who "
+            "installs it with `/skills install <slug>` after reviewing what it contains.",
+            FindSkillsArgs,
+            find_skills,
         ),
         _tool(
             "stage_terminal_command",

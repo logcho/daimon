@@ -38,6 +38,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 import aiohttp
 
@@ -420,6 +421,114 @@ async def list_tools(
             return await resp.json()
     except (aiohttp.ClientError, OSError):
         return []
+
+async def list_skills(
+    http: aiohttp.ClientSession, port: int
+) -> list[dict[str, str]]:
+    """GET /skills — the merged vault + project library. Empty on any failure;
+    a missing library is not an error worth interrupting the user for."""
+    try:
+        async with http.get(f"http://127.0.0.1:{port}/skills") as resp:
+            if resp.status != 200:
+                return []
+            return await resp.json()
+    except (aiohttp.ClientError, OSError):
+        return []
+
+
+async def read_skill(
+    http: aiohttp.ClientSession, port: int, name: str
+) -> dict[str, str] | None:
+    """GET /skills/{name} — one skill with its full content, or None."""
+    try:
+        async with http.get(f"http://127.0.0.1:{port}/skills/{name}") as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json()
+    except (aiohttp.ClientError, OSError):
+        return None
+
+
+async def _get_json(http: aiohttp.ClientSession, url: str) -> Any:
+    """GET returning parsed JSON, or a `{"error": ...}` dict. The registry
+    reaches out to the network, so 'it didn't work and here's why' has to
+    survive back to the user rather than becoming an empty list."""
+    try:
+        async with http.get(url) as resp:
+            body = await resp.json()
+            if resp.status != 200:
+                message = body.get("error") if isinstance(body, dict) else None
+                return {"error": message or f"HTTP {resp.status}"}
+            return body
+    except (aiohttp.ClientError, OSError, ValueError) as exc:
+        return {"error": str(exc)}
+
+
+async def list_models(http: aiohttp.ClientSession, port: int) -> Any:
+    """GET /models — every provider's models plus its installed/key state."""
+    return await _get_json(http, f"http://127.0.0.1:{port}/models")
+
+
+async def get_config(http: aiohttp.ClientSession, port: int) -> Any:
+    return await _get_json(http, f"http://127.0.0.1:{port}/config")
+
+
+async def update_config(http: aiohttp.ClientSession, port: int, fields: dict) -> Any:
+    """POST /config. Returns `{"error": …}` rather than raising, because every
+    caller here wants to show the reason rather than crash — the server's
+    rejections ('no anthropic API key') are the useful part."""
+    try:
+        async with http.post(f"http://127.0.0.1:{port}/config", json=fields) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            try:
+                body = await resp.json()
+                message = body.get("error") if isinstance(body, dict) else None
+            except Exception:
+                message = await resp.text()
+            return {"error": message or f"HTTP {resp.status}"}
+    except (aiohttp.ClientError, OSError, ValueError) as exc:
+        return {"error": str(exc)}
+
+
+async def registry_search(
+    http: aiohttp.ClientSession, port: int, query: str, limit: int = 12
+) -> Any:
+    return await _get_json(
+        http, f"http://127.0.0.1:{port}/registry/search?q={quote(query)}&limit={limit}"
+    )
+
+
+async def registry_item(http: aiohttp.ClientSession, port: int, slug: str) -> Any:
+    return await _get_json(http, f"http://127.0.0.1:{port}/registry/item/{quote(slug)}")
+
+
+async def registry_preview(
+    http: aiohttp.ClientSession, port: int, slug: str, path: str = ""
+) -> Any:
+    """The bundle manifest, fetched but not written — what the user reviews."""
+    url = f"http://127.0.0.1:{port}/registry/preview/{quote(slug)}"
+    if path:
+        url += f"?path={quote(path)}"
+    return await _get_json(http, url)
+
+
+async def install_skill(
+    http: aiohttp.ClientSession, port: int, slug: str, path: str, scope: str = "vault"
+) -> Any:
+    try:
+        async with http.post(
+            f"http://127.0.0.1:{port}/skills/install",
+            json={"slug": slug, "path": path, "scope": scope},
+        ) as resp:
+            body = await resp.json()
+            if resp.status != 200:
+                message = body.get("error") if isinstance(body, dict) else None
+                return {"error": message or f"HTTP {resp.status}"}
+            return body
+    except (aiohttp.ClientError, OSError, ValueError) as exc:
+        return {"error": str(exc)}
+
 
 def list_sessions(db_path: Path) -> list[str]:
     """Distinct thread ids from the checkpointer DB, sorted. Read-only URI

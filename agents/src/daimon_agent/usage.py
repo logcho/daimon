@@ -47,6 +47,10 @@ PRICES: dict[str, Price] = {
     # prompts.py bothers with a byte-stable frozen prefix.
     "deepseek-chat": Price(input=0.27, output=1.10, cache_read=0.027),
     "deepseek-reasoner": Price(input=0.55, output=2.19, cache_read=0.14),
+    # `deepseek-chat` is an alias that resolves to this — same model, same
+    # price. Listed separately because the model picker offers the concrete
+    # name, and selecting it shouldn't silently drop cost reporting.
+    "deepseek-v4-flash": Price(input=0.27, output=1.10, cache_read=0.027),
     # Anthropic — cache writes cost 1.25x input, reads 0.1x.
     "claude-opus-4": Price(input=15.0, output=75.0, cache_read=1.50, cache_write=18.75),
     "claude-opus-5": Price(input=15.0, output=75.0, cache_read=1.50, cache_write=18.75),

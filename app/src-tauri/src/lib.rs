@@ -1,6 +1,7 @@
 mod agent;
 mod fn_key;
 mod session;
+mod skills;
 mod terminal;
 mod timefmt;
 mod vault;
@@ -68,10 +69,22 @@ async fn get_config(
 async fn update_config(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentManager>,
-    api_key: String,
+    fields: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let status = state.ensure(&app).await?;
-    agent::update_config(status.port, &api_key).await
+    agent::update_config(status.port, fields).await
+}
+
+/// GET /models from the agent server — every provider's models plus whether
+/// it's installed and keyed, so the picker can show what exists and grey out
+/// what can't be selected.
+#[tauri::command]
+async fn list_models(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_models(status.port).await
 }
 
 #[tauri::command]
@@ -123,6 +136,9 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             vault::set_vault_path,
             vault::list_vault_files,
             vault::read_vault_file,
+            skills::list_skills,
+            skills::read_skill,
+            list_models,
         ])
         .setup(|app| {
             voice::init(app.handle());

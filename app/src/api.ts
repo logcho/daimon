@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentStatus,
   DictationStatus,
+  SkillFile,
   TerminalExitedPayload,
   TerminalOutputPayload,
   VaultFile,
@@ -17,9 +18,19 @@ export const sendMessage = (sessionId: string, instruction: string): Promise<voi
 
 // --- Agent configuration (settings tab) ------------------------------------
 
+/** Per-provider state. The two failure modes are different problems with
+ *  different fixes: `installed` is a missing package (`uv sync --extra …`),
+ *  `key_configured` is a missing key. */
+export interface ProviderState {
+  installed: boolean;
+  key_configured: boolean;
+}
+
 export interface AgentConfig {
   model: string;
   flash_model: string;
+  provider: string;
+  providers: Record<string, ProviderState>;
   api_base: string;
   api_key_configured: boolean;
   workspace: string;
@@ -37,8 +48,24 @@ export interface AgentConfig {
 export const fetchConfig = (): Promise<AgentConfig> =>
   invoke<AgentConfig>("get_config");
 
-export const updateConfig = (apiKey: string): Promise<{ ok: boolean }> =>
-  invoke<{ ok: boolean }>("update_config", { apiKey });
+/** What a provider offers, and whether it can actually be used. `source` is
+ *  "live" when the provider itself was asked, "catalog" when a built-in list
+ *  was used instead (no key, or the network was unreachable). */
+export interface ProviderModels {
+  models: string[];
+  source: "live" | "catalog";
+  installed: boolean;
+  key_configured: boolean;
+}
+
+export const listModels = (): Promise<Record<string, ProviderModels>> =>
+  invoke<Record<string, ProviderModels>>("list_models");
+
+/** Update config fields. `key` is provider-agnostic — the server routes it by
+ *  prefix (sk-ant-… → Anthropic), so the UI never asks which box to use. */
+export const updateConfig = (
+  fields: { key?: string; model?: string; flash_model?: string },
+): Promise<{ ok: boolean }> => invoke<{ ok: boolean }>("update_config", { fields });
 
 export const agentStatus = (): Promise<AgentStatus> => invoke<AgentStatus>("agent_status");
 
@@ -91,3 +118,11 @@ export const onVoiceModelDownload = (handler: (payload: VoiceModelDownloadPayloa
 export const listVaultFiles = (): Promise<VaultFile[]> => invoke<VaultFile[]>("list_vault_files");
 
 export const readVaultFile = (name: string): Promise<string> => invoke<string>("read_vault_file", { name });
+
+// --- Skills ------------------------------------------------------------------
+// Read straight off the filesystem like the vault, not through the agent
+// server — skills are plain files on the host.
+
+export const listSkills = (): Promise<SkillFile[]> => invoke<SkillFile[]>("list_skills");
+
+export const readSkill = (name: string): Promise<string> => invoke<string>("read_skill", { name });

@@ -241,3 +241,154 @@ async def test_client_disconnect_cancels_the_turn(settings) -> None:
             if app["turn_registry"]["count"] == 0:
                 break
         assert app["turn_registry"]["count"] == 0, "the abandoned turn kept running"
+
+
+# --- /skills -----------------------------------------------------------------
+
+def _write_skill(root, name: str, description: str, body: str = "the body") -> None:
+    path = root / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n")
+
+
+async def test_skills_endpoint_merges_both_libraries(client: TestClient) -> None:
+    settings = client.app["settings"]
+    _write_skill(settings.resolved_skills_dir, "changelog", "Write a changelog")
+    _write_skill(settings.project_skills_dir, "deploy", "Ship this repo")
+
+    resp = await client.get("/skills")
+    assert resp.status == 200
+    skills = {s["name"]: s for s in await resp.json()}
+    assert skills["changelog"]["source"] == "vault"
+    assert skills["deploy"]["source"] == "project"
+    assert skills["changelog"]["description"] == "Write a changelog"
+
+
+async def test_skills_endpoint_rescans_every_request(client: TestClient) -> None:
+    """A skill the agent just saved has to be visible now — the startup scan
+    left it invisible until restart."""
+    assert await (await client.get("/skills")).json() == []
+    _write_skill(client.app["settings"].resolved_skills_dir, "fresh", "Just saved")
+    assert [s["name"] for s in await (await client.get("/skills")).json()] == ["fresh"]
+
+
+async def test_skill_endpoint_returns_the_body(client: TestClient) -> None:
+    _write_skill(
+        client.app["settings"].resolved_skills_dir, "changelog", "Write it", "## Categories"
+    )
+    resp = await client.get("/skills/changelog")
+    assert resp.status == 200
+    body = await resp.json()
+    assert "## Categories" in body["content"]
+    assert body["source"] == "vault"
+
+
+async def test_unknown_skill_is_404(client: TestClient) -> None:
+    assert (await client.get("/skills/nope")).status == 404
+
+
+# --- config: keys and model selection ----------------------------------------
+
+async def test_key_field_routes_by_prefix(client: TestClient, tmp_path, monkeypatch) -> None:
+    """Anthropic keys start sk-ant-; DeepSeek's are plain sk-. Detecting it
+    server-side means the CLI and the app both work with one field and nobody
+    has to be told which box to use."""
+    monkeypatch.chdir(tmp_path)
+
+    assert (await client.post("/config", json={"key": "sk-ant-abc123"})).status == 200
+    cfg = await (await client.get("/config")).json()
+    assert cfg["providers"]["anthropic"]["key_configured"] is True
+
+    assert (await client.post("/config", json={"key": "sk-deepseek-xyz"})).status == 200
+    cfg = await (await client.get("/config")).json()
+    assert cfg["providers"]["deepseek"]["key_configured"] is True
+
+
+async def test_model_is_writable(client: TestClient, tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    await client.post("/config", json={"key": "sk-deepseek-xyz"})
+    resp = await client.post("/config", json={"model": "deepseek-reasoner"})
+    assert resp.status == 200
+    assert (await (await client.get("/config")).json())["model"] == "deepseek-reasoner"
+
+
+async def test_an_uninstalled_provider_is_rejected(client: TestClient, tmp_path, monkeypatch) -> None:
+    """Accepting an unusable model would leave every later turn failing at the
+    API call with nothing pointing back here. The missing *package* is reported
+    first — it's the more fundamental of the two problems, and has a different
+    fix from a missing key."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "daimon_agent.server.provider_available", lambda name: name != "anthropic"
+    )
+    resp = await client.post("/config", json={"model": "anthropic:claude-sonnet-5"})
+    assert resp.status == 400
+    assert "uv sync --extra anthropic" in (await resp.json())["error"]
+    # And nothing changed.
+    assert (await (await client.get("/config")).json())["model"] != "anthropic:claude-sonnet-5"
+
+
+async def test_an_installed_provider_without_a_key_is_rejected(
+    client: TestClient, tmp_path, monkeypatch
+) -> None:
+    """The other half: the package is there, the key isn't — a different fix,
+    so a different message."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("daimon_agent.server.provider_available", lambda name: True)
+    resp = await client.post("/config", json={"model": "anthropic:claude-sonnet-5"})
+    assert resp.status == 400
+    assert "no anthropic API key" in (await resp.json())["error"]
+
+
+async def test_an_unknown_provider_is_rejected(client: TestClient, tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    resp = await client.post("/config", json={"model": "wizard:gpt-9"})
+    assert resp.status == 400
+
+
+async def test_a_key_and_model_can_be_set_together(client: TestClient, tmp_path, monkeypatch) -> None:
+    """Validation runs against the settings this request produces, so adding a
+    key and pointing a model at it works in one call."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resp = await client.post(
+        "/config", json={"key": "sk-ant-abc", "model": "anthropic:claude-sonnet-5"}
+    )
+    # Accepted only if the provider package is installed; either way the
+    # failure must name the missing *package*, not the key we just supplied.
+    if resp.status != 200:
+        assert "isn't installed" in (await resp.json())["error"]
+    else:
+        assert (await (await client.get("/config")).json())["model"].startswith("anthropic:")
+
+
+async def test_empty_config_update_is_rejected(client: TestClient) -> None:
+    assert (await client.post("/config", json={})).status == 400
+
+
+# --- /models -----------------------------------------------------------------
+
+async def test_models_endpoint_covers_every_provider(client: TestClient) -> None:
+    """One endpoint for the CLI and the app, so a model offered in one is
+    offered in the other."""
+    body = await (await client.get("/models")).json()
+    assert set(body) == {"deepseek", "anthropic"}
+    for state in body.values():
+        assert {"models", "source", "installed", "key_configured"} <= set(state)
+
+
+async def test_models_are_listed_without_a_key(client: TestClient) -> None:
+    """The picker needs options before you've pasted a key — that's exactly
+    when you most need to see what's on offer."""
+    body = await (await client.get("/models")).json()
+    entry = body["anthropic"]
+    assert entry["key_configured"] is False
+    assert entry["source"] == "catalog"
+    assert entry["models"], "a keyless provider must still list something"
+
+
+async def test_the_configured_model_is_listed(client: TestClient) -> None:
+    body = await (await client.get("/models")).json()
+    settings = client.app["settings"]
+    assert settings.model in body["deepseek"]["models"]

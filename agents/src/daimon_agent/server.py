@@ -33,9 +33,16 @@ from .events import TERMINAL_TYPES, error_event
 from .graph import build_graph, close_checkpointer, make_sqlite_checkpointer
 from .memory import MemoryStore
 from .model import ModelRouter
-from .providers import KNOWN_PROVIDERS, provider_available
+from .providers import (
+    KNOWN_PROVIDERS,
+    list_models,
+    parse_spec,
+    provider_available,
+    provider_key,
+)
 from .run import resume_turn, run_turn
 from .skills.injector import discover_skills
+from .skills.registry import RegistryError, SkillRegistry, install_bundle
 from .tools import build_tools
 from .tools.repl import close_all_repls
 from .tools.search import aclose_search_provider
@@ -144,6 +151,11 @@ def index_existing_vault_notes(settings: Settings, memory: MemoryStore) -> int:
     return count
 
 
+def _discover(settings: Settings) -> list:
+    """The merged skill library: the user's vault plus this project's."""
+    return discover_skills(settings.resolved_skills_dir, settings.project_skills_dir)
+
+
 async def build_default_graph(settings: Settings, *, memory: MemoryStore | None = None) -> tuple[Any, Any, Any]:
     """Build the agent graph with the unified tool set. Returns (graph, checkpointer, router)."""
     router = ModelRouter(settings)
@@ -181,7 +193,7 @@ async def create_app(
         app["graph"] = graph
         app["checkpointer"] = checkpointer
         app["router"] = router
-        app["skills"] = discover_skills(settings.resolved_skills_dir)
+        app["skills"] = _discover(settings)
         print(f"[daimon-agent] listening on :{settings.port}", file=sys.stderr)
 
         # Vault-note indexing runs in the background — with a large vault
@@ -397,6 +409,10 @@ async def create_app(
         print(f"[daimon-agent] received task: {instruction}", file=sys.stderr)
 
         graph = app["graph"]
+        # Re-scan every turn rather than trusting the startup scan: a skill the
+        # agent saved a moment ago, or one the user just dropped into the
+        # folder, has to be usable now. It's a directory glob.
+        app["skills"] = _discover(app["settings"])
 
         async def run(emit) -> Any:
             return await run_turn(
@@ -474,6 +490,142 @@ async def create_app(
                 result.append({"name": name, "description": desc})
         return web.json_response(result)
 
+    async def skills_handler(request: web.Request) -> web.Response:
+        """GET /skills — the merged library. Scanned per request so a skill the
+        agent just saved shows up without a restart."""
+        skills = _discover(request.app["settings"])
+        return web.json_response([
+            {
+                "name": s.name,
+                "description": s.description,
+                "source": s.source,
+                "path": str(s.path) if s.path else "",
+            }
+            for s in skills
+        ])
+
+    async def skill_handler(request: web.Request) -> web.Response:
+        """GET /skills/{name} — one skill's full SKILL.md."""
+        name = request.match_info.get("name", "")
+        for skill in _discover(request.app["settings"]):
+            if skill.name == name and skill.path is not None:
+                try:
+                    return web.json_response({
+                        "name": skill.name,
+                        "description": skill.description,
+                        "source": skill.source,
+                        "path": str(skill.path),
+                        "content": skill.path.read_text(encoding="utf-8"),
+                    })
+                except OSError as exc:
+                    return web.Response(status=500, text=f"could not read skill: {exc}")
+        return web.Response(status=404, text=f'no skill named "{name}"')
+
+    # --- the public skill registry ------------------------------------------
+    # Thin passthroughs: the CLI stays a thin client, and the cache lives in
+    # one process instead of one per client.
+
+    def _registry(settings_obj: Settings) -> SkillRegistry:
+        return SkillRegistry(settings_obj.registry_cache_dir)
+
+    async def registry_search_handler(request: web.Request) -> web.Response:
+        query = request.query.get("q", "").strip()
+        if not query:
+            return web.Response(status=400, text="q is required")
+        try:
+            hits = await _registry(request.app["settings"]).search(
+                query,
+                limit=int(request.query.get("limit", 20)),
+                featured=request.query.get("featured") in ("1", "true"),
+            )
+        except RegistryError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        return web.json_response([hit.as_dict() for hit in hits])
+
+    async def registry_item_handler(request: web.Request) -> web.Response:
+        """Resolve a slug to its repo and the skills inside it — an entry is a
+        repo, and a repo may hold many skills."""
+        try:
+            entry, paths = await _registry(request.app["settings"]).resolve(
+                request.match_info.get("slug", "")
+            )
+        except RegistryError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        return web.json_response({**entry.as_dict(), "skills": paths})
+
+    async def registry_preview_handler(request: web.Request) -> web.Response:
+        """The bundle's manifest *without* writing anything — what the install
+        confirmation shows the user before they decide."""
+        slug = request.match_info.get("slug", "")
+        skill_dir = request.query.get("path", "")
+        registry = _registry(request.app["settings"])
+        try:
+            entry = await registry.item(slug)
+            if not skill_dir:
+                paths = await registry.skill_paths(entry.repo)
+                skill_dir = paths[0] if len(paths) == 1 else ""
+            if not skill_dir:
+                return web.Response(status=400, text="path is required for a multi-skill repo")
+            bundle = await registry.fetch_bundle(entry, skill_dir)
+        except RegistryError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        skill_md = next((f for f in bundle.files if f.path == "SKILL.md"), None)
+        return web.json_response({
+            **bundle.as_dict(),
+            "skill_md": skill_md.content if skill_md else "",
+        })
+
+    async def skills_install_handler(request: web.Request) -> web.Response:
+        """Write a bundle into a library. Only reached after the client has
+        shown the user what's in it — the agent has no path to this."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid json body")
+        slug = str(body.get("slug") or "")
+        skill_dir = str(body.get("path") or "")
+        if not slug or not skill_dir:
+            return web.Response(status=400, text="slug and path are required")
+
+        settings_obj = request.app["settings"]
+        root = (
+            settings_obj.project_skills_dir
+            if str(body.get("scope", "")).lower() == "project"
+            else settings_obj.resolved_skills_dir
+        )
+        registry = _registry(settings_obj)
+        try:
+            entry = await registry.item(slug)
+            bundle = await registry.fetch_bundle(entry, skill_dir)
+            written = install_bundle(bundle, root)
+        except RegistryError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+
+        memory_store = request.app["memory"]
+        if memory_store is not None and bundle.description:
+            memory_store.upsert_skill(bundle.name, bundle.description)
+        return web.json_response({
+            "name": bundle.name,
+            "installed": written,
+            "scope": "project" if root == settings_obj.project_skills_dir else "vault",
+        })
+
+    async def models_handler(request: web.Request) -> web.Response:
+        """GET /models — what every provider offers, with why it may be
+        unusable. One implementation for the CLI and the app, so a model
+        offered in one is offered in the other."""
+        s = request.app["settings"]
+        out: dict[str, Any] = {}
+        for name in KNOWN_PROVIDERS:
+            models, source = await list_models(name, s)
+            out[name] = {
+                "models": models,
+                "source": source,
+                "installed": provider_available(name),
+                "key_configured": bool(provider_key(name, s)),
+            }
+        return web.json_response(out)
+
     async def config_handler(request: web.Request) -> web.Response:
         """GET /config — non-secret agent configuration for the app's settings tab."""
         s = request.app["settings"]
@@ -516,8 +668,40 @@ async def create_app(
             "pinchtab_healthy": pinchtab_ok,
         })
 
+    def _key_field(value: str) -> str:
+        """Which provider a pasted key belongs to.
+
+        Anthropic keys start `sk-ant-`; DeepSeek's are plain `sk-`. Detecting
+        it here means the CLI's `/setup <key>` and the app's single key field
+        both just work, and nobody has to be told which box to use.
+        """
+        return "anthropic_api_key" if value.startswith("sk-ant-") else "api_key"
+
+    def _model_problem(spec: str, settings_obj: Settings) -> str | None:
+        """Why this model spec can't run, or None.
+
+        Checked before accepting, because a model is only reachable if its
+        provider is installed *and* keyed — and the two have different fixes.
+        Accepting an unusable spec would leave every later turn failing at the
+        API call with nothing pointing back here.
+        """
+        provider, _ = parse_spec(spec, settings_obj.provider)
+        if provider not in KNOWN_PROVIDERS:
+            return f"unknown provider '{provider}' — expected one of {', '.join(KNOWN_PROVIDERS)}"
+        if not provider_available(provider):
+            return f"the {provider} provider isn't installed — run `uv sync --extra {provider}`"
+        has_key = {
+            "deepseek": bool(settings_obj.api_key or os.environ.get("DEEPSEEK_API_KEY")),
+            "anthropic": bool(
+                settings_obj.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+            ),
+        }[provider]
+        if not has_key:
+            return f"no {provider} API key is set — add one first"
+        return None
+
     async def config_update_handler(request: web.Request) -> web.Response:
-        """POST /config — update configuration (API keys).
+        """POST /config — update API keys and model selection.
         Writes to the .env file so the change survives restarts."""
         try:
             body = await request.json()
@@ -528,7 +712,14 @@ async def create_app(
         writable = {
             "api_key": ("api_key", "DEEPSEEK_API_KEY"),
             "anthropic_api_key": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+            "model": ("model", "DAIMON_MODEL"),
+            "flash_model": ("flash_model", "DAIMON_FLASH_MODEL"),
         }
+        # `key` is the provider-agnostic field: paste a key, we work out whose.
+        raw_key = body.get("key")
+        if isinstance(raw_key, str) and raw_key.strip():
+            body = {**body, _key_field(raw_key.strip()): raw_key.strip()}
+
         updates: dict[str, str] = {}
         for field_name, (attr, env_var) in writable.items():
             value = body.get(field_name)
@@ -538,23 +729,45 @@ async def create_app(
                 return web.Response(
                     status=400, text=f"{field_name} must be a non-empty string"
                 )
-            patch_env_file(Path.cwd() / ".env", env_var, value.strip())
-            os.environ[env_var] = value.strip()
             updates[attr] = value.strip()
 
         if not updates:
             return web.Response(status=400, text="no config fields to update")
 
+        # Validate models against the settings the keys in *this* request
+        # produce, so setting a key and a model together works in one call.
+        candidate = replace(request.app["settings"], **updates)
+        for field_name in ("model", "flash_model"):
+            attr = writable[field_name][0]
+            if attr in updates:
+                problem = _model_problem(updates[attr], candidate)
+                if problem is not None:
+                    return web.json_response(
+                        {"error": f"can't use {updates[attr]}: {problem}"}, status=400
+                    )
+
+        for field_name, (attr, env_var) in writable.items():
+            if attr in updates:
+                patch_env_file(Path.cwd() / ".env", env_var, updates[attr])
+                os.environ[env_var] = updates[attr]
+
         # Update in-memory settings so the change takes effect immediately, and
-        # rebuild the router so model calls use the new key.
-        request.app["settings"] = replace(request.app["settings"], **updates)
-        request.app["router"] = ModelRouter(request.app["settings"])
-        return web.json_response({"ok": True})
+        # rebuild the router so model calls use the new key/model.
+        request.app["settings"] = candidate
+        request.app["router"] = ModelRouter(candidate)
+        return web.json_response({"ok": True, "updated": sorted(updates)})
 
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
     app.router.add_get("/workspace", workspace_handler)
     app.router.add_get("/tools", tools_handler)
+    app.router.add_get("/skills", skills_handler)
+    app.router.add_post("/skills/install", skills_install_handler)
+    app.router.add_get("/skills/{name}", skill_handler)
+    app.router.add_get("/registry/search", registry_search_handler)
+    app.router.add_get("/registry/item/{slug}", registry_item_handler)
+    app.router.add_get("/registry/preview/{slug}", registry_preview_handler)
+    app.router.add_get("/models", models_handler)
     app.router.add_get("/config", config_handler)
     app.router.add_post("/config", config_update_handler)
     app.router.add_post("/task", task)

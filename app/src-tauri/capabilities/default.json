@@ -40,6 +40,9 @@
     "allow-get-vault-path-status",
     "allow-set-vault-path",
     "allow-list-vault-files",
-    "allow-read-vault-file"
+    "allow-read-vault-file",
+    "allow-list-skills",
+    "allow-read-skill",
+    "allow-list-models"
   ]
 }

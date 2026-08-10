@@ -346,7 +346,9 @@ async def test_amain_interactive_tui(fake_client, monkeypatch, capsys):
     assert code == 0
     assert fake_client["stream"][0] == "cli"
     assert fake_client["stream"][1] == "hello"
-    assert fake_client["ensure"] == 1
+    # At least one — the startup first-run check also ensures the server, and
+    # how many times it's asked is an implementation detail, not the contract.
+    assert fake_client["ensure"] >= 1
     # Full-screen, with the mouse captured so the wheel scrolls the
     # transcript — leaving mouse_support off is half of why scrolling never
     # worked in the original version.
@@ -498,3 +500,66 @@ class TestTranscript:
         assert t.text().count("\n") + 1 == len(t.rows)
         assert all(visible_len(r) <= 20 for r in t.rows)
         assert t.rows[-1] == f"line {tui_mod.MAX_TRANSCRIPT_LINES + 499}"
+
+
+class TestConfigSources:
+    """Everything that reports configuration must read it from the server.
+
+    `/model` used to call `Settings.from_env()` in the CLI process, which
+    resolves a different `.env` (this process's cwd, not the server's) and
+    can't see a runtime change made through POST /config — so `/model` and
+    `/config` disagreed after `/setup`.
+    """
+
+    def test_no_command_handler_reads_settings_locally(self):
+        import inspect
+
+        from daimon_agent.cli import commands as mod
+
+        source = inspect.getsource(mod)
+        assert "Settings.from_env()" not in source, (
+            "a command handler is reading config locally — it will drift from "
+            "the server, which is what /model did"
+        )
+
+    def test_model_and_config_are_both_intercepted_by_the_tui(self):
+        from daimon_agent.cli import commands as mod
+
+        for name in ("model", "config", "setup", "tools", "skills"):
+            handler = mod.get_commands()[name][1]
+            # The stub returns a single blank line; the TUI never dispatches it.
+            assert handler(f"/{name}", None) == [""], name
+
+    async def test_model_lines_come_from_the_server(self, monkeypatch):
+        from daimon_agent.cli import tui as tui_mod
+
+        async def fake_ensure(settings, **kw):
+            return 4711, False
+
+        async def fake_config(http, port):
+            return {
+                "model": "anthropic:claude-sonnet-5",
+                "flash_model": "deepseek-chat",
+                "api_base": "(default)",
+            }
+
+        monkeypatch.setattr(tui_mod.client, "ensure_server", fake_ensure)
+        monkeypatch.setattr(tui_mod.client, "get_config", fake_config)
+
+        lines = "\n".join(await tui_mod._model_lines(object(), None))
+        assert "anthropic:claude-sonnet-5" in lines
+        assert "deepseek-chat" in lines
+
+    async def test_model_reports_an_unreachable_server(self, monkeypatch):
+        from daimon_agent.cli import tui as tui_mod
+
+        async def fake_ensure(settings, **kw):
+            return 4711, False
+
+        async def broken(http, port):
+            return {"error": "could not reach the daimon server"}
+
+        monkeypatch.setattr(tui_mod.client, "ensure_server", fake_ensure)
+        monkeypatch.setattr(tui_mod.client, "get_config", broken)
+        lines = "\n".join(await tui_mod._model_lines(object(), None))
+        assert "could not reach" in lines

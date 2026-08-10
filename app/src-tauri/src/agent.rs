@@ -236,11 +236,30 @@ pub async fn fetch_config(port: u16) -> Result<serde_json::Value, String> {
 }
 
 /// Update agent configuration (currently: api_key).
-pub async fn update_config(port: u16, api_key: &str) -> Result<serde_json::Value, String> {
+/// GET /models from the agent server.
+pub async fn list_models(port: u16) -> Result<serde_json::Value, String> {
+    let resp = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/models"))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("invalid models response: {e}"))
+}
+
+/// POST /config with an arbitrary field map. The server decides what each
+/// field means — including routing a bare `key` to the right provider by its
+/// prefix — so this stays a passthrough rather than a second place that has to
+/// know about providers.
+pub async fn update_config(
+    port: u16,
+    fields: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/config"))
-        .json(&serde_json::json!({ "api_key": api_key }))
+        .json(&fields)
         .send()
         .await
         .map_err(|e| format!("failed to reach agent server: {e}"))?;

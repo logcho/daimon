@@ -51,6 +51,13 @@ class Settings:
 
     # Turn loop.
     inactivity_timeout_s: float = 60.0
+    #: Graph steps before LangGraph raises. This is a *loop guard*, not a
+    #: task-length budget — real looping is caught by guardrails.py. Hitting it
+    #: no longer ends the turn; the turn continues from the checkpoint.
+    recursion_limit: int = 150
+    #: Total steps across all continuations before the agent stops and asks
+    #: whether to keep going. The actual ceiling on an unattended run.
+    max_steps_per_turn: int = 600
     live_frames: bool = False
     # Post-turn reflection (tool-using turns only) and token-threshold
     # compaction (main agent only, summarized via flash).
@@ -74,7 +81,21 @@ class Settings:
 
     @property
     def resolved_skills_dir(self) -> Path:
+        """The global library, which follows the user between projects."""
         return self.skills_dir or (self.vault_dir / "skills")
+
+    @property
+    def registry_cache_dir(self) -> Path:
+        """Cached registry/GitHub responses. Lives beside the databases because
+        it is derived data — deleting it costs a re-fetch, nothing else."""
+        return self.memory_db.parent / "registry-cache"
+
+    @property
+    def project_skills_dir(self) -> Path:
+        """Skills that live with the code. Committing `.daimon/skills/` shares
+        a procedure with everyone who works on the repo, which a personal
+        library can't do."""
+        return self.resolved_workspace_dir / ".daimon" / "skills"
 
     @property
     def resolved_flash_model(self) -> str:
@@ -137,6 +158,8 @@ class Settings:
             pinchtab_base=get("PINCHTAB_BASE") or "http://127.0.0.1:9867",
             pinchtab_token=get("PINCHTAB_TOKEN"),
             port=int(get("PORT") or "4711"),
+            recursion_limit=int(get("DAIMON_RECURSION_LIMIT") or "150"),
+            max_steps_per_turn=int(get("DAIMON_MAX_STEPS") or "600"),
             live_frames=get_bool("DAIMON_LIVE_FRAMES", False),
             reflect=get_bool("DAIMON_REFLECT", True),
             compaction_tokens=int(get("DAIMON_COMPACTION_TOKENS") or "60000"),

@@ -8,6 +8,7 @@ import { SettingsPanel } from "./SettingsPanel";
 import { SoundWave } from "./SoundWave";
 import { TerminalPanel } from "./TerminalPanel";
 import { VoiceIndicator } from "./VoiceIndicator";
+import { SkillsPanel } from "./SkillsPanel";
 import { VaultPanel } from "./VaultPanel";
 
 interface PanelProps {
@@ -164,6 +165,16 @@ export function Panel({
           }`}
         >
           vault
+        </button>
+        <button
+          onClick={() => onViewChange("skills")}
+          className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
+            view === "skills"
+              ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+              : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
+          }`}
+        >
+          skills
         </button>
         <button
           onClick={() => onViewChange("settings")}
@@ -323,6 +334,7 @@ export function Panel({
       )}
 
       {view === "vault" && <VaultPanel />}
+      {view === "skills" && <SkillsPanel />}
       {view === "settings" && <SettingsPanel />}
     </div>
   );

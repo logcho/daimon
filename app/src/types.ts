@@ -180,7 +180,7 @@ export interface TerminalExitedPayload {
   code: number | null;
 }
 
-export type View = "chat" | "terminal" | "vault" | "settings";
+export type View = "chat" | "terminal" | "vault" | "skills" | "settings";
 
 // --- Vault ------------------------------------------------------------------
 
@@ -188,6 +188,18 @@ export interface VaultFile {
   name: string;
   sizeBytes: number;
   modifiedAt: string;
+}
+
+// --- Skills -----------------------------------------------------------------
+
+/** A reusable procedure the agent can follow. `source` is "vault" (the user's
+ *  library, which follows them between projects) or "project" (stored with the
+ *  repo in .daimon/skills). A project skill shadows a vault one of the same
+ *  name — the same precedence the agent applies. */
+export interface SkillFile {
+  name: string;
+  description: string;
+  source: "vault" | "project";
 }
 
 // --- Voice dictation -------------------------------------------------------

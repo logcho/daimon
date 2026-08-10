@@ -18,16 +18,17 @@ from typing import Any
 from uuid import uuid4
 
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
 import hashlib
 
 from .emitter import set_active_emit
-from .events import done_event, error_event, step_event
+from .events import ask_event, continuation_event, done_event, error_event, step_event
 from .graph import extract_result, run_config
 from .reflect import reflect_turn, should_reflect
-from .skills.injector import format_skills_block, select_skills
-from .usage import UsageAccumulator, set_active_usage
+from .skills.injector import format_skills_index, select_skills
+from .usage import UsageAccumulator, get_active_usage, set_active_usage
 
 
 class TurnTimeoutError(TimeoutError):
@@ -64,6 +65,25 @@ def _pending_ask(state: Any) -> dict | None:
     return None
 
 
+def _continue_ask(steps: int, max_steps: int) -> dict:
+    """The 'keep going?' prompt raised when a turn exhausts its step budget.
+
+    Deliberately the same `ask` shape the agent's own questions use, so the UI
+    needs no second mechanism. It is *not* a graph interrupt though — nothing
+    is suspended — which is how `resume_turn` tells the two apart.
+    """
+    return ask_event(
+        str(uuid4()),
+        "continue",
+        f"Still working after {steps} steps — keep going?",
+        [
+            {"label": "Continue", "description": f"another {max_steps} steps"},
+            {"label": "Stop here", "description": "report what's done so far"},
+        ],
+        header="Budget",
+    )
+
+
 async def _drive(
     payload: Any,
     session_id: str,
@@ -72,25 +92,60 @@ async def _drive(
     *,
     graph: Any,
     thinking_id: str,
+    can_ask: bool = False,
+    steps: int = 0,
 ) -> tuple[str | None, dict | None]:
     """Run the graph to its next stopping point.
 
     Returns `(result, ask)` — exactly one is set. `payload` is the initial
     state for a new turn, or a `Command` for a resume; the graph doesn't care
     which, and neither does anything below this line.
+
+    The graph's recursion limit is a guard against infinite loops, not a budget
+    for how much work a task may take — a real project runs through it several
+    times over. Hitting it used to surface as an error the user had to answer by
+    re-prompting; instead we continue from the checkpoint, which is where the
+    state already was. `max_steps_per_turn` is the ceiling that actually bounds
+    an unattended run.
     """
-    config = run_config(session_id)
-    stream = graph.astream(payload, config, stream_mode="updates")
-    await _stream_with_inactivity_timeout(stream, settings.inactivity_timeout_s)
+    limit = settings.recursion_limit
+    config = run_config(session_id, limit)
+
+    while True:
+        stream = graph.astream(payload, config, stream_mode="updates")
+        try:
+            await _stream_with_inactivity_timeout(stream, settings.inactivity_timeout_s)
+        except GraphRecursionError:
+            steps += limit
+            if steps >= settings.max_steps_per_turn:
+                if not can_ask:
+                    # Nobody to answer — stop with whatever was accomplished
+                    # rather than park on a question no one will see.
+                    break
+                return None, _continue_ask(steps, settings.max_steps_per_turn)
+            emit(continuation_event(steps, settings.max_steps_per_turn, _turn_tokens()))
+            # None resumes the pending task from the checkpoint. No nudge
+            # message: the model simply carries on, and the conversation stays
+            # free of scaffolding it would otherwise have to read every turn.
+            payload = None
+            continue
+
+        state = await graph.aget_state(config)
+        ask = _pending_ask(state)
+        if ask is not None:
+            # Not an ending — the thinking indicator stays open across the
+            # pause, because the turn genuinely is still in flight.
+            return None, ask
+        break
 
     state = await graph.aget_state(config)
-    ask = _pending_ask(state)
-    if ask is not None:
-        # Not an ending — the thinking indicator stays open across the pause,
-        # because the turn genuinely is still in flight.
-        return None, ask
     emit(step_event(thinking_id, "Thinking", "done"))
     return extract_result(state.values.get("messages", [])), None
+
+
+def _turn_tokens() -> int:
+    acc = get_active_usage()
+    return acc.total_tokens if acc is not None else 0
 
 
 async def _finish(
@@ -159,9 +214,10 @@ async def run_turn(
             live_frame_task = None  # best-effort: never fail a turn for frames
 
     try:
-        # Skills tail, appended after the frozen rules prefix (injector ranks
-        # by token overlap against the instruction; empty block when none hit).
-        skills_block = format_skills_block(select_skills(instruction, skills)) if skills else ""
+        # Skills tail: every skill as one name + description line, appended
+        # after the frozen rules prefix. The agent reads a body with read_skill
+        # when one actually applies (see injector.format_skills_index).
+        skills_block = format_skills_index(select_skills(instruction, skills)) if skills else ""
         result, ask = await _drive(
             {
                 "messages": [HumanMessage(content=instruction)],
@@ -187,6 +243,7 @@ async def run_turn(
             emit,
             graph=graph,
             thinking_id=thinking_id,
+            can_ask="ask" in (capabilities or []),
         )
         if ask is not None:
             emit(ask)
@@ -244,13 +301,36 @@ async def resume_turn(
             live_frame_task = None
 
     try:
+        # Two things end a turn in a way that can be resumed, and they resume
+        # differently. A graph `interrupt()` leaves a suspended node, and
+        # `Command(resume=...)` feeds the answer back into it. A continuation
+        # ask suspends nothing — the graph merely ran out of steps — so it
+        # continues with `None`. The state itself tells them apart, which
+        # means the client doesn't have to.
+        config = run_config(session_id, settings.recursion_limit)
+        suspended = _pending_ask(await graph.aget_state(config)) is not None
+
+        if suspended:
+            payload: Any = Command(resume=answer)
+        elif _means_stop(answer):
+            # Declining a continuation: wrap up with what's been done rather
+            # than running further.
+            state = await graph.aget_state(config)
+            emit(step_event(thinking_id, "Thinking", "done"))
+            result = extract_result(state.values.get("messages", []))
+            emit(done_event(result, usage=usage.totals()))
+            return result
+        else:
+            payload = None
+
         result, ask = await _drive(
-            Command(resume=answer),
+            payload,
             session_id,
             settings,
             emit,
             graph=graph,
             thinking_id=thinking_id,
+            can_ask=True,  # they just answered one, so they can answer another
         )
         if ask is not None:
             emit(ask)
@@ -259,7 +339,7 @@ async def resume_turn(
         # The instruction for bookkeeping is the conversation's own first
         # human message, which the checkpointer still has — reconstructing it
         # here beats making the client echo it back.
-        state = await graph.aget_state(run_config(session_id))
+        state = await graph.aget_state(config)
         instruction = _first_human(state.values.get("messages", [])) or "(resumed turn)"
         await _finish(
             instruction, result or "", session_id, settings,
@@ -275,6 +355,19 @@ async def resume_turn(
             live_frame_task.cancel()
         set_active_emit(None)
         set_active_usage(None)
+
+
+#: Answers to a continuation ask that mean "wrap up". Anything else continues,
+#: which is the safe default here — the cost of one more segment is small next
+#: to abandoning work the user asked for.
+_STOP_WORDS = ("stop", "no", "halt", "cancel", "done", "quit", "enough")
+
+
+def _means_stop(answer: Any) -> bool:
+    if isinstance(answer, list):
+        return any(_means_stop(a) for a in answer)
+    text = str(answer or "").strip().lower()
+    return any(text == word or text.startswith(word + " ") for word in _STOP_WORDS)
 
 
 def _first_human(messages: list) -> str | None:
