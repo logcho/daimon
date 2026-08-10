@@ -62,7 +62,7 @@ Long tasks run unattended. The graph's step cap is a loop guard, not a budget, s
 
 #### Skills
 
-Reusable procedures as `<name>/SKILL.md`, in two libraries: `vault/skills/` follows you between projects, and a repo's `.daimon/skills/` travels with the code and can be committed. A project skill shadows a vault one of the same name.
+Reusable procedures as `<name>/SKILL.md`, in two libraries: `~/.daimon/skills/` is global — available from any directory, in the CLI and the app alike — and a repo's `.daimon/skills/` travels with the code and can be committed. A project skill shadows a global one of the same name.
 
 Loading is progressive, as in Claude Code: the prompt carries only each skill's name and one-line description, and the agent calls `read_skill` when one applies — so a library of fifty costs fifty lines, not fifty bodies. The agent writes them itself with `save_skill` when it works out something worth reusing. Browse them with `/skills`, or in the app's skills tab.
 

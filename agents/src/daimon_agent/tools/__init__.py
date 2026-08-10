@@ -119,11 +119,13 @@ class SaveSkillArgs(BaseModel):
         "deciding whether to read the skill later, so make it specific"
     )
     content: str = Field(description="The full SKILL.md body — the reusable procedure itself")
-    scope: str = Field(
-        default="vault",
-        description="'vault' (default) to keep it across all projects, or 'project' "
-        "to store it with this repo in .daimon/skills so it can be committed",
-    )
+    # No `scope`. Skills the agent writes always go to the user's own library,
+    # which is the whole point of a skill: available in every project, listed in
+    # the app, and not dependent on which directory a session happens to be
+    # working in. A project-scoped skill is only visible to a session whose
+    # workspace *is* that project, so one written on a whim disappears — which
+    # is exactly what happened. Project scope stays reachable through
+    # `/skills install`, where the user picks it deliberately.
 
 
 class CommandArgs(BaseModel):
@@ -342,8 +344,8 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
     def read_skill(name: str, file: str = "") -> str:
         return _skills.read_skill(settings, name, file)
 
-    def save_skill(name: str, description: str, content: str, scope: str = "vault") -> str:
-        return _skills.save_skill(settings, memory, name, description, content, scope)
+    def save_skill(name: str, description: str, content: str) -> str:
+        return _skills.save_skill(settings, memory, name, description, content)
 
     # ---- host ------------------------------------------------------------
 

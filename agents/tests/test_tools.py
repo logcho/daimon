@@ -150,3 +150,29 @@ async def test_save_skill_scope_picks_the_library(settings, tmp_path) -> None:
 
     assert (cfg.resolved_skills_dir / "global-one" / "SKILL.md").is_file()
     assert (cfg.project_skills_dir / "repo-one" / "SKILL.md").is_file()
+
+
+async def test_agent_cannot_choose_project_scope(settings, tmp_path) -> None:
+    """The library above still supports both scopes, but the *agent* doesn't
+    get to pick. It used to, and skills it filed under 'project' vanished from
+    every session whose workspace wasn't that project — including the app,
+    which is where the user looks at them. Structural rather than a prompt
+    instruction, because the model ignored the prompt."""
+    cfg = replace(settings, vault_dir=tmp_path / "vault", workspace_dir=tmp_path / "ws")
+    tool = {
+        t.name: t for t in build_tools(cfg, memory=None, session_id="scope-test")
+    }["save_skill"]
+
+    assert "scope" not in tool.args_schema.model_fields
+
+    await tool.ainvoke({"name": "written-by-agent", "description": "d", "content": "body"})
+    assert (cfg.resolved_skills_dir / "written-by-agent" / "SKILL.md").is_file()
+    assert not (cfg.project_skills_dir / "written-by-agent").exists()
+
+    # And a model that passes it anyway — they do invent arguments — has it
+    # ignored, not honoured: the skill still lands in the vault library.
+    out = await tool.ainvoke({
+        "name": "sneaky", "description": "d", "content": "body", "scope": "project",
+    })
+    assert (cfg.resolved_skills_dir / "sneaky" / "SKILL.md").is_file(), out
+    assert not (cfg.project_skills_dir / "sneaky").exists(), out

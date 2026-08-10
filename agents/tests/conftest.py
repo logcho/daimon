@@ -55,13 +55,21 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
 
 @pytest.fixture
 def settings(clean_env: dict[str, str], tmp_path: Path) -> Settings:
-    """Settings pointed at a tmp vault/workspace with no model credentials."""
+    """Settings pointed at a tmp vault/workspace with no model credentials.
+
+    `DAIMON_SKILLS_DIR` is pinned explicitly: the skill library now defaults to
+    `~/.daimon/skills`, which is a real directory belonging to whoever runs the
+    tests. Without this, a test that saves a skill writes into their actual
+    library — which happened, and is exactly the kind of thing a test suite
+    must not be able to do.
+    """
     vault = tmp_path / "vault"
     vault.mkdir()
     return Settings.from_env(
         {
             **clean_env,
             "DAIMON_VAULT_DIR": str(vault),
+            "DAIMON_SKILLS_DIR": str(tmp_path / "skills"),
             "DAIMON_MEMORY_DB": str(tmp_path / "memory" / "daimon.db"),
             "DAIMON_CHECKPOINTS_DB": str(tmp_path / "memory" / "checkpoints.db"),
         }

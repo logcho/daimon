@@ -530,36 +530,93 @@ class TestConfigSources:
             # The stub returns a single blank line; the TUI never dispatches it.
             assert handler(f"/{name}", None) == [""], name
 
-    async def test_model_lines_come_from_the_server(self, monkeypatch):
+    def test_model_lines_render_the_servers_values(self):
         from daimon_agent.cli import tui as tui_mod
 
-        async def fake_ensure(settings, **kw):
-            return 4711, False
-
-        async def fake_config(http, port):
-            return {
-                "model": "anthropic:claude-sonnet-5",
-                "flash_model": "deepseek-chat",
-                "api_base": "(default)",
-            }
-
-        monkeypatch.setattr(tui_mod.client, "ensure_server", fake_ensure)
-        monkeypatch.setattr(tui_mod.client, "get_config", fake_config)
-
-        lines = "\n".join(await tui_mod._model_lines(object(), None))
+        lines = "\n".join(tui_mod._model_lines({
+            "model": "anthropic:claude-sonnet-5",
+            "flash_model": "deepseek-chat",
+            "api_base": "(default)",
+        }))
         assert "anthropic:claude-sonnet-5" in lines
         assert "deepseek-chat" in lines
 
-    async def test_model_reports_an_unreachable_server(self, monkeypatch):
+    def test_model_lines_report_an_unreachable_server(self):
         from daimon_agent.cli import tui as tui_mod
 
-        async def fake_ensure(settings, **kw):
-            return 4711, False
+        lines = "\n".join(tui_mod._model_lines({"error": "could not reach the daimon server"}))
+        assert "could not reach" in lines
+
+
+class TestStatusBarSource:
+    """The status bar, /model and /config must agree.
+
+    All three used to read the model from somewhere different — the bar from
+    this process's Settings (frozen at launch), /model from a different .env,
+    /config from the server — so they diverged the moment /setup changed
+    anything. They now share one cache.
+    """
+
+    def _cache(self, model="deepseek-chat", window=128000):
+        from dataclasses import replace
+
+        from daimon_agent.cli.tui import ServerConfig
+        from daimon_agent.config import Settings
+
+        fallback = replace(Settings(), model=model, context_window=window)
+        return ServerConfig(fallback)
+
+    def test_falls_back_to_launch_settings_before_the_first_fetch(self):
+        cache = self._cache(model="deepseek-chat")
+        assert cache.model == "deepseek-chat"
+
+    def test_the_server_wins_once_fetched(self):
+        cache = self._cache(model="deepseek-chat")
+        cache.data = {"model": "deepseek-v4-pro", "context_window": 64000}
+        assert cache.model == "deepseek-v4-pro"
+        assert cache.context_window == 64000
+
+    async def test_a_failed_refresh_keeps_the_last_known_values(self, monkeypatch):
+        """Blanking the status bar because one poll failed would be worse than
+        showing a value that's a few seconds old."""
+        from daimon_agent.cli import tui as tui_mod
+
+        cache = self._cache()
+        cache.data = {"model": "deepseek-v4-pro"}
 
         async def broken(http, port):
             return {"error": "could not reach the daimon server"}
 
-        monkeypatch.setattr(tui_mod.client, "ensure_server", fake_ensure)
         monkeypatch.setattr(tui_mod.client, "get_config", broken)
-        lines = "\n".join(await tui_mod._model_lines(object(), None))
-        assert "could not reach" in lines
+        result = await cache.refresh(None, 4711)
+        assert result["error"]
+        assert cache.model == "deepseek-v4-pro"
+
+    async def test_refresh_adopts_the_new_model(self, monkeypatch):
+        from daimon_agent.cli import tui as tui_mod
+
+        cache = self._cache(model="deepseek-chat")
+
+        async def fresh(http, port):
+            return {"model": "anthropic:claude-sonnet-5"}
+
+        monkeypatch.setattr(tui_mod.client, "get_config", fresh)
+        await cache.refresh(None, 4711)
+        assert cache.model == "anthropic:claude-sonnet-5"
+
+    def test_the_bar_and_model_command_render_the_same_value(self):
+        """The actual complaint: they showed different models."""
+        from daimon_agent.cli import render, tui as tui_mod
+        from daimon_agent.cli.render import TurnStats
+
+        cfg = {"model": "deepseek-v4-pro", "flash_model": "deepseek-v4-flash",
+               "api_base": "(default)", "context_window": 128000}
+        cache = self._cache(model="stale-launch-value")
+        cache.data = cfg
+
+        bar = render.status_line("cli", cache.model, TurnStats(),
+                                 context_window=cache.context_window)
+        command = "\n".join(tui_mod._model_lines(cfg))
+        assert "deepseek-v4-pro" in bar
+        assert "deepseek-v4-pro" in command
+        assert "stale-launch-value" not in bar

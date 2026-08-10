@@ -112,7 +112,12 @@ def save_skill(
 ) -> str:
     """Write a skill. `scope` picks the library: "vault" (default — it follows
     the user between projects) or "project" (it lives with the repo and can be
-    committed)."""
+    committed).
+
+    The agent's own `save_skill` tool no longer exposes `scope` and always
+    lands in the vault library: a project skill is invisible to any session
+    whose workspace isn't that project, including the app. Project scope is
+    now only chosen by the user, through `/skills install`."""
     safe = sanitize_skill_name(name)
     root = (
         settings.project_skills_dir

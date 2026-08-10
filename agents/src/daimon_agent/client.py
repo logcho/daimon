@@ -491,6 +491,38 @@ async def update_config(http: aiohttp.ClientSession, port: int, fields: dict) ->
         return {"error": str(exc)}
 
 
+async def list_notes(http: aiohttp.ClientSession, port: int) -> Any:
+    """GET /vault — the agent's notes, from the server that owns the vault."""
+    return await _get_json(http, f"http://127.0.0.1:{port}/vault")
+
+
+async def read_note(http: aiohttp.ClientSession, port: int, name: str) -> Any:
+    return await _get_json(http, f"http://127.0.0.1:{port}/vault/{quote(name)}")
+
+
+async def _delete(http: aiohttp.ClientSession, url: str) -> Any:
+    try:
+        async with http.delete(url) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            try:
+                body = await resp.json()
+                message = body.get("error") if isinstance(body, dict) else None
+            except Exception:
+                message = await resp.text()
+            return {"error": message or f"HTTP {resp.status}"}
+    except (aiohttp.ClientError, OSError, ValueError) as exc:
+        return {"error": str(exc)}
+
+
+async def delete_note(http: aiohttp.ClientSession, port: int, name: str) -> Any:
+    return await _delete(http, f"http://127.0.0.1:{port}/vault/{quote(name)}")
+
+
+async def delete_skill(http: aiohttp.ClientSession, port: int, name: str) -> Any:
+    return await _delete(http, f"http://127.0.0.1:{port}/skills/{quote(name)}")
+
+
 async def registry_search(
     http: aiohttp.ClientSession, port: int, query: str, limit: int = 12
 ) -> Any:

@@ -119,6 +119,11 @@ def _cmd_skills(text: str, session_name: str | None) -> list[str]:
     return [""]  # never reached; the TUI intercepts before dispatch
 
 
+def _cmd_notes(text: str, session_name: str | None) -> list[str]:
+    """``/notes [name]`` — handled by the TUI directly (needs HTTP client)."""
+    return [""]  # never reached; the TUI intercepts before dispatch
+
+
 def _cmd_plan(text: str, session_name: str | None) -> list[str]:
     """``/plan`` — handled by the TUI directly (it owns the session's mode)."""
     return [""]  # never reached; the TUI intercepts before dispatch
@@ -178,7 +183,8 @@ register("clear", "clear the output", _cmd_clear)
 register("status", "session and terminal info", _cmd_status)
 register("model", "current model configuration", _cmd_model)
 register("tools", "list available tools", _cmd_tools)
-register("skills", "list/read skills · find <topic> · install <slug>", _cmd_skills)
+register("skills", "list/read skills · find · install · remove", _cmd_skills)
+register("notes", "list/read the agent's notes · remove <name>", _cmd_notes)
 register("plan", "toggle plan mode — confirm a plan before changes", _cmd_plan)
 register("workspace", "show or change the workspace directory", _cmd_workspace)
 register("config", "show the current configuration", _cmd_config)

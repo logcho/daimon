@@ -81,8 +81,19 @@ class Settings:
 
     @property
     def resolved_skills_dir(self) -> Path:
-        """The global library, which follows the user between projects."""
-        return self.skills_dir or (self.vault_dir / "skills")
+        """The global library — genuinely global.
+
+        It used to default to `vault_dir / "skills"`, and `vault_dir` defaults
+        to the *relative* `./vault`, resolved against whatever cwd the server
+        was spawned with. For an installed `daimon` that is the directory you
+        happened to launch from, so the skill library moved with you and the
+        app (which resolves the vault differently again) never saw it at all.
+
+        `~/.daimon/skills` depends on nothing — not cwd, not the workspace, not
+        the vault, not the app's data dir — which is what "always available"
+        requires. `DAIMON_SKILLS_DIR` still overrides it.
+        """
+        return self.skills_dir or (Path.home() / ".daimon" / "skills")
 
     @property
     def registry_cache_dir(self) -> Path:

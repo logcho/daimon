@@ -92,6 +92,44 @@ class _SlashCompleter(Completer):
 MAX_TRANSCRIPT_LINES = 5000
 
 
+class ServerConfig:
+    """The server's configuration, cached for display.
+
+    Three surfaces reported the model and all three read it from a different
+    place: the status bar from this process's `Settings` (frozen at launch),
+    `/model` from `Settings.from_env()` (a *different* `.env` — the CLI's cwd,
+    not the server's), and `/config` from the server. They disagreed the moment
+    anything changed.
+
+    Only the server can answer: it owns the file it loaded, and `POST /config`
+    changes the model at runtime without touching this process at all. So
+    everything reads through here, and `refresh()` is called wherever the
+    configuration might just have moved.
+    """
+
+    def __init__(self, fallback: Settings) -> None:
+        self._fallback = fallback
+        self.data: dict = {}
+
+    @property
+    def model(self) -> str:
+        """What the agent will actually use. Falls back to the launch-time
+        value only until the first successful fetch."""
+        return self.data.get("model") or self._fallback.model
+
+    @property
+    def context_window(self) -> int:
+        return int(self.data.get("context_window") or self._fallback.context_window)
+
+    async def refresh(self, http: Any, port: int) -> dict:
+        """Re-read from the server. A failed fetch keeps the last known values
+        rather than blanking the status bar."""
+        cfg = await client.get_config(http, port)
+        if not cfg.get("error"):
+            self.data = cfg
+        return cfg
+
+
 class Transcript:
     """Finalized output and the viewport onto it.
 
@@ -188,8 +226,12 @@ async def run_tui(
     turn_started = 0.0
     #: What `/skills install` is waiting to confirm.
     pending_install: dict[str, str] = {}
+    #: What a `remove` is waiting to confirm — kind ("skill"/"note") and name.
+    pending_delete: dict[str, str] = {}
     #: The `/setup` wizard, while one is running.
     setup_flow: setup_mod.SetupFlow | None = None
+    #: The single source of truth for what's configured — see ServerConfig.
+    server_config = ServerConfig(settings)
 
     # --- layout ------------------------------------------------------------
 
@@ -276,9 +318,9 @@ async def run_tui(
             text=lambda: ANSI(
                 render.status_line(
                     session_id,
-                    settings.model,
+                    server_config.model,
                     state.stats,
-                    context_window=settings.context_window,
+                    context_window=server_config.context_window,
                     mode=mode,
                 )
             ),
@@ -393,6 +435,9 @@ async def run_tui(
         if ask_id == "install":
             await finish_install(str(value))
             return
+        if ask_id == "delete":
+            await finish_delete(str(value))
+            return
         if ask_id.startswith(setup_mod.PREFIX):
             await advance_setup(ask_id[len(setup_mod.PREFIX):], str(value))
             return
@@ -478,6 +523,10 @@ async def run_tui(
             await install_skill(port, rest)
             return
 
+        if verb in ("remove", "rm", "delete"):
+            await confirm_delete("skill", rest)
+            return
+
         skills = await client.list_skills(http, port)
         if argument:
             # An exact name reads the skill; anything else filters the list —
@@ -549,14 +598,92 @@ async def run_tui(
                 "header": "Install",
                 "question": f"Add “{preview.get('name', slug)}” to your skill library?",
                 "options": [
-                    {"label": "Install to vault", "description": "available in every project"},
-                    {"label": "Install to project", "description": "lives in .daimon/skills here"},
+                    {
+                        "label": "Install to vault",
+                        "description": "available in every project, and listed in the app",
+                    },
+                    {
+                        "label": "Install to project",
+                        "description": "lives in .daimon/skills here — only visible while "
+                        "working in this project, so the app won't list it",
+                    },
                     {"label": "Cancel", "description": "write nothing"},
                 ],
                 "multi_select": False,
             }
         )
         app.invalidate()
+
+    async def show_notes(argument: str | None) -> None:
+        """`/notes`, `/notes <name-or-filter>`, `/notes remove <name>`."""
+        port, _ = await client.ensure_server(settings)
+        verb, _, rest = (argument or "").strip().partition(" ")
+        rest = rest.strip()
+
+        if verb in ("remove", "rm", "delete"):
+            await confirm_delete("note", rest)
+            return
+
+        notes = await client.list_notes(http, port)
+        if isinstance(notes, dict) and notes.get("error"):
+            emit(["", f"  {RED}{notes['error']}{RESET}"])
+            return
+        if argument:
+            exact = next((n for n in notes if n["name"] == argument), None)
+            if exact is not None:
+                note = await client.read_note(http, port, argument)
+                if isinstance(note, dict) and note.get("error"):
+                    emit(["", f"  {RED}{note['error']}{RESET}"])
+                    return
+                emit([
+                    "",
+                    f"{DIM}── note · {argument}{RESET}",
+                    display.render_markdown(str(note.get("content", ""))),
+                ])
+                return
+            needle = argument.lower()
+            notes = [n for n in notes if needle in n["name"].lower()]
+        emit(_note_listing(notes, argument))
+
+    async def confirm_delete(kind: str, name: str) -> None:
+        """Deleting isn't undoable, so it always asks — through the same
+        options UI the agent's own questions use."""
+        if not name:
+            emit(["", f"  {DIM}usage:{RESET} /{kind}s remove <name>"])
+            return
+        pending_delete["kind"] = kind
+        pending_delete["name"] = name
+        state.ask = AskState(
+            event={
+                "type": "ask",
+                "id": "delete",
+                "kind": "question",
+                "header": "Delete",
+                "question": f"Delete the {kind} \u201c{name}\u201d? This cannot be undone.",
+                "options": [
+                    {"label": "Cancel", "description": "keep it"},
+                    {"label": "Delete", "description": f"remove the {kind} permanently"},
+                ],
+                "multi_select": False,
+            }
+        )
+        app.invalidate()
+
+    async def finish_delete(choice: str) -> None:
+        if not choice.lower().startswith("delete"):
+            emit(["", f"  {DIM}\u2298 kept{RESET}"])
+            return
+        port, _ = await client.ensure_server(settings)
+        kind, name = pending_delete["kind"], pending_delete["name"]
+        result = (
+            await client.delete_skill(http, port, name)
+            if kind == "skill"
+            else await client.delete_note(http, port, name)
+        )
+        if isinstance(result, dict) and result.get("error"):
+            emit(["", f"  {RED}{result['error']}{RESET}"])
+            return
+        emit(["", f"  {GREEN}\u2713{RESET} deleted {kind} {BLUE}{name}{RESET}"])
 
     async def finish_install(choice: str) -> None:
         if choice.startswith("Cancel"):
@@ -578,11 +705,19 @@ async def run_tui(
             f"  {DIM}the agent sees it from the next turn — /skills {result.get('name')} to read it{RESET}",
         ])
 
+    async def refresh_config() -> dict:
+        """Re-read the server's configuration and redraw. Called wherever it
+        might just have changed, so the status bar can't fall behind."""
+        port, _ = await client.ensure_server(settings)
+        cfg = await server_config.refresh(http, port)
+        app.invalidate()
+        return cfg
+
     async def show_config() -> None:
-        emit(await _config_lines(settings, http))
+        emit(_config_lines(await refresh_config(), settings.port))
 
     async def show_model() -> None:
-        emit(await _model_lines(settings, http))
+        emit(_model_lines(await refresh_config()))
 
     # --- the setup wizard --------------------------------------------------
 
@@ -602,6 +737,9 @@ async def run_tui(
         if setup_flow is None:
             return
         _present(await setup_flow.answer(step, value))
+        # The wizard writes through POST /config, so the status bar's idea of
+        # the model is stale the moment a step lands.
+        await refresh_config()
 
     def handle_slash(text: str) -> None:
         nonlocal mode
@@ -638,6 +776,12 @@ async def run_tui(
             return
         if name == "model":
             app.create_background_task(show_model())
+            return
+        if name == "notes":
+            parts = text.strip().split(maxsplit=1)
+            app.create_background_task(
+                show_notes(parts[1].strip() if len(parts) > 1 else None)
+            )
             return
         if name == "setup":
             app.create_background_task(start_setup())
@@ -865,8 +1009,9 @@ async def run_tui(
         """With no key anywhere, nothing can run — so walk the user through it
         rather than leaving them at a prompt that will only ever error."""
         try:
-            port, _ = await client.ensure_server(settings)
-            if setup_mod.needs_setup(await client.get_config(http, port)):
+            # Also the first fetch that fills the status bar — until it lands,
+            # the bar shows this process's launch-time guess.
+            if setup_mod.needs_setup(await refresh_config()):
                 await start_setup()
         except Exception:
             pass  # never block the prompt on a setup check
@@ -1021,6 +1166,26 @@ def _install_preview(bundle: dict, item: dict) -> list[str]:
     return lines
 
 
+def _note_listing(notes: list, query: str | None = None) -> list[str]:
+    """The agent's notes, newest first — the same set it can recall."""
+    if not notes:
+        return [
+            "",
+            f"  {DIM}no notes{' matching “' + query + '”' if query else ' yet'}"
+            f" — the agent writes them as it learns things worth keeping{RESET}",
+        ]
+    lines = ["", f"{DIM}── notes{f' · {len(notes)} matching “{query}”' if query else ''}{RESET}"]
+    for note in notes[:40]:
+        size = int(note.get("sizeBytes", 0))
+        lines.append(
+            f"  {BLUE}{note['name']}{RESET}  {DIM}{size / 1024:.1f} KB{RESET}"
+        )
+    lines.append(
+        f"  {DIM}/notes <name> reads one · /notes remove <name> deletes it{RESET}"
+    )
+    return lines
+
+
 def _skill_listing(
     skills: list[dict], *, query: str | None = None, total: int | None = None
 ) -> list[str]:
@@ -1053,42 +1218,37 @@ def _skill_listing(
                 f"{DIM}{render.truncate(description, 84)}{RESET}"
             )
     lines.append(
-        f"  {DIM}/skills <name> reads one · /skills find <topic> searches"
-        f" published skills{RESET}"
+        f"  {DIM}/skills <name> reads one · find <topic> searches published"
+        f" ones · remove <name> deletes{RESET}"
     )
     return lines
 
 
-async def _model_lines(settings: Settings, http: Any) -> list[str]:
-    """`/model` — the model settings, read from the server.
+def _model_lines(cfg: dict) -> list[str]:
+    """`/model` — the model settings. Pure: the caller has already fetched.
 
     It used to read `Settings.from_env()` in *this* process, which resolves a
     different `.env` (the CLI's cwd, not the server's) and can't see a change
-    made at runtime through `POST /config`. So `/model` and `/config` reported
-    different values after `/setup`. One source of truth: the server.
+    made at runtime through `POST /config`.
     """
-    port, _ = await client.ensure_server(settings)
-    cfg = await client.get_config(http, port)
     if cfg.get("error"):
         return ["", f"  {RED}failed to reach server:{RESET} {cfg['error']}"]
 
-    lines = ["", f"{DIM}── model{RESET}"]
-    lines.append(f"  {DIM}main{RESET}      {cfg.get('model', '?')}")
-    lines.append(f"  {DIM}flash{RESET}     {cfg.get('flash_model', '?')}")
-    lines.append(f"  {DIM}api base{RESET}  {cfg.get('api_base', '(default)')}")
-    lines.append(
+    return [
+        "",
+        f"{DIM}── model{RESET}",
+        f"  {DIM}main{RESET}      {cfg.get('model', '?')}",
+        f"  {DIM}flash{RESET}     {cfg.get('flash_model', '?')}",
+        f"  {DIM}api base{RESET}  {cfg.get('api_base', '(default)')}",
         f"  {DIM}change it with{RESET} {BLUE}/setup{RESET}"
-        f" {DIM}· everything else:{RESET} {BLUE}/config{RESET}"
-    )
-    return lines
+        f" {DIM}· everything else:{RESET} {BLUE}/config{RESET}",
+    ]
 
 
-async def _config_lines(settings: Settings, http: Any) -> list[str]:
-    """`/config` — what the agent is actually configured with, read from the
-    server rather than guessed by this process. Read-only: `/setup` is the
-    thing that changes any of it."""
-    port, _ = await client.ensure_server(settings)
-    cfg = await client.get_config(http, port)
+def _config_lines(cfg: dict, port: int) -> list[str]:
+    """`/config` — what the agent is actually configured with. Pure: the caller
+    fetches, so this and the status bar can never be reading different things.
+    Read-only — `/setup` is what changes any of it."""
     if cfg.get("error"):
         return ["", f"  {RED}failed to reach server:{RESET} {cfg['error']}"]
 

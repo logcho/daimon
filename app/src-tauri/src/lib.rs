@@ -1,7 +1,6 @@
 mod agent;
 mod fn_key;
 mod session;
-mod skills;
 mod terminal;
 mod timefmt;
 mod vault;
@@ -79,6 +78,64 @@ async fn update_config(
 /// it's installed and keyed, so the picker can show what exists and grey out
 /// what can't be selected.
 #[tauri::command]
+async fn list_skills(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_skills(status.port).await
+}
+
+#[tauri::command]
+async fn read_skill(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::read_skill(status.port, &name).await
+}
+
+#[tauri::command]
+async fn list_notes(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_notes(status.port).await
+}
+
+#[tauri::command]
+async fn read_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::read_note(status.port, &name).await
+}
+
+#[tauri::command]
+async fn delete_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::delete_note(status.port, &name).await
+}
+
+#[tauri::command]
+async fn delete_skill(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::delete_skill(status.port, &name).await
+}
+
+#[tauri::command]
 async fn list_models(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentManager>,
@@ -136,8 +193,12 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             vault::set_vault_path,
             vault::list_vault_files,
             vault::read_vault_file,
-            skills::list_skills,
-            skills::read_skill,
+            list_skills,
+            read_skill,
+            delete_skill,
+            list_notes,
+            read_note,
+            delete_note,
             list_models,
         ])
         .setup(|app| {

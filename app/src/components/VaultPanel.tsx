@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { listVaultFiles, readVaultFile } from "../api";
+import { deleteVaultFile, listVaultFiles, readVaultFile } from "../api";
 import type { VaultFile } from "../types";
+import { DeleteButton } from "./DeleteButton";
 
 type ListState = "loading" | "ready" | "error";
 type DetailState = "idle" | "loading" | "ready" | "error";
@@ -49,11 +50,16 @@ export function VaultPanel() {
   const [detailState, setDetailState] = useState<DetailState>("idle");
   const [content, setContent] = useState("");
   const [detailErrorMessage, setDetailErrorMessage] = useState("");
+  // Failures from actions rather than from viewing a file. Kept separate
+  // because the detail error only renders while something is selected, and a
+  // delete clears the selection before its request has even finished.
+  const [actionErrorMessage, setActionErrorMessage] = useState("");
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   function handleOpenFile(name: string) {
     setSelectedFile(name);
+    setActionErrorMessage("");
     setDetailState("loading");
     readVaultFile(name)
       .then((text) => {
@@ -79,6 +85,39 @@ export function VaultPanel() {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Optimistic: the row goes as soon as it's confirmed, and the request runs
+   *  behind it. The decision is already made at that point — waiting on a
+   *  round trip through Tauri, the agent server and the filesystem just makes
+   *  the UI look stuck. If the delete does fail, the note comes back where it
+   *  was and says why. */
+  function handleDelete(name: string) {
+    const index = files.findIndex((f) => f.name === name);
+    if (index === -1) return;
+    const removed = files[index];
+
+    setActionErrorMessage("");
+    setFiles((prev) => prev.filter((f) => f.name !== name));
+    if (selectedFile === name) {
+      setSelectedFile(null);
+      setContent("");
+      setDetailState("idle");
+    }
+
+    deleteVaultFile(name).catch((err) => {
+      // Splice back at the original index rather than appending — the list is
+      // ordered, and a failed delete shouldn't quietly reshuffle it.
+      setFiles((prev) => {
+        if (prev.some((f) => f.name === name)) return prev;
+        const restored = [...prev];
+        restored.splice(Math.min(index, restored.length), 0, removed);
+        return restored;
+      });
+      setActionErrorMessage(
+        `couldn't delete ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
 
   const selectedFileMeta = selectedFile ? files.find((f) => f.name === selectedFile) : undefined;
 
@@ -130,7 +169,17 @@ export function VaultPanel() {
           {selectedFile && (
             <h3 className="truncate text-sm font-semibold tracking-tight text-neutral-100">{selectedFile}</h3>
           )}
+          {selectedFile && (
+            <span className="ml-auto">
+              <DeleteButton name={selectedFile} onDelete={() => handleDelete(selectedFile)} />
+            </span>
+          )}
         </div>
+        {actionErrorMessage && (
+          <p className="mb-3 rounded-md border border-red-500/20 bg-red-500/10 px-2 py-1 text-xs text-red-300">
+            {actionErrorMessage}
+          </p>
+        )}
         {selectedFileMeta && (
           <p className="-mt-1 mb-3 text-xs text-neutral-500">
             {formatBytes(selectedFileMeta.sizeBytes)} · {formatModifiedAt(selectedFileMeta.modifiedAt)}

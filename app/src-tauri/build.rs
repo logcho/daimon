@@ -36,6 +36,10 @@ fn main() {
             "list_skills",
             "read_skill",
             "list_models",
+            "delete_skill",
+            "list_notes",
+            "read_note",
+            "delete_note",
             "get_config",
             "update_config",
         ]));

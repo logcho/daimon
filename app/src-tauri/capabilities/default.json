@@ -43,6 +43,10 @@
     "allow-read-vault-file",
     "allow-list-skills",
     "allow-read-skill",
-    "allow-list-models"
+    "allow-list-models",
+    "allow-delete-skill",
+    "allow-list-notes",
+    "allow-read-note",
+    "allow-delete-note"
   ]
 }

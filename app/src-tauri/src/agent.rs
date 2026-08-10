@@ -51,6 +51,8 @@ pub struct AgentManager {
     /// Preferred port — the adoption-probe target.
     port: u16,
     agents_dir: PathBuf,
+    /// The orphan sweep runs once per app lifetime, not per ensure().
+    reconciled: std::sync::Once,
 }
 
 impl AgentManager {
@@ -67,6 +69,7 @@ impl AgentManager {
             ensure_lock: tokio::sync::Mutex::new(()),
             port,
             agents_dir,
+            reconciled: std::sync::Once::new(),
         }
     }
 
@@ -86,7 +89,14 @@ impl AgentManager {
             .app_data_dir()
             .map(|d| d.join("run"))
             .map_err(|e| format!("no app data dir: {e}"))?;
-        self.reconcile_orphans(&run_dir);
+        // Once per app lifetime. `spawn` deliberately leaves its pid file in
+        // place so a crashed parent still gets swept next launch — which means
+        // the file names *our own* child as soon as we've spawned one. Running
+        // the sweep on every ensure() therefore killed the server the previous
+        // call had just started, and the next call spawned another: an endless
+        // respawn loop, with a fresh PinchTab each time. Nothing here needs to
+        // run twice; the leftovers it looks for are from a previous process.
+        self.reconciled.call_once(|| self.reconcile_orphans(&run_dir));
         {
             let cached: Option<(bool, u16)> = {
                 let guard = self.inner.lock().unwrap();
@@ -164,7 +174,14 @@ impl AgentManager {
     /// the dev watcher replaced. The pid file survives a successful spawn
     /// precisely so this works. Checks the command name first so a recycled
     /// pid is never killed blind.
+    /// Kill a server left behind by an abruptly-killed previous run. Only
+    /// ever called through `reconciled.call_once` — see the note at the call
+    /// site for why running it more than once is destructive.
     fn reconcile_orphans(&self, run_dir: &std::path::Path) {
+        // Never sweep a child we're currently managing.
+        if matches!(&*self.inner.lock().unwrap(), Some(ChildState::Managed { .. })) {
+            return;
+        }
         let pid_path = run_dir.join("daimon-agent.pid");
         let Ok(pid_text) = std::fs::read_to_string(&pid_path) else { return };
         let _ = std::fs::remove_file(&pid_path);
@@ -236,6 +253,86 @@ pub async fn fetch_config(port: u16) -> Result<serde_json::Value, String> {
 }
 
 /// Update agent configuration (currently: api_key).
+/// GET /skills from the agent server.
+///
+/// The app used to walk the filesystem itself, which meant two independent
+/// answers to "where do skills live" — and they disagreed, so the tab was
+/// always empty. The server owns that question now.
+pub async fn list_skills(port: u16) -> Result<serde_json::Value, String> {
+    get_json(port, "skills").await
+}
+
+/// GET /skills/{name} — one skill with its full content.
+pub async fn read_skill(port: u16, name: &str) -> Result<serde_json::Value, String> {
+    get_json(port, &format!("skills/{name}")).await
+}
+
+async fn get_json(port: u16, path: &str) -> Result<serde_json::Value, String> {
+    let resp = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/{path}"))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("agent server returned {}", resp.status()));
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("invalid response: {e}"))
+}
+
+/// GET /vault — the agent's notes, from the server that owns the vault. The
+/// app used to walk its own vault path and showed an entirely different set of
+/// files, which would have made deletion act on the wrong ones.
+pub async fn list_notes(port: u16) -> Result<serde_json::Value, String> {
+    get_json(port, "vault").await
+}
+
+pub async fn read_note(port: u16, name: &str) -> Result<serde_json::Value, String> {
+    get_json(port, &format!("vault/{}", encode_path(name))).await
+}
+
+pub async fn delete_note(port: u16, name: &str) -> Result<serde_json::Value, String> {
+    delete_json(port, &format!("vault/{}", encode_path(name))).await
+}
+
+pub async fn delete_skill(port: u16, name: &str) -> Result<serde_json::Value, String> {
+    delete_json(port, &format!("skills/{}", encode_path(name))).await
+}
+
+/// Percent-encode a name for use as a URL path, keeping `/` as a separator —
+/// a note's name is a relative path like `notes/foo.md`, and the server's
+/// route matches across slashes. Everything else outside the unreserved set is
+/// escaped, so a filename with a space or a `#` doesn't truncate the request.
+/// The server re-checks containment regardless; this is about transport, not
+/// safety.
+fn encode_path(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for byte in name.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+async fn delete_json(port: u16, path: &str) -> Result<serde_json::Value, String> {
+    let resp = reqwest::Client::new()
+        .delete(format!("http://127.0.0.1:{port}/{path}"))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("delete failed ({})", resp.status()));
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("invalid response: {e}"))
+}
+
 /// GET /models from the agent server.
 pub async fn list_models(port: u16) -> Result<serde_json::Value, String> {
     let resp = reqwest::Client::new()

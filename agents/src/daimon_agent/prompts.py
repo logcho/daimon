@@ -48,8 +48,8 @@ Skills are procedures already written down for reuse. You are shown the whole li
 names and one-line descriptions — the bodies are not loaded. When a description covers what you're \
 about to do, read it with read_skill first and follow it, rather than working the procedure out \
 again; when none apply, ignore the list entirely. When you work out a genuinely reusable procedure \
-that isn't there yet, save it with save_skill — `scope` defaults to the user's own library, or pass \
-'project' to store it with this repo so it can be committed. Write the description as the condition \
+that isn't there yet, save it with save_skill — it goes to the user's own library, where it is \
+available in every project. Write the description as the condition \
 under which the skill applies: it is the only thing you'll see when deciding whether to read it. \
 Before working out a non-trivial procedure from scratch, try find_skills — thousands are published \
 and someone has often already written this one. You can't install them yourself; give the user the \

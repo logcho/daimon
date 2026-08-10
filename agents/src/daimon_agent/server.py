@@ -13,9 +13,11 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -152,8 +154,41 @@ def index_existing_vault_notes(settings: Settings, memory: MemoryStore) -> int:
 
 
 def _discover(settings: Settings) -> list:
-    """The merged skill library: the user's vault plus this project's."""
+    """The merged skill library: the user's global one plus this project's."""
     return discover_skills(settings.resolved_skills_dir, settings.project_skills_dir)
+
+
+def adopt_legacy_skills(settings: Settings) -> int:
+    """Copy skills from the old vault-relative location into the global one.
+
+    The library used to live under the vault, which resolved against the
+    server's cwd. Moving it to `~/.daimon/skills` would otherwise orphan
+    whatever a user had already built up — they'd open the app to an empty
+    list and reasonably conclude their skills were gone.
+
+    Copies rather than moves, so reverting this change loses nothing, and only
+    when the global library is empty — which makes it a one-time event by
+    construction, with no flag to keep in sync.
+    """
+    target = settings.resolved_skills_dir
+    legacy = settings.vault_dir / "skills"
+    if legacy == target or not legacy.is_dir():
+        return 0
+    if any(target.glob("*/SKILL.md")):
+        return 0  # already populated — never overwrite
+
+    copied = 0
+    for skill_md in sorted(legacy.glob("*/SKILL.md")):
+        try:
+            shutil.copytree(skill_md.parent, target / skill_md.parent.name)
+            copied += 1
+        except (OSError, shutil.Error) as exc:  # one bad skill mustn't stop the rest
+            print(f"[daimon-agent] could not adopt skill {skill_md.parent.name}: {exc}",
+                  file=sys.stderr)
+    if copied:
+        print(f"[daimon-agent] copied {copied} skill(s) from {legacy} to {target}",
+              file=sys.stderr)
+    return copied
 
 
 async def build_default_graph(settings: Settings, *, memory: MemoryStore | None = None) -> tuple[Any, Any, Any]:
@@ -193,6 +228,7 @@ async def create_app(
         app["graph"] = graph
         app["checkpointer"] = checkpointer
         app["router"] = router
+        adopt_legacy_skills(settings)
         app["skills"] = _discover(settings)
         print(f"[daimon-agent] listening on :{settings.port}", file=sys.stderr)
 
@@ -610,6 +646,101 @@ async def create_app(
             "scope": "project" if root == settings_obj.project_skills_dir else "vault",
         })
 
+    # --- the vault ----------------------------------------------------------
+    # Served rather than read from disk by each client. The app used to resolve
+    # the vault path itself and looked at an entirely different directory, so
+    # it showed a stale set of notes — which would have made "delete" delete
+    # the wrong files.
+
+    def _vault_file(settings_obj: Settings, relative: str) -> Path:
+        """Resolve a client-supplied path inside the vault, or raise.
+
+        Same discipline as `workspace.Confinement`: resolve first, then check
+        containment, so `..` and symlinks can't walk out.
+        """
+        root = Path(settings_obj.vault_dir).resolve()
+        target = (root / relative).resolve()
+        if target != root and root not in target.parents:
+            raise ValueError("path is outside the vault")
+        return target
+
+    async def vault_list_handler(request: web.Request) -> web.Response:
+        """GET /vault — every note, newest first.
+
+        Recursive: the agent writes to `vault/notes/`, and a top-level-only
+        listing showed none of them.
+        """
+        root = Path(request.app["settings"].vault_dir)
+        if not root.is_dir():
+            return web.json_response([])
+        notes = []
+        for path in root.rglob("*.md"):
+            if "skills" in path.relative_to(root).parts:
+                continue  # skills have their own view
+            stat = path.stat()
+            notes.append({
+                "name": str(path.relative_to(root)),
+                "sizeBytes": stat.st_size,
+                "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+            })
+        notes.sort(key=lambda n: n["modifiedAt"], reverse=True)
+        return web.json_response(notes)
+
+    async def vault_read_handler(request: web.Request) -> web.Response:
+        try:
+            path = _vault_file(request.app["settings"], request.match_info.get("name", ""))
+        except ValueError as exc:
+            return web.Response(status=400, text=str(exc))
+        if not path.is_file():
+            return web.Response(status=404, text="no such note")
+        return web.json_response({
+            "name": request.match_info.get("name", ""),
+            "content": path.read_text(encoding="utf-8", errors="replace"),
+        })
+
+    async def vault_delete_handler(request: web.Request) -> web.Response:
+        """DELETE /vault/{name} — remove a note, and its memory index entry.
+
+        Leaving the FTS row behind would keep `recall` surfacing a note that no
+        longer exists, which reads as the agent making things up.
+        """
+        name = request.match_info.get("name", "")
+        try:
+            path = _vault_file(request.app["settings"], name)
+        except ValueError as exc:
+            return web.Response(status=400, text=str(exc))
+        if not path.is_file():
+            return web.Response(status=404, text="no such note")
+        try:
+            path.unlink()
+        except OSError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+        memory_store = request.app["memory"]
+        if memory_store is not None:
+            with contextlib.suppress(Exception):
+                memory_store.delete_note(name)
+        return web.json_response({"ok": True, "deleted": name})
+
+    async def skill_delete_handler(request: web.Request) -> web.Response:
+        """DELETE /skills/{name} — remove a skill directory and everything in
+        it (an installed skill is a directory of files, not one file)."""
+        name = request.match_info.get("name", "")
+        for skill in _discover(request.app["settings"]):
+            if skill.name != name or skill.path is None:
+                continue
+            directory = skill.path.parent
+            try:
+                shutil.rmtree(directory)
+            except OSError as exc:
+                return web.json_response({"error": str(exc)}, status=500)
+            memory_store = request.app["memory"]
+            if memory_store is not None:
+                with contextlib.suppress(Exception):
+                    memory_store.delete_skill(name)
+            request.app["skills"] = _discover(request.app["settings"])
+            return web.json_response({"ok": True, "deleted": name, "source": skill.source})
+        return web.Response(status=404, text=f'no skill named "{name}"')
+
     async def models_handler(request: web.Request) -> web.Response:
         """GET /models — what every provider offers, with why it may be
         unusable. One implementation for the CLI and the app, so a model
@@ -662,6 +793,9 @@ async def create_app(
             "live_frames": s.live_frames,
             "reflect": s.reflect,
             "compaction_chars": s.compaction_chars,
+            # The status bar's "ctx N%" denominator — reported so the
+            # bar reads one source rather than half server, half local.
+            "context_window": s.context_window,
             "temperature": s.temperature,
             "max_tokens": s.max_tokens,
             "pinchtab_base": s.pinchtab_base,
@@ -767,6 +901,10 @@ async def create_app(
     app.router.add_get("/registry/search", registry_search_handler)
     app.router.add_get("/registry/item/{slug}", registry_item_handler)
     app.router.add_get("/registry/preview/{slug}", registry_preview_handler)
+    app.router.add_get("/vault", vault_list_handler)
+    app.router.add_get("/vault/{name:.*}", vault_read_handler)
+    app.router.add_delete("/vault/{name:.*}", vault_delete_handler)
+    app.router.add_delete("/skills/{name}", skill_delete_handler)
     app.router.add_get("/models", models_handler)
     app.router.add_get("/config", config_handler)
     app.router.add_post("/config", config_update_handler)

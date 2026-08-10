@@ -392,3 +392,145 @@ async def test_the_configured_model_is_listed(client: TestClient) -> None:
     body = await (await client.get("/models")).json()
     settings = client.app["settings"]
     assert settings.model in body["deepseek"]["models"]
+
+
+# --- adopting the old vault-relative library ---------------------------------
+
+def _skill(root, name: str, body: str = "body") -> None:
+    path = root / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: d\n---\n\n{body}\n")
+
+
+def test_legacy_skills_are_copied_into_the_global_library(settings, tmp_path) -> None:
+    """Moving the library must not orphan what someone already built — they'd
+    open the app to an empty list and conclude their skills were gone."""
+    from dataclasses import replace
+
+    from daimon_agent.server import adopt_legacy_skills
+
+    cfg = replace(settings, vault_dir=tmp_path / "vault", skills_dir=tmp_path / "global")
+    _skill(cfg.vault_dir / "skills", "changelog", "the original")
+
+    assert adopt_legacy_skills(cfg) == 1
+    assert (cfg.resolved_skills_dir / "changelog" / "SKILL.md").read_text().endswith(
+        "the original\n"
+    )
+    # Copied, not moved — reverting loses nothing.
+    assert (cfg.vault_dir / "skills" / "changelog" / "SKILL.md").is_file()
+
+
+def test_adoption_never_overwrites_an_existing_library(settings, tmp_path) -> None:
+    """Only fires on an empty target, which is what makes it a one-time event
+    without a flag to keep in sync."""
+    from dataclasses import replace
+
+    from daimon_agent.server import adopt_legacy_skills
+
+    cfg = replace(settings, vault_dir=tmp_path / "vault", skills_dir=tmp_path / "global")
+    _skill(cfg.vault_dir / "skills", "changelog", "old")
+    _skill(cfg.resolved_skills_dir, "changelog", "current")
+
+    assert adopt_legacy_skills(cfg) == 0
+    assert "current" in (cfg.resolved_skills_dir / "changelog" / "SKILL.md").read_text()
+
+
+def test_adoption_is_a_noop_without_a_legacy_library(settings, tmp_path) -> None:
+    from dataclasses import replace
+
+    from daimon_agent.server import adopt_legacy_skills
+
+    cfg = replace(settings, vault_dir=tmp_path / "vault", skills_dir=tmp_path / "global")
+    assert adopt_legacy_skills(cfg) == 0
+
+
+def test_adoption_is_a_noop_when_they_are_the_same_directory(settings, tmp_path) -> None:
+    from dataclasses import replace
+
+    from daimon_agent.server import adopt_legacy_skills
+
+    cfg = replace(settings, vault_dir=tmp_path, skills_dir=tmp_path / "skills")
+    _skill(cfg.resolved_skills_dir, "x")
+    assert adopt_legacy_skills(cfg) == 0
+
+
+# --- vault and deletion ------------------------------------------------------
+
+async def test_vault_listing_is_recursive(client: TestClient) -> None:
+    """The agent writes to `vault/notes/`, and a top-level-only listing showed
+    none of them — which is what the app's own vault walk did."""
+    vault = client.app["settings"].vault_dir
+    (vault / "notes").mkdir(parents=True, exist_ok=True)
+    (vault / "notes" / "a.md").write_text("nested")
+    (vault / "top.md").write_text("top")
+
+    names = {n["name"] for n in await (await client.get("/vault")).json()}
+    assert names == {"notes/a.md", "top.md"}
+
+
+async def test_vault_listing_excludes_skills(client: TestClient) -> None:
+    """Skills have their own view; showing them as notes would offer a delete
+    that removes half a skill."""
+    settings = client.app["settings"]
+    _skill(settings.vault_dir / "skills", "changelog")
+    (settings.vault_dir / "note.md").write_text("x")
+
+    names = {n["name"] for n in await (await client.get("/vault")).json()}
+    assert names == {"note.md"}
+
+
+async def test_note_read_and_delete(client: TestClient) -> None:
+    vault = client.app["settings"].vault_dir
+    (vault / "notes").mkdir(parents=True, exist_ok=True)
+    (vault / "notes" / "a.md").write_text("the content")
+
+    body = await (await client.get("/vault/notes/a.md")).json()
+    assert body["content"] == "the content"
+
+    resp = await client.delete("/vault/notes/a.md")
+    assert resp.status == 200
+    assert not (vault / "notes" / "a.md").exists()
+    assert await (await client.get("/vault")).json() == []
+
+
+async def test_note_paths_cannot_escape_the_vault(client: TestClient) -> None:
+    """A path from a client is untrusted — resolve, then check containment,
+    so `..` and symlinks can't walk out."""
+    for path in ("/vault/../../etc/passwd", "/vault/..%2F..%2Fetc%2Fpasswd"):
+        assert (await client.get(path)).status in (400, 404)
+        assert (await client.delete(path)).status in (400, 404)
+
+
+async def test_deleting_a_missing_note_is_404(client: TestClient) -> None:
+    assert (await client.delete("/vault/nope.md")).status == 404
+
+
+async def test_skill_delete_removes_the_whole_directory(client: TestClient) -> None:
+    """An installed skill is a directory of files — SKILL.md plus references
+    and scripts — so deleting only the markdown would leave the rest behind."""
+    root = client.app["settings"].resolved_skills_dir
+    _skill(root, "pdf")
+    (root / "pdf" / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "pdf" / "scripts" / "fill.py").write_text("code")
+
+    resp = await client.delete("/skills/pdf")
+    assert resp.status == 200
+    assert not (root / "pdf").exists()
+    assert await (await client.get("/skills")).json() == []
+
+
+async def test_deleting_a_missing_skill_is_404(client: TestClient) -> None:
+    assert (await client.delete("/skills/nope")).status == 404
+
+
+async def test_deleting_a_note_drops_its_memory_index(client: TestClient) -> None:
+    """A deleted note that still turns up in `recall` reads as the agent
+    inventing one."""
+    settings = client.app["settings"]
+    (settings.vault_dir / "gone.md").write_text("secret pineapple content")
+    memory = client.app["memory"]
+    memory.index_note("gone.md", "secret pineapple content")
+    assert memory.search_notes("pineapple")
+
+    await client.delete("/vault/gone.md")
+    assert not memory.search_notes("pineapple")

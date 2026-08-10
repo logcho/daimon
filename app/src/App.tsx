@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { AgentConfig } from "./api";
 import {
   agentStatus,
   closeTerminal,
+  fetchConfig,
   onDictationStatus,
   onVoiceModelDownload,
   sendMessage,
@@ -33,21 +35,24 @@ export default function App() {
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
+  // The status bar's model and context window. Same GET /config the
+  // settings tab and the CLI read, so the three can't disagree.
+  const [config, setConfig] = useState<AgentConfig | null>(null);
   // Whether the panel (vs. the pill) is showing. The pill itself is always
   // the real window — see collapseToPill/expandToPanel in lib/window.ts.
   const [expanded, setExpanded] = useState(false);
+  // Whether the panel has ever been opened. The panel is mounted from that
+  // point on and merely hidden while collapsed (see the render below), so a
+  // collapse no longer destroys the terminals inside it.
+  const [everExpanded, setEverExpanded] = useState(false);
   // Which panel view is active — lives here rather than as a Panel-local
-  // useState for the same reason `terminalTabs` etc. do below: the Panel
-  // fully unmounts on collapse-to-pill, so a plain local `useState<View>`
-  // would reset back to "chat" on every single collapse/expand, always
-  // dumping the user back on chat instead of wherever they'd left off.
+  // useState so that it survives, and because the panel's callers set it
+  // (a staged terminal command switches to the terminal view).
   const [view, setView] = useState<View>("chat");
 
-  // Terminal tab state lives here, not inside the Panel, so it survives a
-  // collapse-to-pill cycle — the Panel fully unmounts whenever `expanded`
-  // goes false, and state living inside an unmounted component is gone
-  // (the real shell processes behind the tabs survive; the frontend must
-  // remember the tab ids to keep talking to them).
+  // Terminal tab state lives here, not inside the Panel: the frontend has to
+  // remember the tab ids to keep talking to the real shell processes behind
+  // them, which live in Rust and outlive any React tree.
   const [terminalTabs, setTerminalTabs] = useState<string[]>([]);
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   // Keyed by terminal tab id: one-shot "type this in once the shell has
@@ -106,6 +111,7 @@ export default function App() {
 
   const expand = useCallback(() => {
     setExpanded(true);
+    setEverExpanded(true);
     expandedRef.current = true;
     // Don't clear unreadCompletion — keep green while user reads.
     void expandToPanel();
@@ -159,6 +165,22 @@ export default function App() {
     });
   }, []);
 
+  /** Start a chat session and make it active. The one place that creates one,
+   *  so "there is always a session" holds however you got here — first launch,
+   *  the + button, or closing the last tab. Returns false when the agent isn't
+   *  reachable, so the caller can retry. */
+  const ensureSession = useCallback(async (): Promise<boolean> => {
+    try {
+      const sid = await startChat();
+      commitSessions((prev) => ({ ...prev, [sid]: [] }));
+      setSessionOrder((order) => [...order, sid]);
+      setActiveSessionId((current) => current ?? sid);
+      return true;
+    } catch {
+      return false; // agent down — the status dot already says so
+    }
+  }, [commitSessions]);
+
   // Closing a chat tab is a UI decision only: the server keeps running the
   // turn, and its result lands in the checkpointer thread (`daimon -n <uuid>`
   // could pick it up). There is no kill-the-turn endpoint, by design.
@@ -172,10 +194,13 @@ export default function App() {
       setSessionOrder((order) => {
         const remaining = order.filter((sid) => sid !== id);
         setActiveSessionId((current) => (current !== id ? current : remaining[remaining.length - 1] ?? null));
+        // Closing the last chat used to leave none at all — an empty view with
+        // nothing to type into. There is always a session to talk to.
+        if (remaining.length === 0) void ensureSession();
         return remaining;
       });
     },
-    [commitSessions],
+    [commitSessions, ensureSession],
   );
 
   const handleEvent = useCallback(
@@ -272,24 +297,37 @@ export default function App() {
     void setWindowVibrancy(28);
     refreshStatus();
     refreshVoiceModel();
+    fetchConfig().then(setConfig).catch(() => {});
     const poll = setInterval(refreshStatus, 1500);
-    startChat().then((sid) => {
-      commitSessions((prev) => ({ ...prev, [sid]: [] }));
-      setSessionOrder((order) => [...order, sid]);
-      setActiveSessionId((current) => current ?? sid);
-    }).catch(() => {});
+    // The agent server may still be starting; keep trying rather than leaving
+    // the chat with no session to send to.
+    let cancelled = false;
+    const retry = setInterval(() => {
+      if (cancelled) return;
+      void ensureSession().then((ok) => {
+        if (ok) clearInterval(retry);
+      });
+    }, 2000);
+    void ensureSession().then((ok) => {
+      if (ok) clearInterval(retry);
+    });
     openNewTerminalTab();
-    return () => clearInterval(poll);
-  }, [refreshStatus, commitSessions, openNewTerminalTab]);
+    return () => {
+      cancelled = true;
+      clearInterval(retry);
+      clearInterval(poll);
+    };
+  }, [refreshStatus, openNewTerminalTab, ensureSession]);
 
   const newChat = async () => {
-    try {
-      const sid = await startChat();
-      commitSessions((prev) => ({ ...prev, [sid]: [] }));
-      setSessionOrder((order) => [...order, sid]);
-      setActiveSessionId(sid);
-    } catch {
-      // keep the current session; the status dot shows the agent is down
+    const before = sessionOrder.length;
+    if (await ensureSession()) {
+      // ensureSession only *defaults* the active session; an explicit new chat
+      // should switch to it.
+      setSessionOrder((order) => {
+        if (order.length > before) setActiveSessionId(order[order.length - 1]);
+        return order;
+      });
     }
   };
 
@@ -298,7 +336,11 @@ export default function App() {
     if (!sid || busy || !text.trim()) return;
     setUnreadCompletion(false); // new turn starting → busy blue takes over
     const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false };
-    const asstMsg: ChatMessage = { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: true };
+    const asstMsg: ChatMessage = {
+      id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: true,
+      // Wall clock, so the status bar can report how long the turn took.
+      startedAt: Date.now(),
+    };
     commitSessions((prev) => ({ ...prev, [sid]: [...(prev[sid] ?? []), userMsg, asstMsg] }));
     try {
       await sendMessage(sid, text);
@@ -317,8 +359,20 @@ export default function App() {
 
   return (
     <main className="h-full w-full bg-transparent p-0">
-      {expanded ? (
+      {/* Mounted from the first expand onward and hidden — not unmounted —
+          while collapsed. Unmounting tore down every terminal's xterm instance
+          along with the buffer it had rendered. The shell and whatever TUI is
+          running in it (daimon's own, Claude Code) never stopped, but they have
+          no reason to reprint a screen they already drew, so re-expanding
+          showed a blank or half-drawn terminal until something forced a
+          redraw — which is why resizing the window "fixed" it.
+
+          Kept out of the DOM until the first expand so a session that never
+          opens the panel pays nothing for it. */}
+      {everExpanded && (
+        <div className="h-full w-full" style={{ display: expanded ? "block" : "none" }}>
         <Panel
+          expanded={expanded}
           busy={busy}
           globalBusy={anyBusy}
           unreadCompletion={unreadCompletion}
@@ -330,6 +384,7 @@ export default function App() {
           sessionOrder={sessionOrder}
           activeSessionId={activeSessionId}
           onSelectChat={setActiveSessionId}
+          config={config}
           onCloseChat={closeChat}
           onAddChat={newChat}
           messages={messages}
@@ -346,7 +401,9 @@ export default function App() {
           voiceModelDownload={voiceModelDownload}
           onRefreshVoiceModel={refreshVoiceModel}
         />
-      ) : (
+        </div>
+      )}
+      {!expanded && (
         <Pill
           busy={anyBusy}
           agentDown={!status?.running}
@@ -356,6 +413,7 @@ export default function App() {
           dictation={dictation}
         />
       )}
+
     </main>
   );
 }

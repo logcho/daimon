@@ -39,6 +39,9 @@ export interface AgentConfig {
   live_frames: boolean;
   reflect: boolean;
   compaction_chars: number;
+  /** Denominator for the status bar's ctx% — reported so both surfaces
+   *  divide by the same number. */
+  context_window: number;
   temperature: number;
   max_tokens: number;
   pinchtab_base: string;
@@ -115,14 +118,30 @@ export const onVoiceModelDownload = (handler: (payload: VoiceModelDownloadPayloa
 
 // --- Vault -------------------------------------------------------------------
 
-export const listVaultFiles = (): Promise<VaultFile[]> => invoke<VaultFile[]>("list_vault_files");
+// Through the agent server, which owns the vault. The app used to resolve the
+// path itself and listed an entirely different directory.
 
-export const readVaultFile = (name: string): Promise<string> => invoke<string>("read_vault_file", { name });
+export const listVaultFiles = (): Promise<VaultFile[]> => invoke<VaultFile[]>("list_notes");
+
+export const readVaultFile = (name: string): Promise<string> =>
+  invoke<{ content: string }>("read_note", { name }).then((n) => n.content);
+
+export const deleteVaultFile = (name: string): Promise<{ ok: boolean }> =>
+  invoke<{ ok: boolean }>("delete_note", { name });
 
 // --- Skills ------------------------------------------------------------------
-// Read straight off the filesystem like the vault, not through the agent
-// server — skills are plain files on the host.
 
+/** Both from the agent server, which owns where skills live — the app used to
+ *  resolve the path itself and looked in a different directory entirely. */
 export const listSkills = (): Promise<SkillFile[]> => invoke<SkillFile[]>("list_skills");
 
-export const readSkill = (name: string): Promise<string> => invoke<string>("read_skill", { name });
+export interface SkillDetail extends SkillFile {
+  path: string;
+  content: string;
+}
+
+export const readSkill = (name: string): Promise<SkillDetail> =>
+  invoke<SkillDetail>("read_skill", { name });
+
+export const deleteSkill = (name: string): Promise<{ ok: boolean }> =>
+  invoke<{ ok: boolean }>("delete_skill", { name });

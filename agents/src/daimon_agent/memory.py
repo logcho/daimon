@@ -142,6 +142,15 @@ class MemoryStore:
             )
             self._conn.commit()
 
+    def delete_skill(self, name: str) -> None:
+        """Drop a skill from the index. Leaving the row behind would keep
+        `recall` offering a skill whose files are gone, which reads as the
+        agent inventing one."""
+        with self._lock:
+            self._conn.execute("DELETE FROM skills WHERE name = ?", (name,))
+            self._conn.execute("DELETE FROM skills_fts WHERE name = ?", (name,))
+            self._conn.commit()
+
     def search_skills(self, query: str, limit: int = 5) -> list[sqlite3.Row]:
         with self._lock:
             return _matches_and_rows(self._conn, "skills_fts", "skills", "name", query, limit, "created_at")
@@ -161,6 +170,15 @@ class MemoryStore:
             )
             self._conn.execute("DELETE FROM notes_fts WHERE filename = ?", (filename,))
             self._conn.execute("INSERT INTO notes_fts (filename, content) VALUES (?, ?)", (filename, content))
+            self._conn.commit()
+
+    def delete_note(self, filename: str) -> None:
+        """Drop a note from the index, for the same reason as delete_skill —
+        a deleted note that still turns up in `recall` is worse than one that
+        was never indexed."""
+        with self._lock:
+            self._conn.execute("DELETE FROM notes WHERE filename = ?", (filename,))
+            self._conn.execute("DELETE FROM notes_fts WHERE filename = ?", (filename,))
             self._conn.commit()
 
     def search_notes(self, query: str, limit: int = 5) -> list[sqlite3.Row]:

@@ -1,8 +1,18 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { listSkills, readSkill } from "../api";
+import { deleteSkill, listSkills, readSkill } from "../api";
 import type { SkillFile } from "../types";
+import { DeleteButton } from "./DeleteButton";
+
+/** A SKILL.md without its `---` frontmatter block. The name and description
+ *  are already shown in the header; rendered as markdown the fences turn into
+ *  a horizontal rule with loose `key: value` text under it. */
+function stripFrontmatter(text: string): string {
+  if (!text.startsWith("---")) return text;
+  const end = text.indexOf("\n---", 3);
+  return end === -1 ? text : text.slice(end + 4).replace(/^\n+/, "");
+}
 
 type ListState = "loading" | "ready" | "error";
 type DetailState = "idle" | "loading" | "ready" | "error";
@@ -37,16 +47,21 @@ export function SkillsPanel() {
   const [detailState, setDetailState] = useState<DetailState>("idle");
   const [content, setContent] = useState("");
   const [detailErrorMessage, setDetailErrorMessage] = useState("");
+  // Failures from actions rather than from viewing a skill. Kept separate
+  // because the detail error only renders while something is selected, and a
+  // delete clears the selection before its request has even finished.
+  const [actionErrorMessage, setActionErrorMessage] = useState("");
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [filter, setFilter] = useState("");
 
   function handleOpen(name: string) {
     setSelected(name);
+    setActionErrorMessage("");
     setDetailState("loading");
     readSkill(name)
-      .then((text) => {
-        setContent(text);
+      .then((skill) => {
+        setContent(stripFrontmatter(skill.content));
         setDetailState("ready");
       })
       .catch((err) => {
@@ -69,6 +84,40 @@ export function SkillsPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** Optimistic: the row goes as soon as it's confirmed, and the request runs
+   *  behind it. The decision is already made at that point — waiting on a
+   *  round trip through Tauri, the agent server and the filesystem just makes
+   *  the UI look stuck. If the delete does fail, the skill comes back where it
+   *  was and says why. */
+  function handleDelete(name: string) {
+    const index = skills.findIndex((s) => s.name === name);
+    if (index === -1) return;
+    const removed = skills[index];
+
+    setActionErrorMessage("");
+    setSkills((prev) => prev.filter((s) => s.name !== name));
+    if (selected === name) {
+      setSelected(null);
+      setContent("");
+      setDetailState("idle");
+    }
+
+    deleteSkill(name).catch((err) => {
+      // Splice back at the original index rather than appending — the list is
+      // ordered (and grouped off that order), so a failed delete shouldn't
+      // quietly reshuffle it.
+      setSkills((prev) => {
+        if (prev.some((s) => s.name === name)) return prev;
+        const restored = [...prev];
+        restored.splice(Math.min(index, restored.length), 0, removed);
+        return restored;
+      });
+      setActionErrorMessage(
+        `couldn't delete ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
   const selectedMeta = selected ? skills.find((s) => s.name === selected) : undefined;
 
   // Filter on description too, not just name — a skill's description is the
@@ -85,7 +134,7 @@ export function SkillsPanel() {
   // Project skills first: they're the ones specific to what you're working on.
   const groups: { label: string; items: SkillFile[] }[] = [
     { label: "project", items: visible.filter((s) => s.source === "project") },
-    { label: "vault", items: visible.filter((s) => s.source === "vault") },
+    { label: "global", items: visible.filter((s) => s.source === "vault") },
   ].filter((g) => g.items.length > 0);
 
   return (
@@ -109,7 +158,7 @@ export function SkillsPanel() {
         {listState === "error" && <p className="mt-2 px-1 text-xs text-red-400">{listErrorMessage}</p>}
         {listState === "ready" && skills.length === 0 && (
           <p className="mt-2 px-1 text-xs text-neutral-500">
-            ○ empty — the agent saves skills here as it finds procedures worth reusing
+            ○ empty — the agent saves skills as it finds procedures worth reusing; “/skills find” in the CLI installs published ones
           </p>
         )}
         {listState === "ready" && skills.length > 0 && visible.length === 0 && (
@@ -158,7 +207,17 @@ export function SkillsPanel() {
               project
             </span>
           )}
+          {selected && (
+            <span className="ml-auto">
+              <DeleteButton name={selected} onDelete={() => handleDelete(selected)} />
+            </span>
+          )}
         </div>
+        {actionErrorMessage && (
+          <p className="mb-3 rounded-md border border-red-500/20 bg-red-500/10 px-2 py-1 text-xs text-red-300">
+            {actionErrorMessage}
+          </p>
+        )}
         {selectedMeta?.description && (
           <p className="-mt-1 mb-3 text-xs text-neutral-500">{selectedMeta.description}</p>
         )}
