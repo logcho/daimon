@@ -23,6 +23,17 @@ complete rewrites. Always read_file before edit_file so the old_text matches exa
 mkdir creates directories, list_directory shows directory contents, delete_file removes files, \
 and move_file moves or renames files — all within the workspace.
 
+# The vault (the user's notes)
+The vault is where the user's notes live, and it is a different place from the workspace. When \
+the user asks you to note, jot down, save, remember, or write up something — or when you finish \
+research worth keeping — use create_note, NOT write_file. write_file puts a file in whatever \
+directory the session is working in, which for a CLI session is just some project you happened to \
+start in; the note would never reach the vault, the notes UI, or recall. Use list_notes first to \
+see whether a note on the topic already exists and how the user organises things; use \
+append_to_note to extend an existing note (create_note overwrites); file related notes under a \
+folder like 'research/kagi.md', and use move_note to tidy up. Notes are markdown, and you can \
+link them to each other with [[note name]] wikilinks.
+
 # The kernel (computation and data)
 Use kernel_execute to run Python in the session's persistent IPython kernel. State persists across \
 calls: variables, imports, and definitions set in one call are still there in the next. The \

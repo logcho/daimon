@@ -341,6 +341,86 @@ pub async fn delete_note(port: u16, name: &str) -> Result<serde_json::Value, Str
     delete_json(port, &format!("vault/{}", encode_path(name))).await
 }
 
+/// PUT /vault/{name} — create or overwrite a note. Same endpoint for both,
+/// mirroring the server: a new note is just a write to a name that doesn't
+/// exist yet.
+pub async fn write_note(port: u16, name: &str, content: &str) -> Result<serde_json::Value, String> {
+    let resp = reqwest::Client::new()
+        .put(format!("http://127.0.0.1:{port}/vault/{}", encode_path(name)))
+        .json(&serde_json::json!({ "content": content }))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    unwrap_vault_response(resp, "write failed").await
+}
+
+/// GET /vault/folders — folders including empty ones, which the note listing
+/// cannot show.
+pub async fn list_folders(port: u16) -> Result<serde_json::Value, String> {
+    get_json(port, "vault/folders").await
+}
+
+/// POST /vault/folders — create a folder.
+pub async fn create_folder(port: u16, path: &str) -> Result<serde_json::Value, String> {
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/vault/folders"))
+        .json(&serde_json::json!({ "path": path }))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    unwrap_vault_response(resp, "could not create the folder").await
+}
+
+/// DELETE /vault/folders/{path} — remove a folder. `recursive` is required by
+/// the server for a folder that still holds notes.
+pub async fn delete_folder(
+    port: u16,
+    path: &str,
+    recursive: bool,
+) -> Result<serde_json::Value, String> {
+    let suffix = if recursive { "?recursive=1" } else { "" };
+    let resp = reqwest::Client::new()
+        .delete(format!(
+            "http://127.0.0.1:{port}/vault/folders/{}{suffix}",
+            encode_path(path)
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    unwrap_vault_response(resp, "could not delete the folder").await
+}
+
+/// POST /vault/move — rename a note or move it into another folder.
+pub async fn move_note(port: u16, from: &str, to: &str) -> Result<serde_json::Value, String> {
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/vault/move"))
+        .json(&serde_json::json!({ "from": from, "to": to }))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    unwrap_vault_response(resp, "could not move the note").await
+}
+
+/// Shared success/error unwrapping for the mutating vault endpoints. The
+/// server explains *why* it refused (name already taken, folder not empty,
+/// path outside the vault) in an `error` field; surfacing that beats a bare
+/// status code, since every one of those is something the user can act on.
+async fn unwrap_vault_response(
+    resp: reqwest::Response,
+    fallback: &str,
+) -> Result<serde_json::Value, String> {
+    let status = resp.status();
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("invalid response: {e}"))?;
+    if !status.is_success() {
+        let message = body.get("error").and_then(|e| e.as_str()).unwrap_or(fallback);
+        return Err(message.to_string());
+    }
+    Ok(body)
+}
+
 pub async fn delete_skill(port: u16, name: &str) -> Result<serde_json::Value, String> {
     delete_json(port, &format!("skills/{}", encode_path(name))).await
 }

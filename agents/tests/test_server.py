@@ -504,6 +504,188 @@ async def test_note_paths_cannot_escape_the_vault(client: TestClient) -> None:
     for path in ("/vault/../../etc/passwd", "/vault/..%2F..%2Fetc%2Fpasswd"):
         assert (await client.get(path)).status in (400, 404)
         assert (await client.delete(path)).status in (400, 404)
+        assert (await client.put(path, json={"content": "x"})).status in (400, 404)
+
+
+async def test_note_write_creates_and_updates(client: TestClient) -> None:
+    """One endpoint for create and update — a new note is just a write to a
+    name that doesn't exist yet, and parent dirs come along for free."""
+    vault = client.app["settings"].vault_dir
+
+    resp = await client.put("/vault/notes/new.md", json={"content": "first"})
+    assert resp.status == 200
+    assert (vault / "notes" / "new.md").read_text() == "first"
+    assert (await resp.json())["name"] == "notes/new.md"
+
+    resp = await client.put("/vault/notes/new.md", json={"content": "second"})
+    assert resp.status == 200
+    assert (vault / "notes" / "new.md").read_text() == "second"
+
+    listing = await (await client.get("/vault")).json()
+    assert [n["name"] for n in listing] == ["notes/new.md"]
+
+
+async def test_note_write_indexes_for_recall(client: TestClient) -> None:
+    """A saved note the agent can't `recall` reads as memory silently losing
+    it — the write path has to reindex, like the delete path unindexes."""
+    memory = client.app["memory"]
+    await client.put("/vault/kiwi.md", json={"content": "secret kiwi content"})
+    assert memory.search_notes("kiwi")
+
+
+async def test_note_write_rejects_non_markdown(client: TestClient) -> None:
+    """The listing is rglob("*.md"), so anything else would be written and
+    then never shown again."""
+    resp = await client.put("/vault/notes/thing.txt", json={"content": "x"})
+    assert resp.status == 400
+    assert not (client.app["settings"].vault_dir / "notes" / "thing.txt").exists()
+
+
+async def test_note_write_rejects_a_bad_body(client: TestClient) -> None:
+    assert (await client.put("/vault/a.md", data="not json")).status == 400
+    assert (await client.put("/vault/a.md", json={"content": 42})).status == 400
+
+
+# --- folders ------------------------------------------------------------------
+
+async def test_folders_are_listed_even_when_empty(client: TestClient) -> None:
+    """A folder you just made holds no .md yet, so the note listing can't
+    show it — it would disappear on the next refresh."""
+    resp = await client.post("/vault/folders", json={"path": "projects/2026"})
+    assert resp.status == 200
+
+    folders = await (await client.get("/vault/folders")).json()
+    assert "projects" in folders and "projects/2026" in folders
+    # ...and it is genuinely empty: no note listing entry backs it.
+    assert await (await client.get("/vault")).json() == []
+
+
+async def test_internal_directories_are_hidden_from_the_vault(client: TestClient) -> None:
+    """`.daimon/memory` holds this workspace's own databases — showing it as a
+    folder offers the user something they can't use but can delete."""
+    vault = client.app["settings"].vault_dir
+    (vault / ".daimon" / "memory").mkdir(parents=True, exist_ok=True)
+    (vault / ".daimon" / "notes.md").write_text("internal")
+    (vault / "real").mkdir(exist_ok=True)
+
+    folders = await (await client.get("/vault/folders")).json()
+    assert folders == ["real"]
+    names = [n["name"] for n in await (await client.get("/vault")).json()]
+    assert ".daimon/notes.md" not in names
+
+
+async def test_folder_routes_do_not_shadow_a_real_note(client: TestClient) -> None:
+    """`/vault/folders` is registered before the `{name:.*}` catch-all, so a
+    note that happens to be called `folders.md` must still be reachable."""
+    await client.put("/vault/folders.md", json={"content": "not a folder"})
+    body = await (await client.get("/vault/folders.md")).json()
+    assert body["content"] == "not a folder"
+    assert isinstance(await (await client.get("/vault/folders")).json(), list)
+
+
+async def test_folder_delete_refuses_a_non_empty_folder(client: TestClient) -> None:
+    """Deleting a folder is one click but can take any number of notes with
+    it — that is not the same decision as deleting one note."""
+    await client.put("/vault/keep/a.md", json={"content": "a"})
+
+    resp = await client.delete("/vault/folders/keep")
+    assert resp.status == 409
+    assert (await resp.json())["notes"] == 1
+    assert (client.app["settings"].vault_dir / "keep" / "a.md").exists()
+
+    resp = await client.delete("/vault/folders/keep?recursive=1")
+    assert resp.status == 200
+    assert not (client.app["settings"].vault_dir / "keep").exists()
+
+
+async def test_folder_delete_unindexes_the_notes_it_removes(client: TestClient) -> None:
+    memory = client.app["memory"]
+    await client.put("/vault/gone/mango.md", json={"content": "distinctive mango text"})
+    assert memory.search_notes("mango")
+
+    await client.delete("/vault/folders/gone?recursive=1")
+    assert not memory.search_notes("mango")
+
+
+async def test_folder_delete_rejects_the_root_and_escapes(client: TestClient) -> None:
+    assert (await client.delete("/vault/folders/")).status == 400
+    assert (await client.delete("/vault/folders/../../etc")).status in (400, 404)
+
+
+# --- moving notes -------------------------------------------------------------
+
+async def test_move_relocates_a_note_into_a_folder(client: TestClient) -> None:
+    vault = client.app["settings"].vault_dir
+    await client.put("/vault/loose.md", json={"content": "body"})
+
+    resp = await client.post("/vault/move", json={"from": "loose.md", "to": "archive/loose.md"})
+    assert resp.status == 200
+    assert not (vault / "loose.md").exists()
+    assert (vault / "archive" / "loose.md").read_text() == "body"
+
+
+async def test_move_reindexes_under_the_new_name(client: TestClient) -> None:
+    """The memory index is keyed by name — leaving the old entry makes
+    `recall` cite a path that no longer exists."""
+    memory = client.app["memory"]
+    await client.put("/vault/papaya.md", json={"content": "unmistakable papaya text"})
+
+    await client.post("/vault/move", json={"from": "papaya.md", "to": "fruit/papaya.md"})
+    hits = [dict(row)["filename"] for row in memory.search_notes("papaya")]
+    assert "fruit/papaya.md" in hits
+    assert "papaya.md" not in hits
+
+
+async def test_move_relocates_a_whole_folder(client: TestClient) -> None:
+    """Folders move too — nesting them is half of organising a vault."""
+    vault = client.app["settings"].vault_dir
+    await client.put("/vault/inbox/a.md", json={"content": "a"})
+    await client.put("/vault/inbox/deep/b.md", json={"content": "b"})
+    await client.post("/vault/folders", json={"path": "archive"})
+
+    resp = await client.post("/vault/move", json={"from": "inbox", "to": "archive/inbox"})
+    assert resp.status == 200
+    assert (await resp.json())["notes"] == 2
+    assert not (vault / "inbox").exists()
+    assert (vault / "archive" / "inbox" / "a.md").read_text() == "a"
+    assert (vault / "archive" / "inbox" / "deep" / "b.md").read_text() == "b"
+
+
+async def test_moving_a_folder_rekeys_every_note_under_it(client: TestClient) -> None:
+    memory = client.app["memory"]
+    await client.put("/vault/inbox/lychee.md", json={"content": "unmistakable lychee text"})
+
+    await client.post("/vault/move", json={"from": "inbox", "to": "archive/inbox"})
+    hits = [dict(row)["filename"] for row in memory.search_notes("lychee")]
+    assert "archive/inbox/lychee.md" in hits
+    assert "inbox/lychee.md" not in hits
+
+
+async def test_a_folder_cannot_be_moved_into_itself(client: TestClient) -> None:
+    """The destination would move out from under the operation as it runs."""
+    await client.put("/vault/projects/a.md", json={"content": "a"})
+
+    assert (
+        await client.post("/vault/move", json={"from": "projects", "to": "projects/inner"})
+    ).status == 400
+    assert (
+        await client.post("/vault/move", json={"from": "projects", "to": "projects"})
+    ).status in (400, 409)
+    assert (client.app["settings"].vault_dir / "projects" / "a.md").exists()
+
+
+async def test_move_will_not_clobber_or_escape(client: TestClient) -> None:
+    await client.put("/vault/one.md", json={"content": "one"})
+    await client.put("/vault/two.md", json={"content": "two"})
+
+    assert (await client.post("/vault/move", json={"from": "one.md", "to": "two.md"})).status == 409
+    assert (await client.post("/vault/move", json={"from": "one.md", "to": "x.txt"})).status == 400
+    assert (await client.post("/vault/move", json={"from": "nope.md", "to": "x.md"})).status == 404
+    assert (
+        await client.post("/vault/move", json={"from": "one.md", "to": "../../etc/evil.md"})
+    ).status == 400
+    # Nothing moved.
+    assert (client.app["settings"].vault_dir / "one.md").read_text() == "one"
 
 
 async def test_deleting_a_missing_note_is_404(client: TestClient) -> None:

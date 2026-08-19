@@ -129,6 +129,40 @@ export const readVaultFile = (name: string): Promise<string> =>
 export const deleteVaultFile = (name: string): Promise<{ ok: boolean }> =>
   invoke<{ ok: boolean }>("delete_note", { name });
 
+/** Create or overwrite a note. One call for both — a new note is just a write
+ *  to a name that doesn't exist yet. Returns the note's fresh size/mtime so a
+ *  caller can update its listing without refetching everything. */
+export const writeVaultFile = (name: string, content: string): Promise<VaultFile> =>
+  invoke<VaultFile>("write_note", { name, content });
+
+/** Folders, including empty ones — the note listing can't show a folder you
+ *  just created and haven't written into yet. */
+export const listVaultFolders = (): Promise<string[]> => invoke<string[]>("list_folders");
+
+export const createVaultFolder = (path: string): Promise<{ ok: boolean; path: string }> =>
+  invoke<{ ok: boolean; path: string }>("create_folder", { path });
+
+/** `recursive` is required by the server once the folder holds notes, so the
+ *  caller has to have decided about those notes before it can succeed. */
+export const deleteVaultFolder = (
+  path: string,
+  recursive: boolean,
+): Promise<{ ok: boolean; notes: number }> =>
+  invoke<{ ok: boolean; notes: number }>("delete_folder", { path, recursive });
+
+/** Rename a note, or move it into another folder — the same call either way. */
+export const moveVaultFile = (from: string, to: string): Promise<VaultFile> =>
+  invoke<VaultFile>("move_note", { from, to });
+
+/** Move a whole folder (with everything under it). Same endpoint as a note
+ *  move — the server tells them apart by what's on disk — but it answers with
+ *  the new path and a note count rather than one file's metadata. */
+export const moveVaultFolder = (
+  from: string,
+  to: string,
+): Promise<{ ok: boolean; path: string; notes: number }> =>
+  invoke<{ ok: boolean; path: string; notes: number }>("move_note", { from, to });
+
 // --- Skills ------------------------------------------------------------------
 
 /** Both from the agent server, which owns where skills live — the app used to

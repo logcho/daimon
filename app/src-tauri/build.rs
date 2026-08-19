@@ -39,7 +39,12 @@ fn main() {
             "delete_skill",
             "list_notes",
             "read_note",
+            "write_note",
             "delete_note",
+            "list_folders",
+            "create_folder",
+            "delete_folder",
+            "move_note",
             "get_config",
             "update_config",
         ]));

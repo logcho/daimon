@@ -47,6 +47,11 @@
     "allow-delete-skill",
     "allow-list-notes",
     "allow-read-note",
-    "allow-delete-note"
+    "allow-write-note",
+    "allow-delete-note",
+    "allow-list-folders",
+    "allow-create-folder",
+    "allow-delete-folder",
+    "allow-move-note"
   ]
 }

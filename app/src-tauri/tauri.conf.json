@@ -26,7 +26,8 @@
         "skipTaskbar": true,
         "shadow": false,
         "center": false,
-        "visible": true
+        "visible": true,
+        "dragDropEnabled": false
       }
     ],
     "macOSPrivateApi": true,

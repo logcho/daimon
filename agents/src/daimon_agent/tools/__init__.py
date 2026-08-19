@@ -33,6 +33,7 @@ from . import host as _host
 from . import search as _search
 from . import skills_tools as _skills
 from . import todo as _todo
+from . import vault as _vault
 from . import web as _web
 from .repl import get_repl
 from . import shell as _shell
@@ -188,6 +189,36 @@ class PresentPlanArgs(BaseModel):
     )
 
 
+class CreateNoteArgs(BaseModel):
+    name: str = Field(
+        description="Note name, e.g. 'kagi-pricing.md' or 'research/transformers.md'. "
+        "Use a folder prefix to file it; '.md' is added if you leave it off."
+    )
+    content: str = Field(description="The note's full markdown content")
+
+
+class AppendNoteArgs(BaseModel):
+    name: str = Field(description="Note to append to; created if it doesn't exist yet")
+    content: str = Field(description="Markdown to add at the end of the note")
+
+
+class ReadNoteArgs(BaseModel):
+    name: str = Field(description="Note name, e.g. 'research/transformers.md'")
+
+
+class ListNotesArgs(BaseModel):
+    folder: str = Field(default="", description="Folder to list (empty = the whole vault)")
+
+
+class NoteFolderArgs(BaseModel):
+    path: str = Field(description="Folder path in the vault, e.g. 'research/papers'")
+
+
+class MoveNoteArgs(BaseModel):
+    source: str = Field(description="Note or folder to move, relative to the vault root")
+    destination: str = Field(description="New path, relative to the vault root")
+
+
 class MkdirArgs(BaseModel):
     path: str = Field(description="Directory path relative to the workspace root")
 
@@ -229,6 +260,11 @@ def _tool(name: str, description: str, args_model: type[BaseModel], fn) -> Struc
 
 def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id: str = "default") -> list[BaseTool]:
     conf = Confinement(settings.resolved_workspace_dir)
+    # Notes are confined to the *vault*, not the workspace. In a CLI session
+    # the workspace is whatever project you ran `daimon` from, so a note
+    # written with write_file would land in that repo and never reach the
+    # vault, `recall`, or the app's notes UI.
+    vault_conf = Confinement(settings.vault_dir)
     browser = build_browser(settings)
     provider = _search.build_search_provider(settings)
     fetcher = _web.build_web_fetcher(settings)
@@ -305,6 +341,26 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
             return "Memory is not available in this session."
         context = memory.recall(query)
         return context or f'Nothing in memory matched "{query}".'
+
+    # ---- the vault (notes) -----------------------------------------------
+
+    def create_note(name: str, content: str) -> str:
+        return _vault.create_note(vault_conf, memory, name, content)
+
+    def append_to_note(name: str, content: str) -> str:
+        return _vault.append_to_note(vault_conf, memory, name, content)
+
+    def read_note(name: str) -> str:
+        return _vault.read_note(vault_conf, name)
+
+    def list_notes(folder: str = "") -> str:
+        return _vault.list_notes(vault_conf, folder)
+
+    def create_note_folder(path: str) -> str:
+        return _vault.create_note_folder(vault_conf, path)
+
+    def move_note(source: str, destination: str) -> str:
+        return _vault.move_note(vault_conf, memory, source, destination)
 
     # ---- workspace files -------------------------------------------------
 
@@ -650,6 +706,57 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
             "context would change how you approach the task.",
             QueryArgs,
             recall,
+        ),
+        _tool(
+            "create_note",
+            "Save a note to the user's vault. Use this whenever the user asks you to note, "
+            "jot down, save, remember, write up, or keep something — and when you produce "
+            "research or a summary worth keeping. This is the ONLY way to write a real note: "
+            "write_file puts files in the working directory, which is not the vault and will "
+            "not appear in the user's notes. Notes are markdown and are indexed for recall. "
+            "Overwrites a note of the same name, so use append_to_note to add to an existing "
+            "one, and file related notes under a folder (e.g. 'research/kagi.md').",
+            CreateNoteArgs,
+            create_note,
+        ),
+        _tool(
+            "append_to_note",
+            "Add to the end of an existing note (creating it if needed) without rewriting what "
+            "is already there. Use this for running logs, journals, and 'add this to my notes "
+            "on X' — create_note would replace the note instead of extending it.",
+            AppendNoteArgs,
+            append_to_note,
+        ),
+        _tool(
+            "read_note",
+            "Read one note from the vault by name. Use list_notes first if you don't know the "
+            "exact name.",
+            ReadNoteArgs,
+            read_note,
+        ),
+        _tool(
+            "list_notes",
+            "List the notes and folders in the user's vault, newest first. Use this before "
+            "writing to see whether a note on the topic already exists, and to learn how the "
+            "user organises things.",
+            ListNotesArgs,
+            list_notes,
+        ),
+        _tool(
+            "create_note_folder",
+            "Create a folder in the vault to organise notes into. Prefer filing a note with a "
+            "folder prefix in create_note (which makes folders as needed); use this to set up "
+            "an empty folder up front.",
+            NoteFolderArgs,
+            create_note_folder,
+        ),
+        _tool(
+            "move_note",
+            "Move or rename a note, or a whole folder of notes, inside the vault. Use this to "
+            "tidy the vault — e.g. filing loose notes under a topic folder. Never overwrites an "
+            "existing note.",
+            MoveNoteArgs,
+            move_note,
         ),
         _tool(
             "read_file",

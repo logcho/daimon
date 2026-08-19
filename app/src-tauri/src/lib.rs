@@ -127,6 +127,58 @@ async fn delete_note(
 }
 
 #[tauri::command]
+async fn write_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::write_note(status.port, &name, &content).await
+}
+
+#[tauri::command]
+async fn list_folders(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_folders(status.port).await
+}
+
+#[tauri::command]
+async fn create_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::create_folder(status.port, &path).await
+}
+
+#[tauri::command]
+async fn delete_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    path: String,
+    recursive: bool,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::delete_folder(status.port, &path, recursive).await
+}
+
+#[tauri::command]
+async fn move_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    from: String,
+    to: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::move_note(status.port, &from, &to).await
+}
+
+#[tauri::command]
 async fn delete_skill(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentManager>,
@@ -206,7 +258,12 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             delete_skill,
             list_notes,
             read_note,
+            write_note,
             delete_note,
+            list_folders,
+            create_folder,
+            delete_folder,
+            move_note,
             list_models,
         ])
         .setup(|app| {

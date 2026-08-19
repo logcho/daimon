@@ -715,13 +715,25 @@ async def create_app(
         """Resolve a client-supplied path inside the vault, or raise.
 
         Same discipline as `workspace.Confinement`: resolve first, then check
-        containment, so `..` and symlinks can't walk out.
+        containment, so `..` and symlinks can't walk out. Used for folders as
+        well as notes — this is pure path resolution; whether the target has to
+        be a `.md` file is the caller's rule.
         """
         root = Path(settings_obj.vault_dir).resolve()
         target = (root / relative).resolve()
         if target != root and root not in target.parents:
             raise ValueError("path is outside the vault")
         return target
+
+    def _is_internal(relative: Path) -> bool:
+        """Paths the vault views must not show.
+
+        `skills` has its own view, and dot-directories are plumbing rather
+        than notes — `.daimon/memory` holds this workspace's own databases and
+        would otherwise show up in the tree as a folder the user can't
+        meaningfully use but can delete.
+        """
+        return any(part == "skills" or part.startswith(".") for part in relative.parts)
 
     async def vault_list_handler(request: web.Request) -> web.Response:
         """GET /vault — every note, newest first.
@@ -734,8 +746,8 @@ async def create_app(
             return web.json_response([])
         notes = []
         for path in root.rglob("*.md"):
-            if "skills" in path.relative_to(root).parts:
-                continue  # skills have their own view
+            if _is_internal(path.relative_to(root)):
+                continue  # skills have their own view; dot-dirs are plumbing
             stat = path.stat()
             notes.append({
                 "name": str(path.relative_to(root)),
@@ -744,6 +756,153 @@ async def create_app(
             })
         notes.sort(key=lambda n: n["modifiedAt"], reverse=True)
         return web.json_response(notes)
+
+    async def vault_folders_handler(request: web.Request) -> web.Response:
+        """GET /vault/folders — every folder, so the client can show empty ones.
+
+        The note listing is `rglob("*.md")`, so a folder you just made and
+        haven't written to yet appears nowhere in it — it would vanish on the
+        next refresh. Folders are listed separately rather than inferred from
+        note paths for exactly that reason.
+        """
+        root = Path(request.app["settings"].vault_dir)
+        if not root.is_dir():
+            return web.json_response([])
+        folders = sorted(
+            str(path.relative_to(root))
+            for path in root.rglob("*")
+            if path.is_dir() and not _is_internal(path.relative_to(root))
+        )
+        return web.json_response(folders)
+
+    async def vault_folder_create_handler(request: web.Request) -> web.Response:
+        """POST /vault/folders — create a folder (parents included)."""
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        path_str = body.get("path")
+        if not isinstance(path_str, str) or not path_str.strip():
+            return web.json_response({"error": "path must be a non-empty string"}, status=400)
+        try:
+            target = _vault_file(request.app["settings"], path_str.strip())
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if target.is_file():
+            return web.json_response({"error": "a note already has that name"}, status=400)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+        root = Path(request.app["settings"].vault_dir).resolve()
+        return web.json_response({"ok": True, "path": str(target.relative_to(root))})
+
+    async def vault_folder_delete_handler(request: web.Request) -> web.Response:
+        """DELETE /vault/folders/{path} — remove a folder.
+
+        A folder with notes in it is refused unless `?recursive=1`: deleting a
+        folder is one click, but it can take an arbitrary number of notes with
+        it, and that is not the same decision as deleting one note.
+        """
+        name = request.match_info.get("path", "")
+        try:
+            target = _vault_file(request.app["settings"], name)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        root = Path(request.app["settings"].vault_dir).resolve()
+        if target == root:
+            return web.json_response({"error": "cannot delete the vault root"}, status=400)
+        if not target.is_dir():
+            return web.json_response({"error": "no such folder"}, status=404)
+        contained = [p for p in target.rglob("*.md")]
+        recursive = request.query.get("recursive") in ("1", "true", "yes")
+        if contained and not recursive:
+            return web.json_response(
+                {"error": f"folder is not empty ({len(contained)} note(s))", "notes": len(contained)},
+                status=409,
+            )
+        memory_store = request.app["memory"]
+        for note in contained:
+            if memory_store is not None:
+                with contextlib.suppress(Exception):
+                    memory_store.delete_note(str(note.relative_to(root)))
+        try:
+            shutil.rmtree(target)
+        except OSError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response({"ok": True, "deleted": name, "notes": len(contained)})
+
+    async def vault_move_handler(request: web.Request) -> web.Response:
+        """POST /vault/move — move or rename a note *or* a folder.
+
+        Moving is how a vault actually gets organised, and it is not a
+        write-then-delete: the memory index is keyed by name, so the old
+        entries have to go or `recall` keeps citing paths that no longer
+        exist. Moving a folder re-keys every note underneath it for the same
+        reason.
+        """
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        src_name, dst_name = body.get("from"), body.get("to")
+        if not isinstance(src_name, str) or not isinstance(dst_name, str):
+            return web.json_response({"error": "from and to must be strings"}, status=400)
+        try:
+            src = _vault_file(request.app["settings"], src_name)
+            dst = _vault_file(request.app["settings"], dst_name)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        root = Path(request.app["settings"].vault_dir).resolve()
+        if src == root:
+            return web.json_response({"error": "cannot move the vault root"}, status=400)
+        if not src.exists():
+            return web.json_response({"error": "no such note or folder"}, status=404)
+        if dst.exists():
+            return web.json_response({"error": f"{dst_name} already exists"}, status=409)
+
+        is_folder = src.is_dir()
+        if not is_folder and dst.suffix.lower() != ".md":
+            return web.json_response({"error": "note names must end in .md"}, status=400)
+        # Moving a folder into itself (or into its own descendant) would move
+        # the destination out from under the move as it runs.
+        if is_folder and (dst == src or src in dst.parents):
+            return web.json_response({"error": "cannot move a folder into itself"}, status=400)
+
+        # Note names to re-key, gathered before the move while they still
+        # resolve.
+        moved_notes = (
+            [str(p.relative_to(root)) for p in src.rglob("*.md")] if is_folder else [src_name]
+        )
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+        except OSError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+        memory_store = request.app["memory"]
+        if memory_store is not None:
+            for old in moved_notes:
+                # The new name is the old one with the source prefix swapped
+                # for the destination.
+                new = dst_name if not is_folder else f"{dst_name}/{old[len(src_name) + 1:]}"
+                new_path = root / new
+                with contextlib.suppress(Exception):
+                    memory_store.delete_note(old)
+                    if new_path.is_file():
+                        memory_store.index_note(
+                            new, new_path.read_text(encoding="utf-8", errors="replace")
+                        )
+
+        if is_folder:
+            return web.json_response({"ok": True, "path": dst_name, "notes": len(moved_notes)})
+        stat = dst.stat()
+        return web.json_response({
+            "ok": True,
+            "name": dst_name,
+            "sizeBytes": stat.st_size,
+            "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+        })
 
     async def vault_read_handler(request: web.Request) -> web.Response:
         try:
@@ -755,6 +914,52 @@ async def create_app(
         return web.json_response({
             "name": request.match_info.get("name", ""),
             "content": path.read_text(encoding="utf-8", errors="replace"),
+        })
+
+    async def vault_write_handler(request: web.Request) -> web.Response:
+        """PUT /vault/{name} — create or overwrite a note, and reindex it.
+
+        One endpoint for both create and update: the vault is a directory of
+        files, so "create" is just a write to a name that doesn't exist yet,
+        and making the client pick between two endpoints would only invite
+        getting it wrong. Parent directories are created so `folder/note.md`
+        works without a separate mkdir step.
+        """
+        name = request.match_info.get("name", "")
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        content = body.get("content")
+        if not isinstance(content, str):
+            return web.json_response({"error": "content must be a string"}, status=400)
+        try:
+            path = _vault_file(request.app["settings"], name)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        # Only markdown: the listing is `rglob("*.md")`, so anything else
+        # would be written but never shown again.
+        if path.suffix.lower() != ".md":
+            return web.json_response({"error": "note names must end in .md"}, status=400)
+        if path.is_dir():
+            return web.json_response({"error": "that name is a directory"}, status=400)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+        memory_store = request.app["memory"]
+        if memory_store is not None:
+            # Best-effort, exactly as the delete path: a failed reindex costs
+            # recall accuracy, not the user's note.
+            with contextlib.suppress(Exception):
+                memory_store.index_note(name, content)
+        stat = path.stat()
+        return web.json_response({
+            "ok": True,
+            "name": name,
+            "sizeBytes": stat.st_size,
+            "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
         })
 
     async def vault_delete_handler(request: web.Request) -> web.Response:
@@ -961,7 +1166,16 @@ async def create_app(
     app.router.add_get("/registry/item/{slug}", registry_item_handler)
     app.router.add_get("/registry/preview/{slug}", registry_preview_handler)
     app.router.add_get("/vault", vault_list_handler)
+    # Registered BEFORE the `/vault/{name:.*}` catch-all below — aiohttp
+    # resolves in registration order, so these would otherwise be read as a
+    # request for a note literally named "folders" or "move". Note names always
+    # end in .md, so nothing real is shadowed.
+    app.router.add_get("/vault/folders", vault_folders_handler)
+    app.router.add_post("/vault/folders", vault_folder_create_handler)
+    app.router.add_delete("/vault/folders/{path:.*}", vault_folder_delete_handler)
+    app.router.add_post("/vault/move", vault_move_handler)
     app.router.add_get("/vault/{name:.*}", vault_read_handler)
+    app.router.add_put("/vault/{name:.*}", vault_write_handler)
     app.router.add_delete("/vault/{name:.*}", vault_delete_handler)
     app.router.add_delete("/skills/{name}", skill_delete_handler)
     app.router.add_get("/models", models_handler)
