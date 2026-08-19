@@ -14,8 +14,10 @@ import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -195,9 +197,45 @@ async def build_default_graph(settings: Settings, *, memory: MemoryStore | None 
     """Build the agent graph with the unified tool set. Returns (graph, checkpointer, router)."""
     router = ModelRouter(settings)
     tools = build_tools(settings, memory=memory, session_id="server")
-    checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
+    checkpointer = await make_sqlite_checkpointer(settings.resolved_checkpoints_db)
     graph = build_graph(settings, router, tools, checkpointer=checkpointer)
     return graph, checkpointer, router
+
+
+async def _idle_shutdown_loop(
+    turn_registry: dict,
+    idle_timeout: float,
+    *,
+    poll_interval: float | None = None,
+    sleep: Any = asyncio.sleep,
+    kill: Any = os.kill,
+) -> None:
+    """Poll `turn_registry` and self-terminate (SIGTERM) once `idle_timeout`
+    seconds have passed with no active turns. Polls rather than using one
+    deadline per turn, because the deadline itself moves every time a turn
+    starts or ends — a `reg["count"] == 0` window between two turns of an
+    active conversation must not trip this early.
+
+    `poll_interval`/`sleep`/`kill` are overridable for tests only; production
+    code (`create_app`'s `startup` hook) never passes them, so the effective
+    poll interval is always `min(60, max(idle_timeout / 10, 5))` and the
+    real `os.kill`."""
+    if idle_timeout <= 0:
+        return  # 0 disables auto-shutdown
+    interval = poll_interval if poll_interval is not None else min(60.0, max(idle_timeout / 10, 5.0))
+    while True:
+        await sleep(interval)
+        async with turn_registry["lock"]:
+            idle_for = time.monotonic() - turn_registry["last_active_at"]
+            should_stop = turn_registry["count"] == 0 and idle_for >= idle_timeout
+        if should_stop:
+            print(
+                f"[daimon-agent] idle for {idle_for:.0f}s "
+                f"(limit {idle_timeout:.0f}s) — shutting down",
+                file=sys.stderr,
+            )
+            kill(os.getpid(), signal.SIGTERM)
+            return
 
 
 async def create_app(
@@ -205,20 +243,30 @@ async def create_app(
     *,
     graph_builder: Any = build_default_graph,
     memory: MemoryStore | None = None,
+    pidfile: Path | None = None,
 ) -> web.Application:
     settings = settings or Settings.from_env()
     app = web.Application()
     app["settings"] = settings
     app["graph"] = None
     app["checkpointer"] = None
-    app["memory"] = memory or MemoryStore(settings.memory_db)
+    app["memory"] = memory or MemoryStore(settings.resolved_memory_db)
     app["locks"] = {}
     app["skills"] = []
     app["router"] = ModelRouter(settings)  # lazy: only constructed when called
+    # Removed on clean shutdown (see cleanup()) so a self-exited (idle
+    # timeout, --stop, SIGTERM) server never leaves a stale pidfile behind.
+    app["pidfile"] = pidfile
     # Turn registry for the /status endpoint — counts active turns across all
     # sessions (both app-initiated and CLI-initiated) so the activity signal
-    # dot on the pill covers *every* source of work.
-    app["turn_registry"] = {"count": 0, "sessions": Counter(), "lock": asyncio.Lock()}
+    # dot on the pill covers *every* source of work. `last_active_at` drives
+    # idle auto-shutdown (see _idle_shutdown_bg in startup()).
+    app["turn_registry"] = {
+        "count": 0,
+        "sessions": Counter(),
+        "lock": asyncio.Lock(),
+        "last_active_at": time.monotonic(),
+    }
 
     async def startup(app: web.Application) -> None:
         nonlocal settings
@@ -279,6 +327,11 @@ async def create_app(
                 )
         asyncio.ensure_future(_pinchtab_bg())
 
+        # Self-terminate after sustained inactivity — a per-workspace server
+        # has nothing else watching it once the terminal that spawned it
+        # closes.
+        asyncio.ensure_future(_idle_shutdown_loop(app["turn_registry"], settings.idle_timeout_s))
+
     async def cleanup(app: web.Application) -> None:
         await close_checkpointer(app["checkpointer"])
         await aclose_browser()
@@ -287,6 +340,10 @@ async def create_app(
         await close_all_repls()
         app["memory"].close()
         await _stop_pinchtab()
+        pidfile = app.get("pidfile")
+        if pidfile is not None:
+            with contextlib.suppress(OSError):
+                pidfile.unlink()
 
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
@@ -369,6 +426,7 @@ async def create_app(
         async with reg["lock"]:
             reg["count"] += 1
             reg["sessions"][session_id] += 1
+            reg["last_active_at"] = time.monotonic()
 
         lock = app["locks"].setdefault(session_id, asyncio.Lock())
         async with lock:  # one turn per session at a time, like legacy's queue
@@ -408,6 +466,7 @@ async def create_app(
                         del reg["sessions"][session_id]
                     else:
                         reg["sessions"][session_id] -= 1
+                    reg["last_active_at"] = time.monotonic()
 
                 await queue.put(None)
                 await writer_task
@@ -922,14 +981,19 @@ def main() -> None:
     # own). Writing it here (not in the spawner) kills the double-spawn race:
     # the pidfile always names the live server, so a stale one is
     # dead-by-definition and the next ensure/--stop just removes it.
-    pidfile = os.environ.get("DAIMON_PIDFILE")
-    if pidfile:
-        path = Path(pidfile)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"{os.getpid()}\n{settings.port}\n", encoding="utf-8")
+    # Passed through to create_app so cleanup() removes it on any clean exit
+    # (idle timeout, --stop, SIGTERM) — not just when a spawner overwrites it.
+    pidfile_env = os.environ.get("DAIMON_PIDFILE")
+    pidfile_path: Path | None = None
+    if pidfile_env:
+        pidfile_path = Path(pidfile_env)
+        pidfile_path.parent.mkdir(parents=True, exist_ok=True)
+        pidfile_path.write_text(f"{os.getpid()}\n{settings.port}\n", encoding="utf-8")
     # run_app awaits the app coroutine inside its own loop, so startup hooks
     # (checkpointer, browser) bind to the running loop.
-    web.run_app(create_app(settings), host="127.0.0.1", port=settings.port)
+    web.run_app(
+        create_app(settings, pidfile=pidfile_path), host="127.0.0.1", port=settings.port
+    )
 
 
 if __name__ == "__main__":

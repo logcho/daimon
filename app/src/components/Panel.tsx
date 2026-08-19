@@ -104,7 +104,7 @@ export function Panel({
         : unreadCompletion
           ? "bg-emerald-400"
           : "bg-neutral-600";
-  const statusTitle = status ? `agent on port ${status.port}${status.adopted ? " (adopted)" : ""}` : "agent offline";
+  const statusTitle = status ? `agent on port ${status.port}` : "agent offline";
 
   return (
     // The entry animation used to come for free from the panel mounting on

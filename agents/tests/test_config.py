@@ -18,6 +18,11 @@ def test_defaults() -> None:
     # No longer vault-relative: the library is global so it can't move
     # with the cwd. See test_skills_default_to_a_user_level_directory.
     assert s.resolved_skills_dir == Path.home() / ".daimon" / "skills"
+    # Memory/checkpoints DO follow the workspace by default — that's what
+    # keeps two different projects' conversation histories apart. See
+    # test_memory_and_checkpoints_default_under_the_workspace.
+    assert s.resolved_memory_db == s.resolved_workspace_dir / ".daimon" / "memory" / "daimon.db"
+    assert s.resolved_checkpoints_db == s.resolved_workspace_dir / ".daimon" / "memory" / "checkpoints.db"
     assert s.port == 4711
     assert s.temperature == 0.0
     assert s.inactivity_timeout_s == 60.0
@@ -105,3 +110,31 @@ def test_skills_dir_can_be_overridden(clean_env) -> None:
 def test_project_skills_still_follow_the_workspace(clean_env, tmp_path) -> None:
     settings = Settings.from_env({**clean_env, "DAIMON_WORKSPACE_DIR": str(tmp_path)})
     assert settings.project_skills_dir == tmp_path / ".daimon" / "skills"
+
+
+# --- per-workspace memory/checkpoints ----------------------------------------
+
+def test_memory_and_checkpoints_default_under_the_workspace(clean_env, tmp_path) -> None:
+    """Two different projects using the same default session name ("cli")
+    must not land in the same DB — the default has to move with the
+    workspace, not stay anchored to wherever the server process happens to
+    run from."""
+    settings = Settings.from_env({**clean_env, "DAIMON_WORKSPACE_DIR": str(tmp_path)})
+    assert settings.resolved_memory_db == tmp_path / ".daimon" / "memory" / "daimon.db"
+    assert settings.resolved_checkpoints_db == tmp_path / ".daimon" / "memory" / "checkpoints.db"
+
+    other = Settings.from_env({**clean_env, "DAIMON_WORKSPACE_DIR": str(tmp_path / "other")})
+    assert other.resolved_checkpoints_db != settings.resolved_checkpoints_db
+
+
+def test_memory_and_checkpoints_can_be_overridden(clean_env, tmp_path) -> None:
+    settings = Settings.from_env(
+        {
+            **clean_env,
+            "DAIMON_WORKSPACE_DIR": str(tmp_path),
+            "DAIMON_MEMORY_DB": "/tmp/custom-memory.db",
+            "DAIMON_CHECKPOINTS_DB": "/tmp/custom-checkpoints.db",
+        }
+    )
+    assert settings.resolved_memory_db == Path("/tmp/custom-memory.db")
+    assert settings.resolved_checkpoints_db == Path("/tmp/custom-checkpoints.db")

@@ -1,5 +1,6 @@
 mod agent;
 mod fn_key;
+mod paths;
 mod session;
 mod terminal;
 mod timefmt;
@@ -169,6 +170,13 @@ async fn activate_and_focus_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) 
 /// loop is created. Uses the concrete `Wry` runtime so `#[tauri::command]`
 /// macros resolve correctly (generic `R` breaks `AppHandle` deserialization).
 pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri::Wry> {
+    // Before AgentManager::new() reads the environment: a GUI launch gets
+    // launchd's environment, not a shell's, so anything the user "exported"
+    // in .zshrc is absent and `launchctl setenv` doesn't survive a reboot.
+    // This file is the app's own durable store for those settings — it was
+    // already being written (workspace::set_env_var) but never read back,
+    // so every value in it was lost at the next launch.
+    workspace::load_persisted_env();
     builder
         .manage(AgentManager::new())
         .invoke_handler(tauri::generate_handler![

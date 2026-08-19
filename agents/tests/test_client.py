@@ -231,29 +231,45 @@ class _FakeProc:
         return self._poll_result
 
 
-async def test_ensure_server_adopts_when_healthy(monkeypatch, settings, tmp_path):
+async def test_ensure_server_adopts_own_pidfile_when_healthy(monkeypatch, settings, tmp_path):
+    # A live pid + a port that answers /health, both from this workspace's
+    # own pidfile — adoption needs no workspace comparison any more, since
+    # each workspace has its own run dir.
+    (tmp_path / "daimon-agent.pid").write_text("4242\n9999\n")
+    monkeypatch.setattr(client, "_pid_alive", lambda pid: True)
     probed: list[int] = []
     async def fake_health(port):
         probed.append(port)
         return True
     monkeypatch.setattr(client, "_health", fake_health)
-    # The server reports the same workspace — adoption should succeed.
-    async def fake_workspace(port):
-        return str(settings.resolved_workspace_dir.resolve())
-    monkeypatch.setattr(client, "_get_server_workspace", fake_workspace)
     port, spawned = await client.ensure_server(settings, run_dir=tmp_path)
-    assert port == settings.port
+    assert port == 9999
     assert spawned is False
-    assert probed == [settings.port]
+    assert probed == [9999]
 
 
-async def test_ensure_server_spawns_when_port_dead(monkeypatch, settings, tmp_path):
-    monkeypatch.setattr(client, "_health", _noop_health(False))
-    proc = _FakeProc()
-    monkeypatch.setattr(client, "_spawn_server", lambda port, run_dir: proc)
+async def test_ensure_server_spawns_fresh_port_when_no_pidfile(monkeypatch, settings, tmp_path):
+    # No PORT override set — the default path allocates a fresh port per
+    # workspace rather than hardcoding one well-known port.
+    monkeypatch.setattr(client, "allocate_port", lambda: 5555)
+    spawn_calls: list[tuple[int, Path]] = []
+    def fake_spawn(port, run_dir):
+        spawn_calls.append((port, run_dir))
+        return _FakeProc()
+    monkeypatch.setattr(client, "_spawn_server", fake_spawn)
     monkeypatch.setattr(client, "_wait_healthy", _noop)
     port, spawned = await client.ensure_server(settings, run_dir=tmp_path)
-    assert port == settings.port
+    assert port == 5555
+    assert spawned is True
+    assert spawn_calls == [(5555, tmp_path)]
+
+
+async def test_ensure_server_honors_explicit_port_env(monkeypatch, settings, tmp_path):
+    monkeypatch.setenv("PORT", "6060")
+    monkeypatch.setattr(client, "_spawn_server", lambda port, run_dir: _FakeProc())
+    monkeypatch.setattr(client, "_wait_healthy", _noop)
+    port, spawned = await client.ensure_server(settings, run_dir=tmp_path)
+    assert port == 6060
     assert spawned is True
 
 
@@ -361,6 +377,25 @@ async def test_stop_server_kills_only_own_spawned(monkeypatch, tmp_path):
     assert not pidfile.exists()
 
 
+async def test_stop_server_resolves_run_dir_from_settings(monkeypatch, settings, tmp_path):
+    # No explicit run_dir — stop_server must resolve the same per-workspace
+    # dir ensure_server would use for this settings object. Redirect the run
+    # root into tmp_path so this never touches the real
+    # ~/.local/share/daimon/run.
+    fake_root = tmp_path / "run-root"
+    monkeypatch.setattr(client, "default_run_root", lambda: fake_root)
+    run_dir = client.workspace_run_dir(settings.resolved_workspace_dir.resolve())
+    pidfile = run_dir / "daimon-agent.pid"
+    pidfile.write_text("4242\n4711\n", encoding="utf-8")
+    monkeypatch.setattr(client, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(client, "_health", _noop_health(True))
+    killed: list[int] = []
+    monkeypatch.setattr(client, "_kill_group", lambda pid: killed.append(pid))
+    ok, msg = await client.stop_server(settings)
+    assert ok is True
+    assert killed == [4242]
+
+
 # --- introspection helpers ---------------------------------------------------
 
 def test_list_sessions_reads_distinct_thread_ids(tmp_path):
@@ -387,12 +422,19 @@ def test_agents_cwd_is_the_agents_root():
     assert (root / "pyproject.toml").exists()
 
 
-def test_server_checkpoints_db_anchors_relative_to_agents(monkeypatch):
-    monkeypatch.setattr(client, "_agents_cwd", lambda: Path("/agents"))
-    settings = Settings(checkpoints_db=Path("./memory/checkpoints.db"))
-    assert client.server_checkpoints_db(settings) == Path("/agents/memory/checkpoints.db")
+# --- per-workspace run dir ----------------------------------------------------
+
+def test_workspace_run_dir_is_stable_and_writes_sidecar(tmp_path):
+    root = tmp_path / "run"
+    ws = tmp_path / "proj"
+    d1 = client.workspace_run_dir(ws, root=root)
+    d2 = client.workspace_run_dir(ws, root=root)
+    assert d1 == d2
+    assert (d1 / "workspace.txt").read_text(encoding="utf-8").strip() == str(ws)
 
 
-def test_server_checkpoints_db_passes_absolute_through():
-    settings = Settings(checkpoints_db=Path("/tmp/x.db"))
-    assert client.server_checkpoints_db(settings) == Path("/tmp/x.db")
+def test_workspace_run_dir_differs_per_workspace(tmp_path):
+    root = tmp_path / "run"
+    d1 = client.workspace_run_dir(tmp_path / "a", root=root)
+    d2 = client.workspace_run_dir(tmp_path / "b", root=root)
+    assert d1 != d2

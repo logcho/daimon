@@ -106,7 +106,7 @@ export default function App() {
   const refreshStatus = useCallback(() => {
     agentStatus()
       .then(setStatus)
-      .catch(() => setStatus({ running: false, adopted: false, port: 4711, busy: false, active_turns: 0, sessions: [] }));
+      .catch(() => setStatus({ running: false, port: 4711, busy: false, active_turns: 0, sessions: [] }));
   }, []);
 
   const expand = useCallback(() => {

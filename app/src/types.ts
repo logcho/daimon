@@ -214,7 +214,6 @@ export interface ChatMessage {
 
 export interface AgentStatus {
   running: boolean;
-  adopted: boolean;
   port: number;
   busy: boolean;
   active_turns: number;

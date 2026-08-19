@@ -1,37 +1,46 @@
 """Thin client for the daimon-agent HTTP server — the whole `daimon` CLI.
 
-The heavy stack (graph, tools, browser, memory) lives in one background
-server process. This module knows how to find one, spawn one, talk to one,
-and stop one:
+The heavy stack (graph, tools, browser, memory) lives in a background server
+process — one per *workspace*, so two different project directories never
+share (or fight over) the same process. This module knows how to find one,
+spawn one, talk to one, and stop one:
 
-- `ensure_server` probes the configured port and adopts whatever answers
-  `/health`; otherwise it spawns `python -m daimon_agent.server` with
-  `cwd=agents/`, logs to a CLI-owned run dir, and waits up to 30s for it to
-  become healthy. The spawned server writes its own pidfile
-  (`daimon-agent.pid`, env `DAIMON_PIDFILE`) so the pidfile always names the
-  live server — no spawner-side write race.
+- `ensure_server` resolves the current workspace's own run dir
+  (`workspace_run_dir`) and adopts a live, healthy server already recorded
+  there; otherwise it allocates a fresh port and spawns
+  `python -m daimon_agent.server` with `cwd=agents/`, logs to that
+  workspace's run dir, and waits up to 60s for it to become healthy. The
+  spawned server writes its own pidfile (`daimon-agent.pid`, env
+  `DAIMON_PIDFILE`) so the pidfile always names the live server — no
+  spawner-side write race. Because each workspace has its own run dir, two
+  different directories can never be mistaken for one another — there is no
+  "workspace mismatch" to detect or recover from any more.
 - `stream_turn` streams one `/task` turn (line-framed NDJSON, terminal event
   = `done`/`error`/`ask`) through a caller-provided `aiohttp.ClientSession`;
   `resume_turn` answers an `ask` and streams the continuation the same way.
-- `stop_server` kills only a server that *we* spawned: pidfile present AND
-  pid alive AND the recorded port still answers `/health` (never a recycled
-  pid). Adopted and app-managed servers are left alone.
+- `stop_server` kills only a server that *we* spawned for the current
+  workspace: pidfile present AND pid alive AND the recorded port still
+  answers `/health` (never a recycled pid). Other workspaces' servers and
+  app-managed servers are left alone.
 - `list_sessions` reads the checkpointer's thread ids read-only for `--list`.
 
-Known limitation (shared state, pre-existing): one server process holds a
-single shared browser tab and a single shared REPL, so two sessions that use
-the browser or the REPL *simultaneously* interfere. The server's per-session
-turn locks serialize each session's turns; only cross-session browser/REPL
-use overlaps.
+Known limitation (shared state, pre-existing, now scoped to one workspace
+instead of the whole machine): one server process holds a single shared
+browser tab and a single shared REPL, so two *named sessions in the same
+workspace* that use the browser or the REPL simultaneously interfere. The
+server's per-session turn locks serialize each session's turns; only
+cross-session browser/REPL use overlaps.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -45,10 +54,60 @@ import aiohttp
 from .config import Settings
 from .events import TERMINAL_TYPES
 
-# The CLI-owned run dir. Deliberately NOT the Tauri app's run dir, whose
-# orphan sweep would kill our server on app exit.
-def default_run_dir() -> Path:
+
+def default_run_root() -> Path:
+    """Root of every per-workspace run dir (pidfile + logs + sidecar).
+    Deliberately NOT the Tauri app's run dir, whose orphan sweep would kill
+    our server on app exit."""
     return Path.home() / ".local" / "share" / "daimon" / "run"
+
+
+def _workspace_key(resolved_workspace: Path) -> str:
+    """Stable, filesystem-safe id for a resolved workspace path. A hash
+    (not the path itself) survives spaces/unicode/length limits; collisions
+    are a non-issue at this key space (64 bits)."""
+    return hashlib.sha256(str(resolved_workspace).encode("utf-8")).hexdigest()[:16]
+
+
+def workspace_run_dir(resolved_workspace: Path, *, root: Path | None = None) -> Path:
+    """The run dir for one workspace: `<root>/<hash>/`. Writes a
+    `workspace.txt` sidecar recording the literal resolved path, purely so
+    the run root stays `ls`-enumerable — `--stop`/`--list`/`--doctor` stay
+    scoped to the current workspace (v1), but a future "list every running
+    workspace server" can read these sidecars without a layout redesign."""
+    root = root or default_run_root()
+    d = root / _workspace_key(resolved_workspace)
+    d.mkdir(parents=True, exist_ok=True)
+    sidecar = d / "workspace.txt"
+    text = f"{resolved_workspace}\n"
+    if not sidecar.exists() or sidecar.read_text(encoding="utf-8") != text:
+        with contextlib.suppress(OSError):
+            sidecar.write_text(text, encoding="utf-8")
+    return d
+
+
+def _explicit_port() -> int | None:
+    """A user-set PORT env var, honored as a manual override even though the
+    default path now allocates a fresh port per workspace instead of
+    hardcoding one well-known port (multiple concurrent workspace servers
+    can't all bind the same port)."""
+    raw = os.environ.get("PORT")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def allocate_port() -> int:
+    """Bind-then-release port allocation — mirrors the Tauri app's
+    `allocate_port()` in app/src-tauri/src/agent.rs. A tiny race (something
+    else could grab the port before the child binds) that's acceptable for a
+    single-machine dev tool."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 class ClientError(RuntimeError):
@@ -63,18 +122,6 @@ def _agents_cwd() -> Path:
     if (root / "pyproject.toml").exists():
         return root
     return Path.cwd()
-
-
-def server_checkpoints_db(settings: Settings) -> Path:
-    """The checkpoints DB the *server* will use — `--list` must read that
-    one, not the CLI's cwd-relative default. The server (spawned with
-    cwd=agents/) resolves relative paths against agents/, so we re-anchor
-    relative paths there; absolute paths (explicit DAIMON_CHECKPOINTS_DB)
-    pass through verbatim."""
-    db = settings.checkpoints_db
-    if db.is_absolute():
-        return db
-    return _agents_cwd() / db
 
 
 # --- process management ------------------------------------------------------
@@ -197,73 +244,43 @@ def _sweep_stale(run_dir: Path) -> None:
         pidfile.unlink()
 
 
-async def _get_server_workspace(port: int) -> str | None:
-    """Return the resolved workspace of a running server from its /health
-    payload, or None when unreachable or the server predates the workspace
-    field (pre-0.1)."""
-    try:
-        timeout = aiohttp.ClientTimeout(total=2.0)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"http://127.0.0.1:{port}/health") as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("workspace")
-    except (aiohttp.ClientError, OSError):
-        pass
-    return None
-
-
 async def ensure_server(settings: Settings, *, run_dir: Path | None = None) -> tuple[int, bool]:
-    """Make sure a daimon server answers on settings.port: adopt one that
-    does, spawn one otherwise. Returns (port, spawned). Mirrors the Tauri
-    app's ensure in app/src-tauri/src/agent.rs — the CLI and the app can
-    share a server on 4711, and each kills only its own.
+    """Make sure a daimon server is running for this workspace: adopt this
+    workspace's own server if its pidfile names a live, healthy process;
+    spawn a fresh one (on a freshly allocated port, unless PORT is set
+    explicitly) otherwise. Returns (port, spawned).
 
-    When adopting an existing server, verifies that its workspace matches
-    the configured one.  A mismatch (or an old server that doesn't report
-    its workspace) means the server was started from a different directory —
-    kill it and spawn a fresh one with the correct workspace."""
-    run_dir = run_dir or default_run_dir()
-    port = settings.port
-    expected_ws = str(settings.resolved_workspace_dir.resolve())
+    Unlike the old fixed-port model, two different workspaces get two
+    independent run dirs (`workspace_run_dir`), so this can never adopt or
+    kill a server that belongs to a different directory — no workspace
+    comparison is needed any more."""
+    resolved_ws = settings.resolved_workspace_dir.resolve()
+    run_dir = run_dir or workspace_run_dir(resolved_ws)
+    pidfile = run_dir / "daimon-agent.pid"
 
-    if await _health(port):
-        # Adopting — check workspace compatibility.
-        actual_ws = await _get_server_workspace(port)
-        if actual_ws is None:
-            # Old server that doesn't report workspace — can't verify, so
-            # restart to guarantee the correct workspace is used.
-            print(
-                f"[daimon] running server does not report its workspace "
-                f"(pre-0.1) — restarting to use {expected_ws}",
-                file=sys.stderr,
-            )
-        elif actual_ws != expected_ws:
-            print(
-                f"[daimon] server workspace mismatch — "
-                f"expected {expected_ws}, got {actual_ws} — restarting",
-                file=sys.stderr,
-            )
-        else:
+    if pidfile.exists():
+        pid = _read_pid(pidfile)
+        port = _read_port(pidfile)
+        if pid is not None and port is not None and _pid_alive(pid) and await _health(port):
             return port, False
-        # Mismatch or unknown — kill the old server before spawning.
+        # Dead or unhealthy — sweep before spawning fresh.
         _sweep_stale(run_dir)
 
-    # No healthy server with the right workspace — spawn a fresh one.
-    _sweep_stale(run_dir)  # no-op when the pidfile is already gone
-    # Brief yield so the OS can release the port after SIGKILL.
-    await asyncio.sleep(0.5)
+    port = _explicit_port() or allocate_port()
     proc = _spawn_server(port, run_dir=run_dir)
     await _wait_healthy(port, proc, err_log=run_dir / "daimon-agent.err.log")
     return port, True
 
 
-async def stop_server(run_dir: Path | None = None) -> tuple[bool, str]:
-    """Stop a CLI-spawned server, and only that: pidfile present AND pid
-    alive AND the recorded port still answers /health. Anything else is
-    refused (a recycled pid must never be killed). Returns (stopped,
-    message)."""
-    run_dir = run_dir or default_run_dir()
+async def stop_server(settings: Settings | None = None, *, run_dir: Path | None = None) -> tuple[bool, str]:
+    """Stop the CLI-spawned server for this workspace, and only that:
+    pidfile present AND pid alive AND the recorded port still answers
+    /health. Anything else is refused (a recycled pid must never be
+    killed), and other workspaces' servers are never touched. Returns
+    (stopped, message)."""
+    if run_dir is None:
+        settings = settings or Settings.from_env()
+        run_dir = workspace_run_dir(settings.resolved_workspace_dir.resolve())
     pidfile = run_dir / "daimon-agent.pid"
     if not pidfile.exists():
         return False, "no daimon server to stop (no pidfile)"

@@ -64,7 +64,10 @@ pub async fn get_vault_path_status() -> Result<VaultPathStatus, String> {
 }
 
 #[tauri::command]
-pub async fn set_vault_path(path: String) -> Result<(), String> {
+pub async fn set_vault_path(
+    path: String,
+    state: tauri::State<'_, crate::agent::AgentManager>,
+) -> Result<(), String> {
     let path = path.trim();
     if path.is_empty() {
         return Err("vault path cannot be empty".into());
@@ -77,7 +80,11 @@ pub async fn set_vault_path(path: String) -> Result<(), String> {
         ));
     }
 
-    workspace::set_env_var("DAIMON_VAULT_DIR", path)
+    workspace::set_env_var("DAIMON_VAULT_DIR", path)?;
+    // The running server (if any) confined itself to the old directory at
+    // spawn time — restart so the change takes effect on the next message
+    // instead of silently continuing against the stale root.
+    state.shutdown().await
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -177,6 +184,7 @@ mod tests {
                 super::list_vault_files,
                 super::read_vault_file,
             ])
+            .manage(crate::agent::AgentManager::default())
             .build(mock_context(noop_assets()))
             .expect("error while building test app");
         let webview = WebviewWindowBuilder::new(&app, "pill", Default::default())

@@ -7,11 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
+import time
+from collections import Counter
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from langchain_core.messages import AIMessage
 
+from daimon_agent import server
 from daimon_agent.graph import build_graph, make_sqlite_checkpointer
 from daimon_agent.server import create_app
 from fakes import FakeRouter
@@ -21,7 +26,7 @@ async def fake_graph_builder(settings, *, memory=None):
     """Real compiled graph over a scripted model — run_turn needs genuine
     astream/aget_state/checkpointer, which only the real graph provides."""
     router = FakeRouter()
-    checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
+    checkpointer = await make_sqlite_checkpointer(settings.resolved_checkpoints_db)
     graph = build_graph(settings, router, [], checkpointer=checkpointer)
     graph.router = router  # test handle to script the model
     return graph, checkpointer, router
@@ -534,3 +539,73 @@ async def test_deleting_a_note_drops_its_memory_index(client: TestClient) -> Non
 
     await client.delete("/vault/gone.md")
     assert not memory.search_notes("pineapple")
+
+
+# --- idle auto-shutdown -------------------------------------------------------
+
+def _make_registry(*, count: int = 0, last_active_at: float = 0.0) -> dict:
+    return {
+        "count": count,
+        "sessions": Counter(),
+        "lock": asyncio.Lock(),
+        "last_active_at": last_active_at,
+    }
+
+
+async def test_idle_shutdown_fires_once_threshold_crossed() -> None:
+    reg = _make_registry(count=0, last_active_at=time.monotonic() - 1000)
+    kills: list[tuple[int, int]] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    await server._idle_shutdown_loop(
+        reg, idle_timeout=1.0, poll_interval=0.01,
+        sleep=fake_sleep, kill=lambda pid, sig: kills.append((pid, sig)),
+    )
+    assert kills == [(os.getpid(), signal.SIGTERM)]
+    assert sleeps == [0.01]  # returns after the first tick that crosses the threshold
+
+
+async def test_idle_shutdown_waits_while_active() -> None:
+    reg = _make_registry(count=1, last_active_at=time.monotonic())
+    kills: list[tuple[int, int]] = []
+    ticks = 0
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks >= 3:
+            reg["count"] = 0
+            reg["last_active_at"] = time.monotonic() - 1000  # go idle on tick 4
+
+    await server._idle_shutdown_loop(
+        reg, idle_timeout=1.0, poll_interval=0.01,
+        sleep=fake_sleep, kill=lambda pid, sig: kills.append((pid, sig)),
+    )
+    # Three polls stayed busy/just-went-idle before the loop caught it and
+    # shut down within the same poll that flipped the state.
+    assert ticks == 3
+    assert kills == [(os.getpid(), signal.SIGTERM)]
+
+
+async def test_idle_shutdown_disabled_when_zero() -> None:
+    reg = _make_registry(count=0, last_active_at=time.monotonic() - 1000)
+    called = False
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal called
+        called = True
+
+    await server._idle_shutdown_loop(reg, idle_timeout=0, sleep=fake_sleep)
+    assert called is False  # returns immediately, no polling at all
+
+
+async def test_cleanup_removes_the_pidfile(settings, tmp_path) -> None:
+    pidfile = tmp_path / "daimon-agent.pid"
+    pidfile.write_text("123\n4711\n", encoding="utf-8")
+    app = await create_app(settings, graph_builder=fake_graph_builder, pidfile=pidfile)
+    async with TestClient(TestServer(app)):
+        assert pidfile.exists()  # still there while the app is up
+    assert not pidfile.exists()  # cleanup() removed it on shutdown

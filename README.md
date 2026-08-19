@@ -29,6 +29,7 @@ Configuration lives in `agents/.env` (copy `.env.example`). **API keys go there*
 - `uv run daimon "…"` — one-shot turn (result on stdout, progress on stderr)
 - `uv run daimon-agent` — HTTP server on `127.0.0.1:4711` (`GET /health`, `POST /task` → NDJSON event stream, `POST /resume` to answer a question)
 - `scripts/setup-pinchtab.sh start` — PinchTab browser sidecar (optional, for browser tools)
+- `scripts/reinstall-cli.sh` — install/repair the global `daimon` CLI — rerun after moving this repo
 - `scripts/optimize_skill.py` / `scripts/smoke_e2e.py` — skill optimizer and end-to-end smoke
 
 DeepSeek is the default provider. Either model role takes a `provider:model` spec, so the main agent can run on a stronger model while sub-agents stay cheap — pick them in `/setup`, in the app's settings, or directly:

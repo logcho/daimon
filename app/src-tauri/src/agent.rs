@@ -1,12 +1,18 @@
 //! Supervision of the agent server process (the legacy workspace.rs pattern,
 //! scaled down to the chat app's single always-on server).
 //!
-//! Flow: probe the fixed port — if a server answers /health, adopt it (the
-//! user may have started `uv run daimon-agent` themselves). Otherwise spawn
-//! `uv run daimon-agent` with cwd = agents/ (so its cwd-relative .env, vault
-//! and memory resolve), on a freshly allocated port, then health-poll until
-//! ready. Shutdown kills the whole process group — the agent spawns ipykernel
-//! children, so a plain child-kill would orphan them.
+//! Flow: the app owns its server outright — it never adopts whatever happens
+//! to answer on some well-known port (that could just as easily be a
+//! `daimon` CLI server for some project directory, with a different
+//! confinement root; the CLI itself now runs one server *per workspace*, so
+//! there is no single well-known port to adopt from any more). If there's no
+//! live cached child, spawn `uv run daimon-agent` with cwd = agents/ (so its
+//! cwd-relative .env resolves) on a freshly allocated port, with
+//! DAIMON_WORKSPACE_DIR/DAIMON_VAULT_DIR pinned to one fixed app-owned
+//! directory — chat has no per-tab or per-session "workspace" concept, every
+//! tab confines to the same place — then health-poll until ready. Shutdown
+//! kills the whole process group — the agent spawns ipykernel children, so a
+//! plain child-kill would orphan them.
 
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -17,12 +23,10 @@ use tauri::{AppHandle, Manager};
 
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const HEALTH_POLL_TRIES: u32 = 60; // 30s budget, as the legacy daemon
-const DEFAULT_PORT: u16 = 4711;
 
 #[derive(Clone, Serialize)]
 pub struct AgentStatus {
     pub running: bool,
-    pub adopted: bool,
     pub port: u16,
     #[serde(default)]
     pub busy: bool,
@@ -40,7 +44,6 @@ enum ChildState {
         _log_out: File,
         _log_err: File,
     },
-    Adopted { port: u16 },
 }
 
 pub struct AgentManager {
@@ -48,26 +51,25 @@ pub struct AgentManager {
     /// Serializes ensure() — two concurrent calls (e.g. the mount effect
     /// double-firing in dev) must collapse into one spawn, not leak two.
     ensure_lock: tokio::sync::Mutex<()>,
-    /// Preferred port — the adoption-probe target.
-    port: u16,
-    agents_dir: PathBuf,
+    /// Manual fixed-port override (DAIMON_APP_PORT). `None` means "always
+    /// allocate a fresh port" — the app never adopts a well-known port any
+    /// more, so there's no adoption-probe target to default this to.
+    fixed_port: Option<u16>,
+    agents_dir: Option<PathBuf>,
     /// The orphan sweep runs once per app lifetime, not per ensure().
     reconciled: std::sync::Once,
 }
 
 impl AgentManager {
     pub fn new() -> Self {
-        let agents_dir = std::env::var_os("DAIMON_AGENT_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../agents"));
-        let port = std::env::var("DAIMON_APP_PORT")
+        let agents_dir = crate::paths::agents_dir();
+        let fixed_port = std::env::var("DAIMON_APP_PORT")
             .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(DEFAULT_PORT);
+            .and_then(|p| p.parse().ok());
         Self {
             inner: Mutex::new(None),
             ensure_lock: tokio::sync::Mutex::new(()),
-            port,
+            fixed_port,
             agents_dir,
             reconciled: std::sync::Once::new(),
         }
@@ -97,31 +99,43 @@ impl AgentManager {
         // respawn loop, with a fresh PinchTab each time. Nothing here needs to
         // run twice; the leftovers it looks for are from a previous process.
         self.reconciled.call_once(|| self.reconcile_orphans(&run_dir));
-        {
-            let cached: Option<(bool, u16)> = {
-                let guard = self.inner.lock().unwrap();
-                match &*guard {
-                    Some(ChildState::Managed { port, .. }) => Some((false, *port)),
-                    Some(ChildState::Adopted { port }) => Some((true, *port)),
-                    None => None,
-                }
-            };
-            if let Some((adopted, port)) = cached {
-                if health(port).await.is_ok() {
-                    return Ok(AgentStatus { running: true, adopted, port, busy: false, active_turns: 0, sessions: vec![] });
-                }
-                *self.inner.lock().unwrap() = None; // dead — respawn below
+
+        let cached: Option<u16> = {
+            let guard = self.inner.lock().unwrap();
+            match &*guard {
+                Some(ChildState::Managed { port, .. }) => Some(*port),
+                None => None,
             }
+        };
+        if let Some(port) = cached {
+            if health(port).await.is_ok() {
+                return Ok(AgentStatus { running: true, port, busy: false, active_turns: 0, sessions: vec![] });
+            }
+            *self.inner.lock().unwrap() = None; // dead — respawn below
         }
-        // Nothing cached — probe the fixed port and adopt an external server.
-        if health(self.port).await.is_ok() {
-            *self.inner.lock().unwrap() = Some(ChildState::Adopted { port: self.port });
-            return Ok(AgentStatus { running: true, adopted: true, port: self.port, busy: false, active_turns: 0, sessions: vec![] });
-        }
+        // The app owns its server: never adopt whatever answers some
+        // well-known port — it could be a CLI-spawned server for a project
+        // directory, with a different (or absent) confinement root.
         self.spawn(app, &run_dir).await
     }
 
     async fn spawn(&self, _app: &AppHandle, run_dir: &std::path::Path) -> Result<AgentStatus, String> {
+        let agents_dir = self.agents_dir.as_deref().filter(|d| d.is_dir()).ok_or_else(|| {
+            match &self.agents_dir {
+                Some(tried) => format!(
+                    "agents/ directory not found at {} — set DAIMON_AGENT_DIR to the \
+                     correct absolute path and restart the app, e.g.:\n\n    \
+                     export DAIMON_AGENT_DIR=/path/to/daimon/agents\n",
+                    tried.display()
+                ),
+                None => "can't find the agents/ directory (the app isn't running from \
+                         inside a daimon checkout) — set DAIMON_AGENT_DIR to its absolute \
+                         path and restart the app, e.g.:\n\n    \
+                         export DAIMON_AGENT_DIR=/path/to/daimon/agents\n"
+                    .to_string(),
+            }
+        })?;
+
         std::fs::create_dir_all(run_dir).map_err(|e| format!("cannot create run dir: {e}"))?;
 
         let out_path = run_dir.join("daimon-agent.out.log");
@@ -131,16 +145,47 @@ impl AgentManager {
         let log_err = OpenOptions::new().create(true).append(true).open(&err_path)
             .map_err(|e| format!("cannot open {}: {e}", err_path.display()))?;
 
-        let port = allocate_port()?;
-        let child = tokio::process::Command::new("uv")
+        // Resolved to an absolute path, never spawned as a bare "uv": a
+        // Dock/Finder launch inherits only launchd's minimal PATH, which does
+        // not include ~/.local/bin where uv installs itself. See paths.rs.
+        let uv = crate::paths::uv_bin().ok_or_else(|| {
+            "can't find the `uv` command, which runs the agent server. The app is \
+             launched by macOS without your shell's PATH, so a uv installed under \
+             your home directory isn't visible to it.\n\n\
+             Install uv (https://docs.astral.sh/uv/), or point the app at an \
+             existing one and restart it:\n\n    \
+             launchctl setenv DAIMON_UV_BIN /full/path/to/uv\n"
+                .to_string()
+        })?;
+
+        let port = match self.fixed_port {
+            Some(p) => p,
+            None => allocate_port()?,
+        };
+        // The one fixed app-owned directory every chat tab confines its
+        // tools to — reuses vault::vault_path() so the app's file-browsing
+        // "vault" and the agent's actual tool-confinement root are the same
+        // directory (previously vault.rs's DAIMON_VAULT_DIR had zero effect
+        // on the agent). Set explicitly rather than relying on inherited env,
+        // in case a stray DAIMON_WORKSPACE_DIR is already exported in the
+        // parent shell the app was launched from.
+        let confinement_root = crate::vault::vault_path();
+        let child = tokio::process::Command::new(&uv)
             .args(["run", "daimon-agent"])
-            .current_dir(&self.agents_dir)
+            .current_dir(agents_dir)
             .env("PORT", port.to_string())
+            .env("PATH", crate::paths::augmented_path())
+            .env("DAIMON_WORKSPACE_DIR", &confinement_root)
+            .env("DAIMON_VAULT_DIR", &confinement_root)
             .process_group(0) // group leader: kill(-pid) takes the tree down
             .stdout(std::process::Stdio::from(log_out.try_clone().map_err(|e| e.to_string())?))
             .stderr(std::process::Stdio::from(log_err.try_clone().map_err(|e| e.to_string())?))
             .spawn()
-            .map_err(|e| format!("failed to spawn the agent server (is uv on PATH?): {e}"))?;
+            .map_err(|e| format!(
+                "failed to spawn `{} run daimon-agent` in {}: {e}",
+                uv.display(),
+                agents_dir.display()
+            ))?;
         let pid = child.id().ok_or_else(|| "spawned process has no pid".to_string())?;
         // Deliberately kept after a successful spawn: reconcile_orphans reads
         // it on the next launch so an abruptly-killed parent (SIGKILL, crash)
@@ -158,7 +203,7 @@ impl AgentManager {
                     _log_out: log_out,
                     _log_err: log_err,
                 });
-                return Ok(AgentStatus { running: true, adopted: false, port, busy: false, active_turns: 0, sessions: vec![] });
+                return Ok(AgentStatus { running: true, port, busy: false, active_turns: 0, sessions: vec![] });
             }
             tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
         }

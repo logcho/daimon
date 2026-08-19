@@ -32,9 +32,14 @@ class Settings:
     # Workspace / data dirs.
     vault_dir: Path = Path("./vault")
     workspace_dir: Path | None = None  # defaults to vault_dir
-    memory_db: Path = Path("./memory/daimon.db")
-    checkpoints_db: Path = Path("./memory/checkpoints.db")
+    memory_db: Path | None = None  # defaults to resolved_workspace_dir/.daimon/memory/daimon.db
+    checkpoints_db: Path | None = None  # defaults to resolved_workspace_dir/.daimon/memory/checkpoints.db
     skills_dir: Path | None = None  # defaults to vault_dir / "skills"
+
+    #: Seconds a server may sit with no active turns before it self-terminates
+    #: (SIGTERM). A per-workspace server has nothing else watching it once the
+    #: terminal that spawned it closes. 0 disables auto-shutdown.
+    idle_timeout_s: float = 2700.0
 
     # PinchTab browser sidecar.
     pinchtab_base: str = "http://127.0.0.1:9867"
@@ -80,6 +85,20 @@ class Settings:
         return self.workspace_dir or self.vault_dir
 
     @property
+    def resolved_memory_db(self) -> Path:
+        """Per-workspace by default — two different projects using the same
+        default session name ("cli") must not share one memory index.
+        `DAIMON_MEMORY_DB` still overrides it."""
+        return self.memory_db or (self.resolved_workspace_dir / ".daimon" / "memory" / "daimon.db")
+
+    @property
+    def resolved_checkpoints_db(self) -> Path:
+        """Per-workspace by default — this is what keeps two projects both
+        using the default session name "cli" in two different DBs instead of
+        one shared row. `DAIMON_CHECKPOINTS_DB` still overrides it."""
+        return self.checkpoints_db or (self.resolved_workspace_dir / ".daimon" / "memory" / "checkpoints.db")
+
+    @property
     def resolved_skills_dir(self) -> Path:
         """The global library — genuinely global.
 
@@ -99,7 +118,7 @@ class Settings:
     def registry_cache_dir(self) -> Path:
         """Cached registry/GitHub responses. Lives beside the databases because
         it is derived data — deleting it costs a re-fetch, nothing else."""
-        return self.memory_db.parent / "registry-cache"
+        return self.resolved_memory_db.parent / "registry-cache"
 
     @property
     def project_skills_dir(self) -> Path:
@@ -163,12 +182,13 @@ class Settings:
             anthropic_api_base=get("ANTHROPIC_API_BASE"),
             vault_dir=Path(get("DAIMON_VAULT_DIR") or "./vault"),
             workspace_dir=Path(get("DAIMON_WORKSPACE_DIR")) if get("DAIMON_WORKSPACE_DIR") else None,
-            memory_db=Path(get("DAIMON_MEMORY_DB") or "./memory/daimon.db"),
-            checkpoints_db=Path(get("DAIMON_CHECKPOINTS_DB") or "./memory/checkpoints.db"),
+            memory_db=Path(get("DAIMON_MEMORY_DB")) if get("DAIMON_MEMORY_DB") else None,
+            checkpoints_db=Path(get("DAIMON_CHECKPOINTS_DB")) if get("DAIMON_CHECKPOINTS_DB") else None,
             skills_dir=Path(get("DAIMON_SKILLS_DIR")) if get("DAIMON_SKILLS_DIR") else None,
             pinchtab_base=get("PINCHTAB_BASE") or "http://127.0.0.1:9867",
             pinchtab_token=get("PINCHTAB_TOKEN"),
             port=int(get("PORT") or "4711"),
+            idle_timeout_s=float(get("DAIMON_IDLE_TIMEOUT_S") or "2700"),
             recursion_limit=int(get("DAIMON_RECURSION_LIMIT") or "150"),
             max_steps_per_turn=int(get("DAIMON_MAX_STEPS") or "600"),
             live_frames=get_bool("DAIMON_LIVE_FRAMES", False),
