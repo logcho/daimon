@@ -129,7 +129,9 @@ def _tool_result_text(content: Any) -> str:
 
 #: Per-tool, the argument worth showing next to the tool name. First match
 #: wins; a tool with no entry shows no detail rather than a dump of its args.
-_DETAIL_KEYS = ("path", "file_path", "query", "queries", "command", "url", "pattern", "prompt")
+_DETAIL_KEYS = (
+    "path", "file_path", "name", "query", "queries", "command", "url", "pattern", "prompt",
+)
 
 
 def _call_detail(args: dict, limit: int = 72) -> str | None:
@@ -855,9 +857,17 @@ def _format_answer(answer: Any) -> str:
     return f"The user answered: {text}" if text else "The user did not answer."
 
 
-def run_config(session_id: str) -> dict:
-    """The config every turn runs with: checkpointer thread + recursion cap."""
-    return {"configurable": {"thread_id": session_id}, "recursion_limit": RECURSION_LIMIT}
+def run_config(session_id: str, recursion_limit: int | None = None) -> dict:
+    """The config every turn runs with: checkpointer thread + recursion cap.
+
+    The cap guards against infinite loops; it is not a budget for how long a
+    task may take. `run.py` catches it and continues from the checkpoint, and
+    enforces the real ceiling (`max_steps_per_turn`) itself.
+    """
+    return {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": recursion_limit or RECURSION_LIMIT,
+    }
 
 
 def extract_result(messages: list[AnyMessage]) -> str:

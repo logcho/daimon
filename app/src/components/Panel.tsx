@@ -1,6 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { AgentStatus, ChatMessage, DictationStatus, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
-import { hasCompletedTurn, isSessionBusy } from "../sessionEvents";
+import type { AgentConfig } from "../api";
+import { hasCompletedTurn, isSessionBusy, sessionTotals } from "../sessionEvents";
 import { ChatInput } from "./ChatInput";
 import { ErrorBanner } from "./ErrorBanner";
 import { MessageList } from "./MessageList";
@@ -8,7 +9,9 @@ import { SettingsPanel } from "./SettingsPanel";
 import { SoundWave } from "./SoundWave";
 import { TerminalPanel } from "./TerminalPanel";
 import { VoiceIndicator } from "./VoiceIndicator";
+import { SkillsPanel } from "./SkillsPanel";
 import { VaultPanel } from "./VaultPanel";
+import { ChatStatusBar } from "./ChatStatusBar";
 
 interface PanelProps {
   /** Active session only — gates ChatInput. */
@@ -17,6 +20,10 @@ interface PanelProps {
   globalBusy: boolean;
   /** A turn finished while collapsed — green dot until user expands. */
   unreadCompletion?: boolean;
+  /** Whether the panel is actually on screen. It stays mounted while
+   *  collapsed (App.tsx), so anything that measures or focuses itself needs
+   *  to know the difference between "mounted" and "visible". */
+  expanded: boolean;
   status: AgentStatus | null;
   view: View;
   onViewChange: (view: View) => void;
@@ -28,6 +35,8 @@ interface PanelProps {
   activeSessionId: string | null;
   onSelectChat: (id: string) => void;
   onCloseChat: (id: string) => void;
+  /** From GET /config — the same source the CLI's status bar reads. */
+  config: AgentConfig | null;
   onAddChat: () => void;
   messages: ChatMessage[];
   onSend: (text: string) => void;
@@ -61,6 +70,7 @@ export function Panel({
   busy,
   globalBusy,
   unreadCompletion,
+  expanded,
   status,
   view,
   onViewChange,
@@ -70,6 +80,7 @@ export function Panel({
   activeSessionId,
   onSelectChat,
   onCloseChat,
+  config,
   onAddChat,
   messages,
   onSend,
@@ -93,10 +104,17 @@ export function Panel({
         : unreadCompletion
           ? "bg-emerald-400"
           : "bg-neutral-600";
-  const statusTitle = status ? `agent on port ${status.port}${status.adopted ? " (adopted)" : ""}` : "agent offline";
+  const statusTitle = status ? `agent on port ${status.port}` : "agent offline";
 
   return (
-    <div className="animate-daimon-in liquid-glass flex h-full w-full flex-col overflow-hidden rounded-[28px] text-white">
+    // The entry animation used to come for free from the panel mounting on
+    // every expand. It doesn't remount any more (App.tsx keeps it alive so the
+    // terminals inside survive), so the class is applied only while expanded:
+    // dropping it on collapse and re-adding it on expand is what restarts the
+    // animation.
+    <div
+      className={`${expanded ? "animate-daimon-in" : ""} liquid-glass flex h-full w-full flex-col overflow-hidden rounded-[28px] text-white`}
+    >
       <header
         className="flex shrink-0 items-center gap-2 border-b border-white/[0.08] px-4 py-3 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]"
         onMouseDown={(e) => {
@@ -167,6 +185,16 @@ export function Panel({
           }`}
         >
           vault
+        </button>
+        <button
+          onClick={() => onViewChange("skills")}
+          className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
+            view === "skills"
+              ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
+              : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
+          }`}
+        >
+          skills
         </button>
         <button
           onClick={() => onViewChange("settings")}
@@ -295,39 +323,67 @@ export function Panel({
                 : null
             }
           />
-          <ChatInput onSend={onSend} disabled={busy} />
+          {/* The input and its status line are one unit: `relative` anchors the
+              floating line, `pb-5` reserves the space it sits in without the
+              line itself occupying a row in this column. */}
+          <div className="relative shrink-0 pb-6">
+            <ChatInput onSend={onSend} disabled={busy} />
+            <ChatStatusBar
+              model={config?.model ?? "…"}
+              contextWindow={config?.context_window ?? 128000}
+              busy={busy}
+              {...sessionTotals(messages)}
+            />
+          </div>
         </div>
       )}
 
-      {view === "terminal" && (
-        <div className="flex min-h-0 flex-1 flex-col">
-          {/* One TerminalPanel per tab, each kept mounted even when not the
-              active one (hidden via display:none) so shell scrollback
-              survives tab switches — the real PTY processes live in Rust,
-              but the xterm instance's rendered buffer lives here. */}
-          {terminalTabs.map((id) => (
-            <div
-              key={id}
-              className="min-h-0 flex-1"
-              style={{ display: id === activeTerminalId ? "flex" : "none" }}
-            >
-              <TerminalPanel
-                id={id}
-                active={id === activeTerminalId}
-                initialCommand={initialTerminalCommands[id]}
-              />
-            </div>
-          ))}
-          {terminalTabs.length === 0 && (
-            <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-neutral-500">
-              Press <span className="mx-1 rounded bg-white/10 px-1.5 py-0.5 text-neutral-300">+</span> to open a
-              terminal — or ask Daimon a question that needs shell access.
-            </div>
-          )}
-        </div>
-      )}
+      {/* Hidden rather than unmounted when another view is showing. The PTYs
+          themselves live in Rust and keep running either way, but the rendered
+          scrollback lives in the xterm instance here — unmounting disposed it,
+          and a shell has no reason to reprint what it already printed, so
+          coming back to the terminal showed a blank or half-drawn screen until
+          something forced a redraw. Resizing the window was that something,
+          which is why it looked like a resize "fixed" it.
+
+          `min-h-0 flex-1` only apply while it's the visible view; the inline
+          display flip is what takes it out of the layout otherwise. */}
+      <div
+        className={view === "terminal" ? "min-h-0 flex-1 flex-col" : ""}
+        style={{ display: view === "terminal" ? "flex" : "none" }}
+      >
+        {/* One TerminalPanel per tab, each kept mounted even when not the
+            active one (hidden via display:none) so shell scrollback
+            survives tab switches — the real PTY processes live in Rust,
+            but the xterm instance's rendered buffer lives here. */}
+        {terminalTabs.map((id) => (
+          <div
+            key={id}
+            className="min-h-0 flex-1"
+            style={{ display: id === activeTerminalId ? "flex" : "none" }}
+          >
+            <TerminalPanel
+              id={id}
+              // Not just the active *tab*: the active tab of a view nobody is
+              // looking at — or of a panel collapsed to the pill — is still off
+              // screen, and a terminal that thinks it's visible will grab focus
+              // and try to measure a container that has no box. Going false and
+              // back true on expand is also what re-fits and repaints it.
+              active={expanded && view === "terminal" && id === activeTerminalId}
+              initialCommand={initialTerminalCommands[id]}
+            />
+          </div>
+        ))}
+        {terminalTabs.length === 0 && (
+          <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-neutral-500">
+            Press <span className="mx-1 rounded bg-white/10 px-1.5 py-0.5 text-neutral-300">+</span> to open a
+            terminal — or ask Daimon a question that needs shell access.
+          </div>
+        )}
+      </div>
 
       {view === "vault" && <VaultPanel />}
+      {view === "skills" && <SkillsPanel />}
       {view === "settings" && <SettingsPanel />}
     </div>
   );

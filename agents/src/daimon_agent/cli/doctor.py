@@ -17,6 +17,7 @@ from pathlib import Path
 
 import aiohttp
 
+from .. import client
 from ..config import Settings
 
 # ---------------------------------------------------------------------------
@@ -158,21 +159,24 @@ def _check_settings(report: Report) -> Settings | None:
     report.add("Port", Status.OK, str(s.port))
     report.add(
         "Checkpoints DB",
-        Status.OK if s.checkpoints_db.exists() else Status.WARN,
-        str(s.checkpoints_db),
-        "DB will be created on first turn" if not s.checkpoints_db.exists() else "",
+        Status.OK if s.resolved_checkpoints_db.exists() else Status.WARN,
+        str(s.resolved_checkpoints_db),
+        "DB will be created on first turn" if not s.resolved_checkpoints_db.exists() else "",
     )
     report.add(
         "Memory DB",
-        Status.OK if s.memory_db.exists() else Status.WARN,
-        str(s.memory_db),
-        "DB will be created on first turn" if not s.memory_db.exists() else "",
+        Status.OK if s.resolved_memory_db.exists() else Status.WARN,
+        str(s.resolved_memory_db),
+        "DB will be created on first turn" if not s.resolved_memory_db.exists() else "",
     )
     return s
 
 
-async def _check_server(port: int, expected_ws: str, report: Report) -> None:
-    """Check whether a server is running on *port* and its workspace."""
+async def _check_server(port: int, report: Report) -> None:
+    """Check whether a server is running on *port* for this workspace. A
+    workspace mismatch is no longer possible to detect here since each
+    workspace has its own run dir/port — this only checks that whatever is
+    on the recorded port is actually healthy."""
     try:
         timeout = aiohttp.ClientTimeout(total=3.0)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -208,29 +212,14 @@ async def _check_server(port: int, expected_ws: str, report: Report) -> None:
 
     if ok:
         if server_ws:
-            server_ws_path = Path(server_ws)
-            if str(server_ws_path.resolve()) == expected_ws:
-                report.add(
-                    f"Server :{port}",
-                    Status.OK,
-                    f"healthy, workspace matches: {server_ws}",
-                )
-            else:
-                report.add(
-                    f"Server :{port}",
-                    Status.WARN,
-                    f"healthy but workspace mismatch — "
-                    f"server has {server_ws}, CLI expects {expected_ws}",
-                    "The server was started from a different directory. "
-                    "Run daimon --stop then daimon to restart.",
-                )
+            report.add(f"Server :{port}", Status.OK, f"healthy, workspace: {server_ws}")
         else:
             report.add(
                 f"Server :{port}",
                 Status.WARN,
-                "healthy but does not report workspace (pre-fix server)",
+                "healthy but does not report workspace (pre-0.1 server)",
                 "The server is running old code. Run daimon --stop then daimon "
-                "to restart with the fixed server.",
+                "to restart with the current server.",
             )
     else:
         report.add(
@@ -259,9 +248,8 @@ async def _check_server(port: int, expected_ws: str, report: Report) -> None:
         pass  # /status is optional info
 
 
-def _check_pidfile(report: Report) -> None:
-    """Check the CLI-owned pidfile."""
-    run_dir = Path.home() / ".local" / "share" / "daimon" / "run"
+def _check_pidfile(run_dir: Path, report: Report) -> None:
+    """Check this workspace's CLI-owned pidfile."""
     pidfile = run_dir / "daimon-agent.pid"
 
     if not pidfile.exists():
@@ -297,9 +285,8 @@ def _check_pidfile(report: Report) -> None:
         report.add("PID file", Status.OK, f"pid {pid} exists (owned by another user)")
 
 
-def _check_server_logs(report: Report) -> None:
-    """Show the last few lines of server logs if they exist."""
-    run_dir = Path.home() / ".local" / "share" / "daimon" / "run"
+def _check_server_logs(run_dir: Path, report: Report) -> None:
+    """Show the last few lines of this workspace's server logs if they exist."""
     for log_name in ("daimon-agent.err.log", "daimon-agent.out.log"):
         log_path = run_dir / log_name
         if not log_path.exists():
@@ -376,6 +363,29 @@ def _check_pid_process(pid: int, report: Report) -> None:
         report.add(f"Process {pid}", Status.SKIP, "ps timed out")
 
 
+def _check_sibling_workspaces(current_run_dir: Path, report: Report) -> None:
+    """Informational only — v1 keeps --stop/--doctor scoped to the current
+    workspace; this just surfaces that other servers exist elsewhere."""
+    root = current_run_dir.parent
+    if not root.is_dir():
+        return
+    others = 0
+    for d in root.iterdir():
+        if not d.is_dir() or d == current_run_dir:
+            continue
+        pidfile = d / "daimon-agent.pid"
+        pid = client._read_pid(pidfile) if pidfile.exists() else None
+        if pid is not None and client._pid_alive(pid):
+            others += 1
+    if others:
+        report.add(
+            "Other workspaces",
+            Status.SKIP,
+            f"{others} other daimon workspace server(s) currently running "
+            "(daimon --stop/--doctor only ever touch the current directory's server)",
+        )
+
+
 def _check_python(report: Report) -> None:
     """Check Python and key packages."""
     report.add("Python", Status.OK, f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
@@ -449,6 +459,13 @@ def _check_cwd(report: Report) -> None:
 
 async def run_doctor() -> Report:
     """Run all checks and return a structured report."""
+    # A direct `python -m daimon_agent.cli.doctor` (or a test) may not have
+    # gone through _amain's workspace default-setting — this must resolve
+    # the same workspace `daimon` itself would, or every per-workspace check
+    # below would be looking at the wrong run dir.
+    if "DAIMON_WORKSPACE_DIR" not in os.environ:
+        os.environ["DAIMON_WORKSPACE_DIR"] = os.getcwd()
+
     report = Report(
         cwd=os.getcwd(),
         timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -460,20 +477,35 @@ async def run_doctor() -> Report:
     print("  Checking settings…", file=sys.stderr, end="\r")
     settings = _check_settings(report)
 
-    print("  Checking server…", file=sys.stderr, end="\r")
+    run_dir: Path | None = None
+    port: int | None = None
     if settings:
-        expected_ws = str(settings.resolved_workspace_dir.resolve())
-        await _check_server(settings.port, expected_ws, report)
+        run_dir = client.workspace_run_dir(settings.resolved_workspace_dir.resolve())
+        pidfile = run_dir / "daimon-agent.pid"
+        # The actual bound port is only known from the pidfile now — the
+        # server may have been spawned on a dynamically-allocated port, not
+        # settings.port (which is just this process's PORT env/default).
+        port = client._read_port(pidfile) if pidfile.exists() else settings.port
+
+    print("  Checking server…", file=sys.stderr, end="\r")
+    if port is not None:
+        await _check_server(port, report)
 
     print("  Checking PID file…", file=sys.stderr, end="\r")
-    _check_pidfile(report)
+    if run_dir is not None:
+        _check_pidfile(run_dir, report)
 
     print("  Checking server logs…", file=sys.stderr, end="\r")
-    _check_server_logs(report)
+    if run_dir is not None:
+        _check_server_logs(run_dir, report)
 
     print("  Checking port…", file=sys.stderr, end="\r")
-    if settings:
-        _check_port(settings.port, report)
+    if port is not None:
+        _check_port(port, report)
+
+    print("  Checking other workspaces…", file=sys.stderr, end="\r")
+    if run_dir is not None:
+        _check_sibling_workspaces(run_dir, report)
 
     print("  Checking Python…", file=sys.stderr, end="\r")
     _check_python(report)

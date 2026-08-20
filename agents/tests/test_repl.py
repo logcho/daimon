@@ -43,3 +43,30 @@ async def test_kernel_prints_stdout(tmp_path) -> None:
         assert "hello from the kernel" in result
     finally:
         await repl.stop()
+
+
+async def test_kernel_starts_in_the_workspace(tmp_path):
+    """The kernel and the file tools must agree on where "here" is.
+
+    They didn't: `cwd` was passed to AsyncKernelManager's constructor, which
+    has no such trait and silently dropped it, so the kernel inherited the
+    server process's directory. An agent whose `write_file` and `!ls` disagree
+    spends its whole turn investigating the discrepancy.
+    """
+    import os
+
+    from daimon_agent.tools.repl import ReplManager
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "marker.txt").write_text("here")
+
+    repl = ReplManager(workspace)
+    try:
+        out = await repl.execute("import os; print(os.getcwd())")
+        assert os.path.realpath(out.strip()) == os.path.realpath(str(workspace))
+        # And the workspace's files are actually visible from it.
+        listing = await repl.execute("import os; print(sorted(os.listdir('.')))")
+        assert "marker.txt" in listing
+    finally:
+        await repl.stop()

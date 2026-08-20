@@ -60,7 +60,7 @@ export function ChatInput({ onSend, disabled }: Props) {
   };
 
   return (
-    <div className="mx-3 mb-3 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)] backdrop-blur-md transition focus-within:border-[#4f8dff]/40 focus-within:bg-white/[0.06]">
+    <div className="mx-3 mb-1 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.08)] backdrop-blur-md transition focus-within:border-[#4f8dff]/40 focus-within:bg-white/[0.06]">
       <span className="font-mono text-sm text-[#4f8dff]">&gt;</span>
       <textarea
         ref={textareaRef}

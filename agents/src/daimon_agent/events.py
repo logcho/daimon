@@ -132,6 +132,19 @@ def todo_event(items: list[dict]) -> dict:
     return {"type": "todo", "items": items}
 
 
+# --- continuation ------------------------------------------------------------
+def continuation_event(steps: int, max_steps: int, tokens: int = 0) -> dict:
+    """The turn hit the graph's step cap and is carrying on from the
+    checkpoint. Not an error and not a pause — progress worth showing, so a
+    long unattended run reads as working rather than as silence."""
+    return {
+        "type": "continuation",
+        "steps": steps,
+        "max_steps": max_steps,
+        "tokens": tokens,
+    }
+
+
 # --- compaction --------------------------------------------------------------
 def compaction_event(before_tokens: int, after_tokens: int, dropped: int) -> dict:
     return {
@@ -156,7 +169,7 @@ def error_event(message: str) -> dict:
 
 def ask_event(
     id: str,
-    kind: Literal["question", "plan"],
+    kind: Literal["question", "plan", "continue"],
     question: str,
     options: list[dict],
     *,

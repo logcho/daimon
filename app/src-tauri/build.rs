@@ -5,6 +5,13 @@ fn main() {
     println!("cargo:rerun-if-changed=icons");
 
     // The command list generates the `allow-<command>` capability entries.
+    //
+    // Adding a Tauri command means touching THREE places, and missing any one
+    // of them fails differently: omit it here and the build panics with
+    // "Permission allow-x not found"; omit it from `generate_handler!` in
+    // lib.rs and the call 404s at runtime; omit it from
+    // capabilities/default.json and the call is rejected as "not allowed" at
+    // runtime. Only the first is caught at compile time.
     let attributes = tauri_build::Attributes::new()
         .app_manifest(tauri_build::AppManifest::new().commands(&[
             "agent_status",
@@ -28,6 +35,18 @@ fn main() {
             "set_vault_path",
             "list_vault_files",
             "read_vault_file",
+            "list_skills",
+            "read_skill",
+            "list_models",
+            "delete_skill",
+            "list_notes",
+            "read_note",
+            "write_note",
+            "delete_note",
+            "list_folders",
+            "create_folder",
+            "delete_folder",
+            "move_note",
             "get_config",
             "update_config",
         ]));

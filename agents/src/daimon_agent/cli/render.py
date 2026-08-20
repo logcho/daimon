@@ -399,6 +399,16 @@ def error_lines(message: str) -> list[str]:
     return ["", f"  {RED}✖{RESET} {message}"]
 
 
+def continuation_line(event: dict) -> str:
+    """The turn ran past the graph's step cap and is carrying on. Shown so a
+    long unattended run reads as progress rather than as a stall."""
+    parts = [f"step {int(event.get('steps', 0))}"]
+    tokens = int(event.get("tokens", 0))
+    if tokens:
+        parts.append(f"{format_tokens(tokens)} tokens")
+    return f"  {BLUE}↻{RESET} {DIM}continuing · {' · '.join(parts)}{RESET}"
+
+
 def compaction_line(event: dict) -> str:
     before = int(event.get("before_tokens", 0))
     after = int(event.get("after_tokens", 0))
@@ -418,7 +428,12 @@ class AskState:
     cursor: int = 0
     selected: set[int] = field(default_factory=set)
     #: True while the user is typing a free-text answer instead of picking.
+    #: Starts true for a question with no options — there is nothing to pick.
     freeform: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.options:
+            self.freeform = True
 
     @property
     def options(self) -> list[dict]:
@@ -427,6 +442,12 @@ class AskState:
     @property
     def multi(self) -> bool:
         return bool(self.event.get("multi_select"))
+
+    @property
+    def secret(self) -> bool:
+        """Whether the answer should be masked as it's typed — an API key
+        shouldn't sit on screen in plain text."""
+        return bool(self.event.get("secret"))
 
 
 def ask_lines(state: AskState, *, width: int = 80) -> list[str]:
@@ -462,6 +483,11 @@ def ask_lines(state: AskState, *, width: int = 80) -> list[str]:
         lines.append(line)
 
     lines.append("")
+    if not state.options:
+        # Nothing to pick — the wizard's key step, for instance. Offering
+        # "1-9 pick" against an empty list is just noise.
+        lines.append(f"  {DIM}type your answer · enter confirm · esc skip{RESET}")
+        return lines
     hint = "1-9 pick · ↑↓ move · space toggle · enter confirm" if state.multi else (
         "1-9 pick · ↑↓ move · enter confirm"
     )

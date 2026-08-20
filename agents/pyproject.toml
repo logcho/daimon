@@ -1,6 +1,6 @@
 [project]
 name = "daimon-agent"
-version = "0.1.0"
+version = "1.0.0"
 description = "Daimon's agent harness — a LangGraph agent (DeepSeek V4 Pro/Flash) for coding, browsing, and research"
 requires-python = ">=3.11"
 dependencies = [

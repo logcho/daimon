@@ -57,6 +57,15 @@ export interface TodoEvent {
   items: TodoItem[];
 }
 
+/** The turn hit the graph's step cap and is carrying on from the checkpoint.
+ *  Not an error and not a pause — progress worth showing. */
+export interface ContinuationEvent {
+  type: "continuation";
+  steps: number;
+  max_steps: number;
+  tokens: number;
+}
+
 export interface CompactionEvent {
   type: "compaction";
   before_tokens: number;
@@ -124,6 +133,7 @@ export type AgentEvent =
   | AssistantDeltaEvent
   | UsageEvent
   | TodoEvent
+  | ContinuationEvent
   | CompactionEvent
   | DoneEvent
   | ErrorEvent
@@ -137,15 +147,51 @@ export interface SessionStatusPayload {
   event: AgentEvent;
 }
 
+/** A stored step. Mirrors StepEvent — they drifted once, and the display is
+ *  only as good as what it keeps. */
 export interface Step {
   id: string;
   label: string;
   tool: string | null;
   status: StepStatus;
-  /** Set when this step came from a research sub-agent — id of the spawn step. */
+  /** Set when this step came from a sub-agent — id of the spawn step. */
   parent_step_id?: string;
-  /** Research query text that spawned this sub-agent. */
+  /** The query text that spawned this sub-agent. */
   subagent_query?: string;
+  /** Short summary of the call's arguments (a path, a query). */
+  detail?: string;
+  elapsed_ms?: number;
+  /** Which sub-agent this belongs to, so concurrent ones group. */
+  agent_id?: string;
+  agent_label?: string;
+}
+
+/** Running totals for one assistant turn. `costUsd` goes null the moment any
+ *  call used a model with no known price — a partial total reads as a complete
+ *  one, which is worse than admitting it's unknown. */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number | null;
+  /** Input tokens of the most recent main-agent call — the live context size. */
+  contextTokens: number;
+}
+
+export const emptyUsage = (): TurnUsage => ({
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  costUsd: 0,
+  contextTokens: 0,
+});
+
+/** A one-line notice in the transcript — continuing past the step cap,
+ *  compacting the context. Not an error, and not a tool call. */
+export interface Notice {
+  id: string;
+  kind: "continuation" | "compaction";
+  text: string;
 }
 
 export interface ChatMessage {
@@ -156,11 +202,18 @@ export interface ChatMessage {
   /** Assistant only: the Thinking step is open (turn in flight). */
   thinking: boolean;
   error?: string;
+  /** Assistant only: tokens and cost for this turn. */
+  usage?: TurnUsage;
+  /** Assistant only: the agent's task list, as of the last snapshot. */
+  todos?: TodoItem[];
+  notices?: Notice[];
+  /** Wall-clock start, for the elapsed readout. */
+  startedAt?: number;
+  elapsedMs?: number;
 }
 
 export interface AgentStatus {
   running: boolean;
-  adopted: boolean;
   port: number;
   busy: boolean;
   active_turns: number;
@@ -180,7 +233,7 @@ export interface TerminalExitedPayload {
   code: number | null;
 }
 
-export type View = "chat" | "terminal" | "vault" | "settings";
+export type View = "chat" | "terminal" | "vault" | "skills" | "settings";
 
 // --- Vault ------------------------------------------------------------------
 
@@ -188,6 +241,18 @@ export interface VaultFile {
   name: string;
   sizeBytes: number;
   modifiedAt: string;
+}
+
+// --- Skills -----------------------------------------------------------------
+
+/** A reusable procedure the agent can follow. `source` is "vault" (the user's
+ *  library, which follows them between projects) or "project" (stored with the
+ *  repo in .daimon/skills). A project skill shadows a vault one of the same
+ *  name — the same precedence the agent applies. */
+export interface SkillFile {
+  name: string;
+  description: string;
+  source: "vault" | "project";
 }
 
 // --- Voice dictation -------------------------------------------------------

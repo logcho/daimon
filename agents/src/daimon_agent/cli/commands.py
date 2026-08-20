@@ -105,24 +105,22 @@ def _cmd_status(text: str, session_name: str | None) -> list[str]:
 
 
 def _cmd_model(text: str, session_name: str | None) -> list[str]:
-    """``/model`` — show the current model configuration."""
-    from ..config import Settings
-
-    settings = Settings.from_env()
-    lines: list[str] = []
-    lines.append("")
-    lines.append(f"{_DIM}── model{_RESET}")
-    lines.append(f"  main       {_DIM}{settings.model}{_RESET}")
-    flash = settings.resolved_flash_model
-    if flash != settings.model:
-        lines.append(f"  flash      {_DIM}{flash}{_RESET}")
-    api = settings.api_base or "default"
-    lines.append(f"  api_base   {_DIM}{api}{_RESET}")
-    return lines
+    """``/model`` — handled by the TUI directly (needs HTTP client)."""
+    return [""]  # never reached; the TUI intercepts before dispatch
 
 
 def _cmd_tools(text: str, session_name: str | None) -> list[str]:
     """``/tools`` — handled by the TUI directly (needs HTTP client)."""
+    return [""]  # never reached; the TUI intercepts before dispatch
+
+
+def _cmd_skills(text: str, session_name: str | None) -> list[str]:
+    """``/skills [name]`` — handled by the TUI directly (needs HTTP client)."""
+    return [""]  # never reached; the TUI intercepts before dispatch
+
+
+def _cmd_notes(text: str, session_name: str | None) -> list[str]:
+    """``/notes [name]`` — handled by the TUI directly (needs HTTP client)."""
     return [""]  # never reached; the TUI intercepts before dispatch
 
 
@@ -169,90 +167,14 @@ def _cmd_workspace(text: str, session_name: str | None) -> list[str]:
     ]
 
 
+def _cmd_config(text: str, session_name: str | None) -> list[str]:
+    """``/config`` — handled by the TUI directly (needs HTTP client)."""
+    return [""]  # never reached; the TUI intercepts before dispatch
+
+
 def _cmd_setup(text: str, session_name: str | None) -> list[str]:
-    """``/setup [key]`` — check configuration and set the API key.
-
-    - ``/setup`` — show status. If the key is missing, show how to set it.
-    - ``/setup sk-...`` — write the key to .env immediately.
-    """
-    import os
-    from pathlib import Path
-
-    from ..banner import workspace_full
-    from ..config import Settings
-    from ..envfile import patch_env_file
-
-    settings = Settings.from_env()
-    env_file = Path.cwd() / ".env"
-    has_env_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
-    has_settings_key = bool(settings.api_key)
-    key_ok = has_env_key or has_settings_key
-
-    lines: list[str] = []
-    lines.append("")
-    lines.append(f"{_DIM}── setup{_RESET}")
-    lines.append("")
-
-    # --- /setup sk-... — paste-to-configure path ---------------------------
-    args = text.strip().split(maxsplit=1)
-    if len(args) >= 2:
-        raw = args[1].strip()
-        # Accept anything that looks like an API key (starts with sk- or is a
-        # long token) — don't force the user to know the prefix.
-        if raw.startswith("sk-") or len(raw) >= 20:
-            key = raw
-            patch_env_file(env_file, "DEEPSEEK_API_KEY", key)
-            os.environ["DEEPSEEK_API_KEY"] = key
-            lines.append(f"  {_DIM}api key{_RESET}    ✓ {_DIM}saved to {env_file}{_RESET}")
-            lines.append("")
-            lines.append(f"  {_DIM}The agent server will pick up the new key on the next turn.{_RESET}")
-            lines.append(f"  {_DIM}Type a question to start.{_RESET}")
-            return lines
-
-    # --- /setup (no args) — status display ---------------------------------
-    if key_ok:
-        src = (
-            "environment variable"
-            if has_env_key and not has_settings_key
-            else ".env file" if has_settings_key and not has_env_key
-            else ".env + environment"
-        )
-        lines.append(f"  {_DIM}api key{_RESET}    ✓ {_DIM}configured ({src}){_RESET}")
-    else:
-        lines.append(f"  {_DIM}api key{_RESET}    {_RED}✗ not set{_RESET}")
-
-    # Model
-    lines.append(f"  {_DIM}model{_RESET}       {settings.model}")
-    if settings.resolved_flash_model != settings.model:
-        lines.append(f"  {_DIM}flash{_RESET}      {settings.resolved_flash_model}")
-
-    # Workspace
-    ws = workspace_full()
-    lines.append(f"  {_DIM}workspace{_RESET}   {ws}")
-
-    # API base
-    api_base = settings.api_base or "(default)"
-    lines.append(f"  {_DIM}api base{_RESET}   {api_base}")
-
-    # PinchTab
-    pinch_ok = settings.pinchtab_token is not None
-    if pinch_ok:
-        lines.append(f"  {_DIM}pinchtab{_RESET}    ✓ {settings.pinchtab_base}")
-    else:
-        lines.append(f"  {_DIM}pinchtab{_RESET}    {_DIM}not configured{_RESET}")
-
-    lines.append("")
-    lines.append(f"  {_DIM}config file{_RESET} {env_file}")
-    if not key_ok:
-        lines.append("")
-        lines.append(f"  {_BOLD}To get started:{_RESET}")
-        lines.append(f"  1. Get an API key → {_BLUE}https://platform.deepseek.com/api_keys{_RESET}")
-        lines.append(f"  2. Paste it here:  {_BOLD}/setup sk-your-key-here{_RESET}")
-        lines.append(f"     {_DIM}(the key is written to .env and the server picks it up){_RESET}")
-    lines.append("")
-    if key_ok:
-        lines.append(f"  {_DIM}Ready. Type a question to start.{_RESET}")
-    return lines
+    """``/setup`` — handled by the TUI directly (it runs the guided wizard)."""
+    return [""]  # never reached; the TUI intercepts before dispatch
 
 
 # Register built-in commands
@@ -261,6 +183,9 @@ register("clear", "clear the output", _cmd_clear)
 register("status", "session and terminal info", _cmd_status)
 register("model", "current model configuration", _cmd_model)
 register("tools", "list available tools", _cmd_tools)
+register("skills", "list/read skills · find · install · remove", _cmd_skills)
+register("notes", "list/read the agent's notes · remove <name>", _cmd_notes)
 register("plan", "toggle plan mode — confirm a plan before changes", _cmd_plan)
 register("workspace", "show or change the workspace directory", _cmd_workspace)
-register("setup", "check configuration and setup guide", _cmd_setup)
+register("config", "show the current configuration", _cmd_config)
+register("setup", "set up a provider, key and models", _cmd_setup)

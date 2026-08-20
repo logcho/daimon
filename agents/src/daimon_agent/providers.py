@@ -120,6 +120,114 @@ def build_chat_model(
     return ChatAnthropic(**anthropic_kwargs)
 
 
+# --- what each provider offers -----------------------------------------------
+
+#: Fallback list, used when there's no key to ask with or the network is down.
+#: Deliberately short: it is a starting point for a picker, not a claim to be
+#: current — providers ship models faster than a hard-coded list can track,
+#: which is why `list_models` prefers asking the provider itself.
+MODEL_CATALOG: dict[str, tuple[str, ...]] = {
+    "deepseek": ("deepseek-v4-pro", "deepseek-v4-flash"),
+    "anthropic": (
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "claude-fable-5",
+    ),
+}
+
+#: Stable names a provider accepts but doesn't list. DeepSeek's `/models`
+#: returns only concrete names, so a picker built from it alone would omit the
+#: very alias most installs are configured with.
+MODEL_ALIASES: dict[str, tuple[str, ...]] = {
+    "deepseek": ("deepseek-chat", "deepseek-reasoner"),
+    "anthropic": (),
+}
+
+MODELS_TIMEOUT_S = 10.0
+
+
+def provider_key(provider: str, settings: Any) -> str | None:
+    """The configured key for a provider, from settings or the environment —
+    both, because a key can arrive either way."""
+    import os
+
+    if provider == "anthropic":
+        return getattr(settings, "anthropic_api_key", None) or os.environ.get(
+            "ANTHROPIC_API_KEY"
+        )
+    return getattr(settings, "api_key", None) or os.environ.get("DEEPSEEK_API_KEY")
+
+
+async def _fetch_models(provider: str, settings: Any, client: Any = None) -> list[str]:
+    """Ask the provider what it serves. Empty list on any failure — the caller
+    falls back to the catalogue rather than showing an error where a list of
+    choices belongs."""
+    import httpx
+
+    key = provider_key(provider, settings)
+    if not key:
+        return []
+
+    if provider == "deepseek":
+        base = (getattr(settings, "api_base", None) or "https://api.deepseek.com").rstrip("/")
+        url, headers = f"{base}/models", {"Authorization": f"Bearer {key}"}
+    else:
+        base = (
+            getattr(settings, "anthropic_api_base", None) or "https://api.anthropic.com"
+        ).rstrip("/")
+        url = f"{base}/v1/models"
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+
+    owns_client = client is None
+    client = client or httpx.AsyncClient(timeout=MODELS_TIMEOUT_S)
+    try:
+        response = await client.get(url, headers=headers)
+        if response.status_code != 200:
+            return []
+        payload = response.json()
+    except Exception:
+        return []  # a picker that can't reach the network still needs options
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    # Both providers answer with {"data": [{"id": ...}]}.
+    return [
+        str(item["id"])
+        for item in (payload.get("data") or [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+
+
+async def list_models(
+    provider: str, settings: Any, *, client: Any = None
+) -> tuple[list[str], str]:
+    """Every model worth offering for `provider`, and where the list came from.
+
+    Live results first, then the aliases the provider accepts but doesn't list,
+    then whatever is currently configured — a picker that can't reproduce the
+    value already in use is a picker that silently changes your settings.
+    """
+    live = await _fetch_models(provider, settings, client)
+    source = "live" if live else "catalog"
+    models = list(live) or list(MODEL_CATALOG.get(provider, ()))
+
+    for alias in MODEL_ALIASES.get(provider, ()):
+        if alias not in models:
+            models.append(alias)
+
+    default_provider = getattr(settings, "provider", DEFAULT_PROVIDER)
+    for spec in (getattr(settings, "model", ""), getattr(settings, "flash_model", "") or ""):
+        if not spec:
+            continue
+        owner, name = parse_spec(spec, default_provider)
+        if owner == provider and name not in models:
+            models.append(name)
+
+    return models, source
+
+
 def supports_prompt_cache_control(spec: str, default_provider: str = DEFAULT_PROVIDER) -> bool:
     """True when the provider wants explicit `cache_control` markers on the
     prompt. Anthropic does; DeepSeek caches its prefix automatically, which is

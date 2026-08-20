@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -83,6 +83,24 @@ function bytesToAsciiString(bytes: Uint8Array): string {
 const KITTY_KEYBOARD_QUERY = "\x1b[?u";
 const KITTY_KEYBOARD_QUERY_RESPONSE = "\x1b[?0u";
 
+// Never fit a terminal that isn't on screen.
+//
+// FitAddon sizes the grid from `getComputedStyle(container)`, and a
+// `display:none` element has no box, so its computed height/width come back as
+// the *specified* `100%` rather than a resolved pixel value. `parseInt("100%")`
+// is 100 — not NaN — so FitAddon's own NaN guard doesn't catch it and it
+// happily proposes a ~13x5 grid. The tab-switch path then reflowed xterm's
+// buffer to 13 columns and resized the real PTY to match, so the shell (or a
+// TUI running in it) re-wrapped its output to a sliver. Switching back fitted
+// the true size again, but the damage was already in the scrollback and a TUI
+// only redraws on its *next* resize — which is why it took a manual window
+// resize to come back.
+//
+// clientWidth/clientHeight are the honest test: exactly 0 when there is no box.
+function hasLayoutBox(element: HTMLElement | null): boolean {
+  return !!element && element.clientWidth > 0 && element.clientHeight > 0;
+}
+
 export function TerminalPanel({
   id,
   active,
@@ -109,6 +127,31 @@ export function TerminalPanel({
     await startTerminal(id);
   }
 
+  /** Fit the grid to the container and tell the PTY — but only when there is
+   *  a real box to measure (see hasLayoutBox). Returns whether it ran, so
+   *  callers can tell "sized" from "deferred until this tab is visible". */
+  const refit = useCallback(() => {
+    const term = termRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!term || !fitAddon || !hasLayoutBox(containerRef.current)) return false;
+    // Re-measure the character cell before fitting. A terminal that was opened
+    // (or last measured) while off screen has a zero-size cell, and FitAddon
+    // refuses to propose dimensions from one — silently, so the grid stayed at
+    // the 80x24 default however big the container actually was. Resizing to
+    // the size it already has is xterm's own documented no-op path, and it
+    // re-measures when the cell size isn't valid.
+    term.resize(term.cols, term.rows);
+    fitAddon.fit();
+    // Fire-and-forget, and never let a transport failure escape: this runs
+    // from a ResizeObserver callback and a rAF, and an exception there would
+    // skip whatever the caller does next (the repaint and focus below). The
+    // fit itself has already happened, which is the part the user sees.
+    Promise.resolve()
+      .then(() => resizeTerminal(id, term.cols, term.rows))
+      .catch(() => {});
+    return true;
+  }, [id]);
+
   // Mount the xterm instance once and subscribe to the PTY event stream.
   // `id` *is* listed as a dependency, but only for lint-correctness (it's
   // read inside the effect) — it never actually changes for a mounted
@@ -134,10 +177,10 @@ export function TerminalPanel({
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(container);
-    fitAddon.fit();
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;
+    refit();
 
     const dataDisposable = term.onData((data) => {
       void writeToTerminal(id, data);
@@ -191,9 +234,14 @@ export function TerminalPanel({
     // Re-sending here guarantees the PTY dimensions match the real grid
     // before any TUI renders.
     async function bootTerminal() {
-      await startTerminal(id);
-      fitAddon.fit();
-      void resizeTerminal(id, term.cols, term.rows);
+      try {
+        await startTerminal(id);
+      } finally {
+        // Fit even if the spawn failed. The grid is local state — leaving it
+        // at the 80x24 placeholder in a full-size window makes a terminal that
+        // merely failed to start look broken as well.
+        refit();
+      }
       if (initialCommand) {
         await writeToTerminal(id, initialCommand);
       }
@@ -208,10 +256,7 @@ export function TerminalPanel({
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const resizeObserver = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        fitAddon.fit();
-        void resizeTerminal(id, term.cols, term.rows);
-      }, 50);
+      resizeTimer = setTimeout(refit, 50);
     });
     resizeObserver.observe(container);
 
@@ -226,27 +271,39 @@ export function TerminalPanel({
       termRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [id]);
+  }, [id, refit]);
 
-  // The panel keeps this component mounted-but-hidden (`display:none`)
-  // once opened, rather than unmounting it on every tab switch, so scrollback
-  // survives. Two consequences of that: (1) xterm.js's own hidden `<textarea>`
-  // — the actual DOM element that receives keystrokes — never gets real
-  // focus just from being the active tab; without an explicit `term.focus()`
-  // here, typing after switching to this tab can silently go nowhere. (2) a
-  // `display:none` container measures as zero-size, so whatever `fit()`
-  // computed while hidden is stale the moment it becomes visible again —
-  // re-fit and re-report the real size every time this tab actually becomes
-  // the active one.
+  // The panel keeps this component mounted-but-hidden (`display:none`) once
+  // opened, rather than unmounting it on every tab switch, so scrollback
+  // survives. Three consequences of that:
+  //
+  // (1) xterm.js's own hidden `<textarea>` — the actual DOM element that
+  //     receives keystrokes — never gets real focus just from being the active
+  //     tab; without an explicit `term.focus()` here, typing after switching to
+  //     this tab can silently go nowhere.
+  // (2) nothing measured the container while it was hidden (refit refuses to,
+  //     see hasLayoutBox), so if the window was resized in the meantime this is
+  //     the first chance to match the grid to it.
+  // (3) xterm pauses rendering whenever its element isn't intersecting the
+  //     viewport, and only repaints when its own IntersectionObserver fires —
+  //     a separate task that lands after this effect. `refresh` repaints the
+  //     rows now, so the tab is correct on the frame it appears instead of a
+  //     beat later.
+  //
+  // Deferred a frame: this effect runs in the same commit that flips
+  // `display`, and the container needs to have been laid out before it can be
+  // measured.
   useEffect(() => {
     if (!active) return;
-    const term = termRef.current;
-    const fitAddon = fitAddonRef.current;
-    if (!term || !fitAddon) return;
-    fitAddon.fit();
-    void resizeTerminal(id, term.cols, term.rows);
-    term.focus();
-  }, [id, active]);
+    const frame = requestAnimationFrame(() => {
+      const term = termRef.current;
+      if (!term) return;
+      refit();
+      term.refresh(0, term.rows - 1);
+      term.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [id, active, refit]);
 
   // Register this terminal as the dictation insert target when active, so
   // Fn-key transcription lands in the shell's readline buffer (unexecuted —

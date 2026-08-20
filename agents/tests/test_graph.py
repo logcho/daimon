@@ -67,9 +67,10 @@ async def test_recursion_cap_binds(settings) -> None:
 
 
 async def test_checkpointer_busy_timeout(settings) -> None:
-    # Two daimon-agent processes (app + CLI) may share the checkpoints file —
-    # the pragma value IS the contract: wait, don't error.
-    checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
+    # Concurrent turns against the same workspace's checkpoints file (e.g.
+    # two named sessions) may still race — the pragma value IS the contract:
+    # wait, don't error.
+    checkpointer = await make_sqlite_checkpointer(settings.resolved_checkpoints_db)
     try:
         cursor = await checkpointer.conn.execute("PRAGMA busy_timeout")
         assert (await cursor.fetchone())[0] == 10000

@@ -43,10 +43,16 @@ class Price:
 #: `_load_price_overrides`. An unlisted model costs nothing rather than
 #: guessing, so a stale table under-reports instead of inventing a number.
 PRICES: dict[str, Price] = {
-    # DeepSeek — cache hits bill at a fraction of the miss price, which is why
-    # prompts.py bothers with a byte-stable frozen prefix.
-    "deepseek-chat": Price(input=0.27, output=1.10, cache_read=0.027),
-    "deepseek-reasoner": Price(input=0.55, output=2.19, cache_read=0.14),
+    # DeepSeek, from api-docs.deepseek.com/quick_start/pricing. `input` is the
+    # cache-*miss* rate and `cache_read` the hit rate — a 50x difference on
+    # flash, which is why prompts.py bothers with a byte-stable frozen prefix.
+    "deepseek-v4-flash": Price(input=0.14, output=0.28, cache_read=0.0028),
+    "deepseek-v4-pro": Price(input=0.435, output=0.87, cache_read=0.003625),
+    # The aliases, priced as whatever they currently resolve to. Listed
+    # separately because a model spec may name either, and an unpriced name
+    # silently drops cost reporting.
+    "deepseek-chat": Price(input=0.14, output=0.28, cache_read=0.0028),
+    "deepseek-reasoner": Price(input=0.435, output=0.87, cache_read=0.003625),
     # Anthropic — cache writes cost 1.25x input, reads 0.1x.
     "claude-opus-4": Price(input=15.0, output=75.0, cache_read=1.50, cache_write=18.75),
     "claude-opus-5": Price(input=15.0, output=75.0, cache_read=1.50, cache_write=18.75),

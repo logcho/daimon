@@ -7,11 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
+import time
+from collections import Counter
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from langchain_core.messages import AIMessage
 
+from daimon_agent import server
 from daimon_agent.graph import build_graph, make_sqlite_checkpointer
 from daimon_agent.server import create_app
 from fakes import FakeRouter
@@ -21,7 +26,7 @@ async def fake_graph_builder(settings, *, memory=None):
     """Real compiled graph over a scripted model — run_turn needs genuine
     astream/aget_state/checkpointer, which only the real graph provides."""
     router = FakeRouter()
-    checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
+    checkpointer = await make_sqlite_checkpointer(settings.resolved_checkpoints_db)
     graph = build_graph(settings, router, [], checkpointer=checkpointer)
     graph.router = router  # test handle to script the model
     return graph, checkpointer, router
@@ -241,3 +246,548 @@ async def test_client_disconnect_cancels_the_turn(settings) -> None:
             if app["turn_registry"]["count"] == 0:
                 break
         assert app["turn_registry"]["count"] == 0, "the abandoned turn kept running"
+
+
+# --- /skills -----------------------------------------------------------------
+
+def _write_skill(root, name: str, description: str, body: str = "the body") -> None:
+    path = root / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n")
+
+
+async def test_skills_endpoint_merges_both_libraries(client: TestClient) -> None:
+    settings = client.app["settings"]
+    _write_skill(settings.resolved_skills_dir, "changelog", "Write a changelog")
+    _write_skill(settings.project_skills_dir, "deploy", "Ship this repo")
+
+    resp = await client.get("/skills")
+    assert resp.status == 200
+    skills = {s["name"]: s for s in await resp.json()}
+    assert skills["changelog"]["source"] == "vault"
+    assert skills["deploy"]["source"] == "project"
+    assert skills["changelog"]["description"] == "Write a changelog"
+
+
+async def test_skills_endpoint_rescans_every_request(client: TestClient) -> None:
+    """A skill the agent just saved has to be visible now — the startup scan
+    left it invisible until restart."""
+    assert await (await client.get("/skills")).json() == []
+    _write_skill(client.app["settings"].resolved_skills_dir, "fresh", "Just saved")
+    assert [s["name"] for s in await (await client.get("/skills")).json()] == ["fresh"]
+
+
+async def test_skill_endpoint_returns_the_body(client: TestClient) -> None:
+    _write_skill(
+        client.app["settings"].resolved_skills_dir, "changelog", "Write it", "## Categories"
+    )
+    resp = await client.get("/skills/changelog")
+    assert resp.status == 200
+    body = await resp.json()
+    assert "## Categories" in body["content"]
+    assert body["source"] == "vault"
+
+
+async def test_unknown_skill_is_404(client: TestClient) -> None:
+    assert (await client.get("/skills/nope")).status == 404
+
+
+# --- config: keys and model selection ----------------------------------------
+
+async def test_key_field_routes_by_prefix(client: TestClient, tmp_path, monkeypatch) -> None:
+    """Anthropic keys start sk-ant-; DeepSeek's are plain sk-. Detecting it
+    server-side means the CLI and the app both work with one field and nobody
+    has to be told which box to use."""
+    monkeypatch.chdir(tmp_path)
+
+    assert (await client.post("/config", json={"key": "sk-ant-abc123"})).status == 200
+    cfg = await (await client.get("/config")).json()
+    assert cfg["providers"]["anthropic"]["key_configured"] is True
+
+    assert (await client.post("/config", json={"key": "sk-deepseek-xyz"})).status == 200
+    cfg = await (await client.get("/config")).json()
+    assert cfg["providers"]["deepseek"]["key_configured"] is True
+
+
+async def test_model_is_writable(client: TestClient, tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    await client.post("/config", json={"key": "sk-deepseek-xyz"})
+    resp = await client.post("/config", json={"model": "deepseek-reasoner"})
+    assert resp.status == 200
+    assert (await (await client.get("/config")).json())["model"] == "deepseek-reasoner"
+
+
+async def test_an_uninstalled_provider_is_rejected(client: TestClient, tmp_path, monkeypatch) -> None:
+    """Accepting an unusable model would leave every later turn failing at the
+    API call with nothing pointing back here. The missing *package* is reported
+    first — it's the more fundamental of the two problems, and has a different
+    fix from a missing key."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "daimon_agent.server.provider_available", lambda name: name != "anthropic"
+    )
+    resp = await client.post("/config", json={"model": "anthropic:claude-sonnet-5"})
+    assert resp.status == 400
+    assert "uv sync --extra anthropic" in (await resp.json())["error"]
+    # And nothing changed.
+    assert (await (await client.get("/config")).json())["model"] != "anthropic:claude-sonnet-5"
+
+
+async def test_an_installed_provider_without_a_key_is_rejected(
+    client: TestClient, tmp_path, monkeypatch
+) -> None:
+    """The other half: the package is there, the key isn't — a different fix,
+    so a different message."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("daimon_agent.server.provider_available", lambda name: True)
+    resp = await client.post("/config", json={"model": "anthropic:claude-sonnet-5"})
+    assert resp.status == 400
+    assert "no anthropic API key" in (await resp.json())["error"]
+
+
+async def test_an_unknown_provider_is_rejected(client: TestClient, tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    resp = await client.post("/config", json={"model": "wizard:gpt-9"})
+    assert resp.status == 400
+
+
+async def test_a_key_and_model_can_be_set_together(client: TestClient, tmp_path, monkeypatch) -> None:
+    """Validation runs against the settings this request produces, so adding a
+    key and pointing a model at it works in one call."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resp = await client.post(
+        "/config", json={"key": "sk-ant-abc", "model": "anthropic:claude-sonnet-5"}
+    )
+    # Accepted only if the provider package is installed; either way the
+    # failure must name the missing *package*, not the key we just supplied.
+    if resp.status != 200:
+        assert "isn't installed" in (await resp.json())["error"]
+    else:
+        assert (await (await client.get("/config")).json())["model"].startswith("anthropic:")
+
+
+async def test_empty_config_update_is_rejected(client: TestClient) -> None:
+    assert (await client.post("/config", json={})).status == 400
+
+
+# --- /models -----------------------------------------------------------------
+
+async def test_models_endpoint_covers_every_provider(client: TestClient) -> None:
+    """One endpoint for the CLI and the app, so a model offered in one is
+    offered in the other."""
+    body = await (await client.get("/models")).json()
+    assert set(body) == {"deepseek", "anthropic"}
+    for state in body.values():
+        assert {"models", "source", "installed", "key_configured"} <= set(state)
+
+
+async def test_models_are_listed_without_a_key(client: TestClient) -> None:
+    """The picker needs options before you've pasted a key — that's exactly
+    when you most need to see what's on offer."""
+    body = await (await client.get("/models")).json()
+    entry = body["anthropic"]
+    assert entry["key_configured"] is False
+    assert entry["source"] == "catalog"
+    assert entry["models"], "a keyless provider must still list something"
+
+
+async def test_the_configured_model_is_listed(client: TestClient) -> None:
+    body = await (await client.get("/models")).json()
+    settings = client.app["settings"]
+    assert settings.model in body["deepseek"]["models"]
+
+
+# --- adopting the old vault-relative library ---------------------------------
+
+def _skill(root, name: str, body: str = "body") -> None:
+    path = root / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: d\n---\n\n{body}\n")
+
+
+def test_legacy_skills_are_copied_into_the_global_library(settings, tmp_path) -> None:
+    """Moving the library must not orphan what someone already built — they'd
+    open the app to an empty list and conclude their skills were gone."""
+    from dataclasses import replace
+
+    from daimon_agent.server import adopt_legacy_skills
+
+    cfg = replace(settings, vault_dir=tmp_path / "vault", skills_dir=tmp_path / "global")
+    _skill(cfg.vault_dir / "skills", "changelog", "the original")
+
+    assert adopt_legacy_skills(cfg) == 1
+    assert (cfg.resolved_skills_dir / "changelog" / "SKILL.md").read_text().endswith(
+        "the original\n"
+    )
+    # Copied, not moved — reverting loses nothing.
+    assert (cfg.vault_dir / "skills" / "changelog" / "SKILL.md").is_file()
+
+
+def test_adoption_never_overwrites_an_existing_library(settings, tmp_path) -> None:
+    """Only fires on an empty target, which is what makes it a one-time event
+    without a flag to keep in sync."""
+    from dataclasses import replace
+
+    from daimon_agent.server import adopt_legacy_skills
+
+    cfg = replace(settings, vault_dir=tmp_path / "vault", skills_dir=tmp_path / "global")
+    _skill(cfg.vault_dir / "skills", "changelog", "old")
+    _skill(cfg.resolved_skills_dir, "changelog", "current")
+
+    assert adopt_legacy_skills(cfg) == 0
+    assert "current" in (cfg.resolved_skills_dir / "changelog" / "SKILL.md").read_text()
+
+
+def test_adoption_is_a_noop_without_a_legacy_library(settings, tmp_path) -> None:
+    from dataclasses import replace
+
+    from daimon_agent.server import adopt_legacy_skills
+
+    cfg = replace(settings, vault_dir=tmp_path / "vault", skills_dir=tmp_path / "global")
+    assert adopt_legacy_skills(cfg) == 0
+
+
+def test_adoption_is_a_noop_when_they_are_the_same_directory(settings, tmp_path) -> None:
+    from dataclasses import replace
+
+    from daimon_agent.server import adopt_legacy_skills
+
+    cfg = replace(settings, vault_dir=tmp_path, skills_dir=tmp_path / "skills")
+    _skill(cfg.resolved_skills_dir, "x")
+    assert adopt_legacy_skills(cfg) == 0
+
+
+# --- vault and deletion ------------------------------------------------------
+
+async def test_vault_listing_is_recursive(client: TestClient) -> None:
+    """The agent writes to `vault/notes/`, and a top-level-only listing showed
+    none of them — which is what the app's own vault walk did."""
+    vault = client.app["settings"].vault_dir
+    (vault / "notes").mkdir(parents=True, exist_ok=True)
+    (vault / "notes" / "a.md").write_text("nested")
+    (vault / "top.md").write_text("top")
+
+    names = {n["name"] for n in await (await client.get("/vault")).json()}
+    assert names == {"notes/a.md", "top.md"}
+
+
+async def test_vault_listing_excludes_skills(client: TestClient) -> None:
+    """Skills have their own view; showing them as notes would offer a delete
+    that removes half a skill."""
+    settings = client.app["settings"]
+    _skill(settings.vault_dir / "skills", "changelog")
+    (settings.vault_dir / "note.md").write_text("x")
+
+    names = {n["name"] for n in await (await client.get("/vault")).json()}
+    assert names == {"note.md"}
+
+
+async def test_note_read_and_delete(client: TestClient) -> None:
+    vault = client.app["settings"].vault_dir
+    (vault / "notes").mkdir(parents=True, exist_ok=True)
+    (vault / "notes" / "a.md").write_text("the content")
+
+    body = await (await client.get("/vault/notes/a.md")).json()
+    assert body["content"] == "the content"
+
+    resp = await client.delete("/vault/notes/a.md")
+    assert resp.status == 200
+    assert not (vault / "notes" / "a.md").exists()
+    assert await (await client.get("/vault")).json() == []
+
+
+async def test_note_paths_cannot_escape_the_vault(client: TestClient) -> None:
+    """A path from a client is untrusted — resolve, then check containment,
+    so `..` and symlinks can't walk out."""
+    for path in ("/vault/../../etc/passwd", "/vault/..%2F..%2Fetc%2Fpasswd"):
+        assert (await client.get(path)).status in (400, 404)
+        assert (await client.delete(path)).status in (400, 404)
+        assert (await client.put(path, json={"content": "x"})).status in (400, 404)
+
+
+async def test_note_write_creates_and_updates(client: TestClient) -> None:
+    """One endpoint for create and update — a new note is just a write to a
+    name that doesn't exist yet, and parent dirs come along for free."""
+    vault = client.app["settings"].vault_dir
+
+    resp = await client.put("/vault/notes/new.md", json={"content": "first"})
+    assert resp.status == 200
+    assert (vault / "notes" / "new.md").read_text() == "first"
+    assert (await resp.json())["name"] == "notes/new.md"
+
+    resp = await client.put("/vault/notes/new.md", json={"content": "second"})
+    assert resp.status == 200
+    assert (vault / "notes" / "new.md").read_text() == "second"
+
+    listing = await (await client.get("/vault")).json()
+    assert [n["name"] for n in listing] == ["notes/new.md"]
+
+
+async def test_note_write_indexes_for_recall(client: TestClient) -> None:
+    """A saved note the agent can't `recall` reads as memory silently losing
+    it — the write path has to reindex, like the delete path unindexes."""
+    memory = client.app["memory"]
+    await client.put("/vault/kiwi.md", json={"content": "secret kiwi content"})
+    assert memory.search_notes("kiwi")
+
+
+async def test_note_write_rejects_non_markdown(client: TestClient) -> None:
+    """The listing is rglob("*.md"), so anything else would be written and
+    then never shown again."""
+    resp = await client.put("/vault/notes/thing.txt", json={"content": "x"})
+    assert resp.status == 400
+    assert not (client.app["settings"].vault_dir / "notes" / "thing.txt").exists()
+
+
+async def test_note_write_rejects_a_bad_body(client: TestClient) -> None:
+    assert (await client.put("/vault/a.md", data="not json")).status == 400
+    assert (await client.put("/vault/a.md", json={"content": 42})).status == 400
+
+
+# --- folders ------------------------------------------------------------------
+
+async def test_folders_are_listed_even_when_empty(client: TestClient) -> None:
+    """A folder you just made holds no .md yet, so the note listing can't
+    show it — it would disappear on the next refresh."""
+    resp = await client.post("/vault/folders", json={"path": "projects/2026"})
+    assert resp.status == 200
+
+    folders = await (await client.get("/vault/folders")).json()
+    assert "projects" in folders and "projects/2026" in folders
+    # ...and it is genuinely empty: no note listing entry backs it.
+    assert await (await client.get("/vault")).json() == []
+
+
+async def test_internal_directories_are_hidden_from_the_vault(client: TestClient) -> None:
+    """`.daimon/memory` holds this workspace's own databases — showing it as a
+    folder offers the user something they can't use but can delete."""
+    vault = client.app["settings"].vault_dir
+    (vault / ".daimon" / "memory").mkdir(parents=True, exist_ok=True)
+    (vault / ".daimon" / "notes.md").write_text("internal")
+    (vault / "real").mkdir(exist_ok=True)
+
+    folders = await (await client.get("/vault/folders")).json()
+    assert folders == ["real"]
+    names = [n["name"] for n in await (await client.get("/vault")).json()]
+    assert ".daimon/notes.md" not in names
+
+
+async def test_folder_routes_do_not_shadow_a_real_note(client: TestClient) -> None:
+    """`/vault/folders` is registered before the `{name:.*}` catch-all, so a
+    note that happens to be called `folders.md` must still be reachable."""
+    await client.put("/vault/folders.md", json={"content": "not a folder"})
+    body = await (await client.get("/vault/folders.md")).json()
+    assert body["content"] == "not a folder"
+    assert isinstance(await (await client.get("/vault/folders")).json(), list)
+
+
+async def test_folder_delete_refuses_a_non_empty_folder(client: TestClient) -> None:
+    """Deleting a folder is one click but can take any number of notes with
+    it — that is not the same decision as deleting one note."""
+    await client.put("/vault/keep/a.md", json={"content": "a"})
+
+    resp = await client.delete("/vault/folders/keep")
+    assert resp.status == 409
+    assert (await resp.json())["notes"] == 1
+    assert (client.app["settings"].vault_dir / "keep" / "a.md").exists()
+
+    resp = await client.delete("/vault/folders/keep?recursive=1")
+    assert resp.status == 200
+    assert not (client.app["settings"].vault_dir / "keep").exists()
+
+
+async def test_folder_delete_unindexes_the_notes_it_removes(client: TestClient) -> None:
+    memory = client.app["memory"]
+    await client.put("/vault/gone/mango.md", json={"content": "distinctive mango text"})
+    assert memory.search_notes("mango")
+
+    await client.delete("/vault/folders/gone?recursive=1")
+    assert not memory.search_notes("mango")
+
+
+async def test_folder_delete_rejects_the_root_and_escapes(client: TestClient) -> None:
+    assert (await client.delete("/vault/folders/")).status == 400
+    assert (await client.delete("/vault/folders/../../etc")).status in (400, 404)
+
+
+# --- moving notes -------------------------------------------------------------
+
+async def test_move_relocates_a_note_into_a_folder(client: TestClient) -> None:
+    vault = client.app["settings"].vault_dir
+    await client.put("/vault/loose.md", json={"content": "body"})
+
+    resp = await client.post("/vault/move", json={"from": "loose.md", "to": "archive/loose.md"})
+    assert resp.status == 200
+    assert not (vault / "loose.md").exists()
+    assert (vault / "archive" / "loose.md").read_text() == "body"
+
+
+async def test_move_reindexes_under_the_new_name(client: TestClient) -> None:
+    """The memory index is keyed by name — leaving the old entry makes
+    `recall` cite a path that no longer exists."""
+    memory = client.app["memory"]
+    await client.put("/vault/papaya.md", json={"content": "unmistakable papaya text"})
+
+    await client.post("/vault/move", json={"from": "papaya.md", "to": "fruit/papaya.md"})
+    hits = [dict(row)["filename"] for row in memory.search_notes("papaya")]
+    assert "fruit/papaya.md" in hits
+    assert "papaya.md" not in hits
+
+
+async def test_move_relocates_a_whole_folder(client: TestClient) -> None:
+    """Folders move too — nesting them is half of organising a vault."""
+    vault = client.app["settings"].vault_dir
+    await client.put("/vault/inbox/a.md", json={"content": "a"})
+    await client.put("/vault/inbox/deep/b.md", json={"content": "b"})
+    await client.post("/vault/folders", json={"path": "archive"})
+
+    resp = await client.post("/vault/move", json={"from": "inbox", "to": "archive/inbox"})
+    assert resp.status == 200
+    assert (await resp.json())["notes"] == 2
+    assert not (vault / "inbox").exists()
+    assert (vault / "archive" / "inbox" / "a.md").read_text() == "a"
+    assert (vault / "archive" / "inbox" / "deep" / "b.md").read_text() == "b"
+
+
+async def test_moving_a_folder_rekeys_every_note_under_it(client: TestClient) -> None:
+    memory = client.app["memory"]
+    await client.put("/vault/inbox/lychee.md", json={"content": "unmistakable lychee text"})
+
+    await client.post("/vault/move", json={"from": "inbox", "to": "archive/inbox"})
+    hits = [dict(row)["filename"] for row in memory.search_notes("lychee")]
+    assert "archive/inbox/lychee.md" in hits
+    assert "inbox/lychee.md" not in hits
+
+
+async def test_a_folder_cannot_be_moved_into_itself(client: TestClient) -> None:
+    """The destination would move out from under the operation as it runs."""
+    await client.put("/vault/projects/a.md", json={"content": "a"})
+
+    assert (
+        await client.post("/vault/move", json={"from": "projects", "to": "projects/inner"})
+    ).status == 400
+    assert (
+        await client.post("/vault/move", json={"from": "projects", "to": "projects"})
+    ).status in (400, 409)
+    assert (client.app["settings"].vault_dir / "projects" / "a.md").exists()
+
+
+async def test_move_will_not_clobber_or_escape(client: TestClient) -> None:
+    await client.put("/vault/one.md", json={"content": "one"})
+    await client.put("/vault/two.md", json={"content": "two"})
+
+    assert (await client.post("/vault/move", json={"from": "one.md", "to": "two.md"})).status == 409
+    assert (await client.post("/vault/move", json={"from": "one.md", "to": "x.txt"})).status == 400
+    assert (await client.post("/vault/move", json={"from": "nope.md", "to": "x.md"})).status == 404
+    assert (
+        await client.post("/vault/move", json={"from": "one.md", "to": "../../etc/evil.md"})
+    ).status == 400
+    # Nothing moved.
+    assert (client.app["settings"].vault_dir / "one.md").read_text() == "one"
+
+
+async def test_deleting_a_missing_note_is_404(client: TestClient) -> None:
+    assert (await client.delete("/vault/nope.md")).status == 404
+
+
+async def test_skill_delete_removes_the_whole_directory(client: TestClient) -> None:
+    """An installed skill is a directory of files — SKILL.md plus references
+    and scripts — so deleting only the markdown would leave the rest behind."""
+    root = client.app["settings"].resolved_skills_dir
+    _skill(root, "pdf")
+    (root / "pdf" / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "pdf" / "scripts" / "fill.py").write_text("code")
+
+    resp = await client.delete("/skills/pdf")
+    assert resp.status == 200
+    assert not (root / "pdf").exists()
+    assert await (await client.get("/skills")).json() == []
+
+
+async def test_deleting_a_missing_skill_is_404(client: TestClient) -> None:
+    assert (await client.delete("/skills/nope")).status == 404
+
+
+async def test_deleting_a_note_drops_its_memory_index(client: TestClient) -> None:
+    """A deleted note that still turns up in `recall` reads as the agent
+    inventing one."""
+    settings = client.app["settings"]
+    (settings.vault_dir / "gone.md").write_text("secret pineapple content")
+    memory = client.app["memory"]
+    memory.index_note("gone.md", "secret pineapple content")
+    assert memory.search_notes("pineapple")
+
+    await client.delete("/vault/gone.md")
+    assert not memory.search_notes("pineapple")
+
+
+# --- idle auto-shutdown -------------------------------------------------------
+
+def _make_registry(*, count: int = 0, last_active_at: float = 0.0) -> dict:
+    return {
+        "count": count,
+        "sessions": Counter(),
+        "lock": asyncio.Lock(),
+        "last_active_at": last_active_at,
+    }
+
+
+async def test_idle_shutdown_fires_once_threshold_crossed() -> None:
+    reg = _make_registry(count=0, last_active_at=time.monotonic() - 1000)
+    kills: list[tuple[int, int]] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    await server._idle_shutdown_loop(
+        reg, idle_timeout=1.0, poll_interval=0.01,
+        sleep=fake_sleep, kill=lambda pid, sig: kills.append((pid, sig)),
+    )
+    assert kills == [(os.getpid(), signal.SIGTERM)]
+    assert sleeps == [0.01]  # returns after the first tick that crosses the threshold
+
+
+async def test_idle_shutdown_waits_while_active() -> None:
+    reg = _make_registry(count=1, last_active_at=time.monotonic())
+    kills: list[tuple[int, int]] = []
+    ticks = 0
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks >= 3:
+            reg["count"] = 0
+            reg["last_active_at"] = time.monotonic() - 1000  # go idle on tick 4
+
+    await server._idle_shutdown_loop(
+        reg, idle_timeout=1.0, poll_interval=0.01,
+        sleep=fake_sleep, kill=lambda pid, sig: kills.append((pid, sig)),
+    )
+    # Three polls stayed busy/just-went-idle before the loop caught it and
+    # shut down within the same poll that flipped the state.
+    assert ticks == 3
+    assert kills == [(os.getpid(), signal.SIGTERM)]
+
+
+async def test_idle_shutdown_disabled_when_zero() -> None:
+    reg = _make_registry(count=0, last_active_at=time.monotonic() - 1000)
+    called = False
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal called
+        called = True
+
+    await server._idle_shutdown_loop(reg, idle_timeout=0, sleep=fake_sleep)
+    assert called is False  # returns immediately, no polling at all
+
+
+async def test_cleanup_removes_the_pidfile(settings, tmp_path) -> None:
+    pidfile = tmp_path / "daimon-agent.pid"
+    pidfile.write_text("123\n4711\n", encoding="utf-8")
+    app = await create_app(settings, graph_builder=fake_graph_builder, pidfile=pidfile)
+    async with TestClient(TestServer(app)):
+        assert pidfile.exists()  # still there while the app is up
+    assert not pidfile.exists()  # cleanup() removed it on shutdown

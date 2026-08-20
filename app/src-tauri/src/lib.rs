@@ -1,5 +1,6 @@
 mod agent;
 mod fn_key;
+mod paths;
 mod session;
 mod terminal;
 mod timefmt;
@@ -77,10 +78,132 @@ async fn get_config(
 async fn update_config(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentManager>,
-    api_key: String,
+    fields: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let status = state.ensure(&app).await?;
-    agent::update_config(status.port, &api_key).await
+    agent::update_config(status.port, fields).await
+}
+
+/// GET /models from the agent server — every provider's models plus whether
+/// it's installed and keyed, so the picker can show what exists and grey out
+/// what can't be selected.
+#[tauri::command]
+async fn list_skills(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_skills(status.port).await
+}
+
+#[tauri::command]
+async fn read_skill(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::read_skill(status.port, &name).await
+}
+
+#[tauri::command]
+async fn list_notes(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_notes(status.port).await
+}
+
+#[tauri::command]
+async fn read_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::read_note(status.port, &name).await
+}
+
+#[tauri::command]
+async fn delete_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::delete_note(status.port, &name).await
+}
+
+#[tauri::command]
+async fn write_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::write_note(status.port, &name, &content).await
+}
+
+#[tauri::command]
+async fn list_folders(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_folders(status.port).await
+}
+
+#[tauri::command]
+async fn create_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::create_folder(status.port, &path).await
+}
+
+#[tauri::command]
+async fn delete_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    path: String,
+    recursive: bool,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::delete_folder(status.port, &path, recursive).await
+}
+
+#[tauri::command]
+async fn move_note(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    from: String,
+    to: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::move_note(status.port, &from, &to).await
+}
+
+#[tauri::command]
+async fn delete_skill(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::delete_skill(status.port, &name).await
+}
+
+#[tauri::command]
+async fn list_models(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_models(status.port).await
 }
 
 #[tauri::command]
@@ -122,6 +245,13 @@ fn set_panel_expanded(state: tauri::State<'_, PanelExpanded>, expanded: bool) {
 /// loop is created. Uses the concrete `Wry` runtime so `#[tauri::command]`
 /// macros resolve correctly (generic `R` breaks `AppHandle` deserialization).
 pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri::Wry> {
+    // Before AgentManager::new() reads the environment: a GUI launch gets
+    // launchd's environment, not a shell's, so anything the user "exported"
+    // in .zshrc is absent and `launchctl setenv` doesn't survive a reboot.
+    // This file is the app's own durable store for those settings — it was
+    // already being written (workspace::set_env_var) but never read back,
+    // so every value in it was lost at the next launch.
+    workspace::load_persisted_env();
     builder
         .manage(AgentManager::new())
         // Starts collapsed — App.tsx's mount effect calls collapseToPill(),
@@ -151,6 +281,18 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             vault::set_vault_path,
             vault::list_vault_files,
             vault::read_vault_file,
+            list_skills,
+            read_skill,
+            delete_skill,
+            list_notes,
+            read_note,
+            write_note,
+            delete_note,
+            list_folders,
+            create_folder,
+            delete_folder,
+            move_note,
+            list_models,
         ])
         .setup(|app| {
             voice::init(app.handle());

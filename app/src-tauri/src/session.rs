@@ -56,7 +56,12 @@ async fn run_and_stream(
     }
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    // Bytes, not a String. Decoding each chunk on arrival mangles any
+    // multi-byte character that straddles a chunk boundary — `from_utf8_lossy`
+    // turns the split halves into U+FFFD, and the line then fails to parse as
+    // JSON. Framing on `\n` first is safe because a newline is always its own
+    // byte in UTF-8, so a complete line is a complete sequence.
+    let mut buffer: Vec<u8> = Vec::new();
     let mut saw_terminal = false;
 
     loop {
@@ -66,27 +71,42 @@ async fn run_and_stream(
         let Some(chunk) = next else { break };
         let chunk = match chunk {
             Ok(bytes) => bytes,
-            // Connection died after the terminal (done|error) event was
-            // delivered — the server can still hold the body open through
-            // reflection/teardown when it's killed (dev-watcher restart,
-            // kill_group), and hyper's final read then fails with "incomplete
-            // message". The result is already out; treat this as a clean
-            // end-of-stream, not a fatal error. A *truncated* terminal line
-            // still has saw_terminal == false and correctly errors.
+            // Connection died after the terminal event was delivered — the
+            // server can still hold the body open through reflection/teardown
+            // when it's killed (dev-watcher restart, kill_group), and hyper's
+            // final read then fails with "incomplete message". The result is
+            // already out; treat this as a clean end-of-stream. A *truncated*
+            // terminal line still has saw_terminal == false and errors below.
             Err(_) if saw_terminal => break,
-            Err(e) => return Err(format!("agent stream error: {e}")),
+            // Whatever hyper says here ("error decoding response body") tells
+            // the user nothing they can act on. The cause is almost always the
+            // agent server going away mid-turn.
+            Err(e) => {
+                return Err(format!(
+                    "lost the connection to the agent server mid-turn — it may have \
+                     been restarted or stopped ({e})"
+                ))
+            }
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        buffer.extend_from_slice(&chunk);
 
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim().to_string();
-            buffer.drain(..=newline_pos);
+        while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buffer.drain(..=newline_pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes[..newline_pos]);
+            let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            let event: serde_json::Value = serde_json::from_str(&line)
+            let event: serde_json::Value = serde_json::from_str(line)
                 .map_err(|e| format!("malformed agent event: {e}"))?;
-            if matches!(event.get("type").and_then(|t| t.as_str()), Some("done") | Some("error")) {
+            // `ask` joined done|error as a terminal event when the agent
+            // gained the ability to stop and confer. The app doesn't advertise
+            // that capability so it shouldn't arrive, but a stream that ends
+            // on one must not be reported as having produced no result.
+            if matches!(
+                event.get("type").and_then(|t| t.as_str()),
+                Some("done") | Some("error") | Some("ask")
+            ) {
                 saw_terminal = true;
             }
             let _ = app.emit(

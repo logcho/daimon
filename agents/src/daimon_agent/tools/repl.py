@@ -26,8 +26,14 @@ class ReplManager:
     async def start(self) -> None:
         if self._km is not None:
             return
-        km = AsyncKernelManager(kernel_name=self._kernel_name, cwd=str(self._cwd))
-        await km.start_kernel()  # async in jupyter_client 8.x — must be awaited
+        km = AsyncKernelManager(kernel_name=self._kernel_name)
+        # cwd goes to start_kernel, NOT to the constructor. AsyncKernelManager
+        # is a traitlets HasTraits with no `cwd` trait, so a constructor kwarg
+        # is silently discarded (traitlets only warns) and the kernel inherits
+        # the *server process's* directory instead of the workspace. The agent
+        # then sees its file tools and its kernel disagreeing about where it
+        # is, which is exactly as confusing as it sounds.
+        await km.start_kernel(cwd=str(self._cwd))  # async in jupyter_client 8.x
         kc = km.client()
         kc.start_channels()
         await kc.wait_for_ready(timeout=60)  # raises RuntimeError if never ready

@@ -42,6 +42,18 @@
     "allow-get-vault-path-status",
     "allow-set-vault-path",
     "allow-list-vault-files",
-    "allow-read-vault-file"
+    "allow-read-vault-file",
+    "allow-list-skills",
+    "allow-read-skill",
+    "allow-list-models",
+    "allow-delete-skill",
+    "allow-list-notes",
+    "allow-read-note",
+    "allow-write-note",
+    "allow-delete-note",
+    "allow-list-folders",
+    "allow-create-folder",
+    "allow-delete-folder",
+    "allow-move-note"
   ]
 }

@@ -201,6 +201,11 @@ class LiveState:
     def _on_compaction(self, event: dict) -> list[str]:
         return [render.compaction_line(event)]
 
+    def _on_continuation(self, event: dict) -> list[str]:
+        # Promoted, not live: it marks a moment rather than describing
+        # something still in flight.
+        return self.flush_text() + [render.continuation_line(event)]
+
     def _on_ask(self, event: dict) -> list[str]:
         self.ask = AskState(event=event)
         self.thinking_started = None

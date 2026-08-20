@@ -5,7 +5,7 @@
 //! (and potentially future settings modules) need a durable app-data directory
 //! and an env-file persistence helper.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The app data directory. Uses `dirs_next::data_dir()` — the real OS-specific
 /// app-data path (`~/Library/Application Support/com.daimon.app` on macOS).
@@ -23,10 +23,36 @@ pub(crate) fn data_dir() -> PathBuf {
 }
 
 fn project_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("src-tauri has a parent directory")
-        .to_path_buf()
+    crate::paths::discover_repo_root().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    })
+}
+
+/// Load the app data directory's `.env` into this process's environment.
+///
+/// Must run before anything reads the environment (see `build_app`). A real
+/// environment variable always wins — this only fills in keys the launch
+/// didn't already provide, so a value set deliberately for one run (a dev
+/// `cargo tauri dev` with an explicit override, say) is never clobbered by
+/// the stored copy.
+pub(crate) fn load_persisted_env() {
+    let env_path = data_dir().join(".env");
+    let Ok(text) = std::fs::read_to_string(&env_path) else { return };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let (key, value) = (key.trim(), value.trim());
+        if key.is_empty() || value.is_empty() || std::env::var_os(key).is_some() {
+            continue;
+        }
+        // SAFETY: single-threaded startup, before any thread is spawned.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
 }
 
 /// Upserts `KEY=value` into the app data directory's `.env` file and mirrors

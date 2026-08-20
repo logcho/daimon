@@ -129,6 +129,13 @@ async def _amain(argv: list[str]) -> int:
         print(f"daimon {__version__}")
         return 0
 
+    # ---- workspace: default to the directory the CLI was opened in ---------
+    # Set before every branch below — --stop/--doctor/--list must resolve
+    # the same per-workspace run dir a normal `daimon` invocation would use,
+    # or they'd silently operate on the wrong workspace's server.
+    if "DAIMON_WORKSPACE_DIR" not in os.environ:
+        os.environ["DAIMON_WORKSPACE_DIR"] = os.getcwd()
+
     if args.doctor:
         from .doctor import format_report, run_doctor
 
@@ -137,18 +144,14 @@ async def _amain(argv: list[str]) -> int:
         return 0
 
     if args.stop:
-        ok, message = await client.stop_server()
+        ok, message = await client.stop_server(Settings.from_env())
         print(message)
         return 0 if ok else 1
-
-    # ---- workspace: default to the directory the CLI was opened in ---------
-    if "DAIMON_WORKSPACE_DIR" not in os.environ:
-        os.environ["DAIMON_WORKSPACE_DIR"] = os.getcwd()
 
     settings = Settings.from_env()
 
     if args.list:
-        for name in client.list_sessions(client.server_checkpoints_db(settings)):
+        for name in client.list_sessions(settings.resolved_checkpoints_db):
             print(name)
         return 0
 
@@ -175,6 +178,11 @@ async def _amain(argv: list[str]) -> int:
             if new_path.is_dir():
                 os.environ["DAIMON_WORKSPACE_DIR"] = str(new_path)
                 ws_path = new_path
+                # Re-resolve: `settings` was already built above, before this
+                # prompt could move the workspace — without this, the
+                # confirmation dialog's typed override would have no effect
+                # and ensure_server would silently use the original cwd.
+                settings = Settings.from_env()
                 print(f"  Workspace changed to: {ws_path}\n", file=sys.stderr)
             else:
                 print(

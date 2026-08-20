@@ -392,3 +392,34 @@ def test_wrap_all_flattens() -> None:
     rows = render.wrap_all(["a" * 30, "b"], 10)
     assert rows[-1] == "b"
     assert len(rows) == 4
+
+
+def test_skill_steps_show_which_skill() -> None:
+    """`✓ read_skill` on its own says nothing — every other tool line carries
+    its argument, and a transcript of six identical lines is unreadable."""
+    from daimon_agent.graph import _call_detail
+
+    assert _call_detail({"name": "pdf", "file": "forms.md"}) == "pdf"
+    assert _call_detail({"name": "changelog", "description": "d", "content": "c"}) == "changelog"
+    # A path still wins over a name where both exist.
+    assert _call_detail({"path": "a.txt", "name": "x"}) == "a.txt"
+
+
+def test_a_secret_ask_is_flagged() -> None:
+    """The TUI masks both the typed input and the transcript echo off this."""
+    plain = AskState(event={"question": "Which?", "options": [{"label": "A"}]})
+    assert plain.secret is False
+    assert plain.freeform is False
+
+    key = AskState(event={"question": "Paste your key", "options": [], "secret": True})
+    assert key.secret is True
+    # No options means nothing to pick, so typing starts immediately.
+    assert key.freeform is True
+
+
+def test_an_ask_with_no_options_says_to_type() -> None:
+    lines = render.ask_lines(
+        AskState(event={"question": "Paste your key", "options": []})
+    )
+    assert "type your answer" in lines[-1]
+    assert "1-9 pick" not in lines[-1]

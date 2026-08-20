@@ -242,3 +242,24 @@ async def test_usage_events_are_emitted_per_model_call(settings) -> None:
     assert usage_events[0]["input_tokens"] == 1000
     assert usage_events[0]["role"] == "pro"
     assert usage_events[0]["cost_usd"] > 0
+
+
+def test_deepseek_v4_models_are_priced() -> None:
+    """Both concrete names *and* the aliases, because a model spec may say
+    either — and the picker now offers the concrete ones. An unpriced name
+    silently renders a blank cost, which reads as "free" rather than
+    "unknown"."""
+    for name in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"):
+        assert price_for(name) is not None, name
+
+
+def test_cache_hits_are_dramatically_cheaper_on_deepseek() -> None:
+    """A 50x gap on flash — the whole reason prompts.py keeps a byte-stable
+    frozen prefix. If this ever inverts, the caching work stopped paying."""
+    flash = price_for("deepseek-v4-flash")
+    assert flash.cache_read * 10 < flash.input
+
+
+def test_pro_costs_more_than_flash() -> None:
+    pro, flash = price_for("deepseek-v4-pro"), price_for("deepseek-v4-flash")
+    assert pro.input > flash.input and pro.output > flash.output
