@@ -1,0 +1,149 @@
+<title>Daimon Agent Graph</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --text: #1a1a2e;
+    --card-bg: #f6f8fa;
+    --border: #e1e4e8;
+    --muted: #6e7681;
+    --blue: #4f8dff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117;
+      --text: #e5e5e5;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --muted: #8b949e;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1117;
+    --text: #e5e5e5;
+    --card-bg: #161b22;
+    --border: #30363d;
+    --muted: #8b949e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.6; padding: 2rem; max-width: 960px; margin: 0 auto;
+  }
+  h1 { font-size: 1.75rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.25rem; margin: 2rem 0 0.75rem; padding-bottom: 0.25rem; border-bottom: 1px solid var(--border); }
+  .subtitle { color: var(--muted); margin-bottom: 1.5rem; }
+  .diagram {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.5rem; margin: 1rem 0; overflow-x: auto;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
+  th { font-weight: 600; color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px; }
+  td:first-child { font-family: "SF Mono", "Fira Code", monospace; font-size: 0.85rem; color: var(--blue); }
+  .badge {
+    display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+    font-size: 0.75rem; font-weight: 600;
+  }
+  .badge-good { background: #3fb95022; color: var(--green); }
+  .badge-warn { background: #d2992222; color: var(--orange); }
+  .badge-info { background: #4f8dff22; color: var(--blue); }
+</style>
+
+<h1>Daimon Agent Graph</h1>
+<p class="subtitle">Custom LangGraph StateGraph — agent → tools loop with research fan-out</p>
+
+<h2>Main Graph</h2>
+<div class="diagram">
+  <pre class="mermaid">
+graph TD
+    START((START)) --> agent
+
+    agent["<b>agent node</b><br/>Compaction + repair<br/>System prompt prepend<br/>Model invoke<br/>→ Thinking, tool steps"]
+    agent -->|has tool_calls| tools
+    agent -->|no tool_calls| END((END))
+
+    tools["<b>tools node</b><br/>Execute each tool call<br/>Research budget guardrail<br/>Repeat + duplicate checks<br/>→ done / error events"]
+    tools -->|research_pending| subagents
+    tools -->|no research| agent
+
+    subagents["<b>subagents node</b><br/>1 flash-model subgraph per query<br/>Research-only tools (5)<br/>Recursion limit: 15"]
+    subagents --> agent
+  </pre>
+</div>
+
+<h2>Research Subgraph</h2>
+<div class="diagram">
+  <pre class="mermaid">
+graph LR
+    subgraph "Research Subgraph — flash model"
+        ra[agent] -->|has tool_calls| rt[tools]
+        rt --> ra
+        ra -->|done| rd((result))
+    end
+  </pre>
+</div>
+
+<h2>Key Parameters</h2>
+<table>
+  <tr><th>Parameter</th><th>Main Agent</th><th>Research Subagent</th></tr>
+  <tr><td>Model</td><td>DeepSeek Chat (pro)</td><td>Resolved flash model</td></tr>
+  <tr><td>Recursion limit</td><td><span class="badge badge-info">40</span></td><td><span class="badge badge-info">15</span></td></tr>
+  <tr><td>Max fan-out</td><td>—</td><td><span class="badge badge-warn">3 queries</span></td></tr>
+  <tr><td>Tools</td><td><span class="badge badge-good">30</span></td><td><span class="badge badge-good">5</span> (research-only)</td></tr>
+  <tr><td>Compaction</td><td>Yes (token-threshold)</td><td>No</td></tr>
+  <tr><td>State repair</td><td>Yes (orphaned tool_calls)</td><td>Inherited</td></tr>
+</table>
+
+<h2>Event Flow</h2>
+<div class="diagram">
+  <pre class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant G as Graph
+
+    C->>S: POST /task {instruction, session_id}
+    S->>G: run_turn()
+    G-->>S: step(Thinking, running)
+    S-->>C: NDJSON line
+
+    loop Agent → Tools
+        G->>G: agent_node → model.ainvoke()
+        G-->>S: Reasoning (if text + tool_calls)
+        G-->>S: step(id, tool_name, running)
+        S-->>C: NDJSON lines
+        G->>G: tools_node → tool.ainvoke()
+        G-->>S: step(id, tool_name, done|error)
+        S-->>C: NDJSON line
+    end
+
+    G-->>S: done(result) | error(message)
+    S-->>C: terminal NDJSON line
+    C->>C: stream ends
+  </pre>
+</div>
+
+<h2>30 Tools</h2>
+<table>
+  <tr><th>Category</th><th>Tools</th><th>Count</th></tr>
+  <tr><td>File Ops</td><td>read_file, write_file, edit_file, glob_files, grep_files, mkdir, list_directory, delete_file, move_file</td><td><span class="badge badge-good">9</span></td></tr>
+  <tr><td>Execution</td><td>kernel_execute, run_shell</td><td><span class="badge badge-good">2</span></td></tr>
+  <tr><td>Code Quality</td><td>check_code, debug, run_tests</td><td><span class="badge badge-good">3</span></td></tr>
+  <tr><td>Search</td><td>web_search, web_fetch, research</td><td><span class="badge badge-good">3</span></td></tr>
+  <tr><td>Browser</td><td>open_url, read_page, click, fill_field, new_tab, switch_tab, close_tab, extract_text</td><td><span class="badge badge-warn">8</span></td></tr>
+  <tr><td>Memory</td><td>recall, list_skills, read_skill, save_skill</td><td><span class="badge badge-good">4</span></td></tr>
+  <tr><td>Host</td><td>stage_terminal_command</td><td><span class="badge badge-info">1</span></td></tr>
+</table>
+
+<h2>Guardrails</h2>
+<table>
+  <tr><th>Guardrail</th><th>Applies to</th><th>Behavior</th></tr>
+  <tr><td>Research budget</td><td>web_search, web_fetch, open_url, read_page</td><td>Hard limit per turn → warning on exhausted</td></tr>
+  <tr><td>Repeat check</td><td>All research tools</td><td>Same tool + same args same turn → blocked</td></tr>
+  <tr><td>Near-duplicate</td><td>web_search</td><td>Fuzzy-duplicate query same turn → blocked</td></tr>
+  <tr><td>Page unchanged</td><td>read_page</td><td>Same hash as previous read → warning surfaced</td></tr>
+</table>

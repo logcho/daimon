@@ -1,0 +1,66 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Secrets — see .env.example
+.env
+
+# Local persistent memory/skills DB — passed to the agent process as
+# DAIMON_MEMORY_DB, not source (see workspace.rs). The second path catches the
+# copy that lands here when the agent server is run directly out of agents/
+# (npm start) with no DAIMON_MEMORY_DB set, rather than spawned by the daemon.
+/memory/
+/agents/memory/
+
+# Daimon-managed default notes vault (falls back to this when no Obsidian
+# vault path is configured) — bind-mounted into the workspace container,
+# not source (see vault.rs)
+/vault/
+
+# Cron automations store + pending-request mount (bind-mounted into the
+# workspace container, not source — see automation.rs)
+/automations.json
+/automations/
+
+# Downloaded local whisper.cpp model(s) for on-device dictation — a large
+# binary artifact fetched on demand from Settings, not source (see voice.rs)
+/whisper-models/
+
+# Recorded .webm videos of the agent's background browser sessions — passed
+# to the agent process as DAIMON_RECORDINGS_DIR, not source (see browser.ts)
+/recordings/
+
+# Per-session PinchTab config/profile directories (XDG_CONFIG_HOME/HOME for
+# the native PinchTab process, including Chrome's own derived profile) and
+# session PID files used for orphan reconciliation — both runtime state, not
+# source (see workspace.rs)
+/pinchtab-profiles/
+/run/
+
+# Full extracted Node.js toolchain (node + its own bundled npm) cached by
+# scripts/fetch-sidecars.sh so agents/'s production node_modules gets built
+# against the *bundled* Node's ABI rather than whatever Node happens to be on
+# a developer's PATH — a build-time cache, not source or a shipped resource
+# (the actual sidecar copy lives in src-tauri/binaries/, also gitignored).
+/.cache/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

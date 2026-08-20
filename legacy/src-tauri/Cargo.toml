@@ -1,0 +1,84 @@
+[package]
+name = "daimon"
+version = "0.1.0"
+description = "Daimon — an ambient, on-device AI co-worker"
+authors = ["daimon"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "daimon_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-global-shortcut = "2.3.2"
+tokio = { version = "1", features = ["process", "time", "sync", "rt", "fs", "io-util"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+dotenvy = "0.15"
+keyring = { version = "3", features = ["apple-native"] }
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+tauri-plugin-log = "2"
+# Native macOS notifications for fired automations/reminders — see
+# automation.rs's `poll_and_fire`. Without this, a triggered automation was
+# completely silent unless the app window happened to already be open and
+# mounted at the exact moment it fired (the `session-status` event channel
+# it also streams over has no reach beyond a live webview).
+tauri-plugin-notification = "2"
+log = "0.4"
+cron = "0.17"
+chrono = { version = "0.4", features = ["clock"] }
+whisper-rs = "0.16.0"
+# Reads/writes the same `memory/daimon.db` SQLite file (WAL mode) the Node
+# agent already owns via better-sqlite3 — see skills.rs. Standard multi-
+# process WAL semantics make this safe to touch from both processes; no
+# feature flags needed beyond the "bundled" SQLite (avoids depending on a
+# system libsqlite3 being present/version-matched).
+rusqlite = { version = "0.32", features = ["bundled"] }
+cpal = "0.18.1"
+portable-pty = "0.9.0"
+# Native process-group/session supervision for the background workspace
+# (replaces Docker — see workspace.rs's module doc). Not `command-group`,
+# which is now in maintenance-only mode per its own README; process-wrap is
+# its actively maintained, more composable successor.
+process-wrap = { version = "9.1", features = ["tokio1"] }
+# Process-tree walking (RSS summation for the memory watchdog, and the
+# recursive descendant kill teardown needs — see workspace.rs) and PID/name
+# cross-checking for orphan reconciliation.
+sysinfo = "0.39"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tauri = { version = "2", features = ["macos-private-api", "test"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+# Trimmed to just the `NSEvent` (global flags-changed monitor),
+# `NSHapticFeedback` (Force Touch trackpad feedback on gesture transitions),
+# and `NSApplication`/`NSResponder` (explicit app activation — see
+# `window_focus.rs`) surfaces rather than the full ~300-feature AppKit
+# default set — keeps macOS-only compile time reasonable for what's
+# actually used here.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSHapticFeedback", "NSApplication", "NSResponder", "block2"] }
+objc2-foundation = "0.3.2"
+# Native NSVisualEffectView "liquid glass" behind the transparent pill/panel
+# webview — the real, OS-composited desktop blur that updates live as the
+# window moves (unlike CSS backdrop-filter, which freezes its captured
+# backdrop on a moving transparent window). See `vibrancy.rs`.
+window-vibrancy = "0.6"
+

@@ -1,98 +1,67 @@
 # Daimon
 
-An ambient, on-device AI co-worker. You hand it a task, it runs in the background on your own machine — inside an isolated Docker workspace, invisible to your screen and input — while you keep working on something else.
+A Jarvis-style general-purpose assistant for your own computer — ambient, on-device, non-disruptive. Good at coding, web browsing, and research.
 
-See `ARCHITECTURE.md` for the product vision and system design, and `PROMPT.md` for the phased build plan.
+## Layout
 
-## Prerequisites
+| Folder | What | Status |
+|---|---|---|
+| `agents/` | The agent implementation — LangGraph harness (Python, open core) | Active |
+| `app/` | The Tauri chat app (closed source) | In progress — chat only for now |
+| `legacy/` | Archived previous implementation (Tauri pill app + Node agent server) | Frozen reference |
 
-- [Node.js](https://nodejs.org/) 22+ and npm
-- [Rust](https://www.rust-lang.org/tools/install) (stable toolchain)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/), running
+`agents/` is the open side of daimon's open-core split: the LangGraph orchestrator, the tool library, and the skill schema. It is a standalone Python project — `uv sync` + run tests from inside it.
 
-## Setup
+## Quick start
 
-```sh
-npm install
+### Agent harness (`agents/`)
+
+```bash
+cd agents
+uv sync                          # creates .venv
+uv sync --extra anthropic        # optional: adds the Anthropic provider
+uv run pytest tests              # 314 pass (2 browser tests need a live PinchTab)
 ```
 
-## Running the app
+Configuration lives in `agents/.env` (copy `.env.example`). **`DEEPSEEK_API_KEY` goes there** — never in chat or in the repo.
 
-```sh
+- `uv run daimon` — the interactive CLI
+- `uv run daimon "…"` — one-shot turn (result on stdout, progress on stderr)
+- `uv run daimon-agent` — HTTP server on `127.0.0.1:4711` (`GET /health`, `POST /task` → NDJSON event stream, `POST /resume` to answer a question)
+
+DeepSeek is the default provider. Either model role takes a `provider:model` spec, so the main agent can run on a stronger model while sub-agents stay cheap:
+
+```bash
+DAIMON_MODEL=anthropic:claude-sonnet-5 DAIMON_FLASH_MODEL=deepseek-chat uv run daimon
+```
+
+#### The CLI
+
+A full-screen interface: the transcript scrolls in its own pane, in-flight work (running tools, sub-agents, the todo list) shows below it, and the prompt and status bar stay pinned to the bottom. The status bar carries tokens, cost, elapsed time, and context usage.
+
+| Key | |
+|---|---|
+| `Enter` / `Alt+Enter` | submit / newline |
+| `↑` `↓` | previous inputs |
+| wheel, `PgUp`/`PgDn`, `Shift+↑↓` | scroll the transcript |
+| `Ctrl-End` | jump to the newest output |
+| `Esc` | cancel the running turn (the server cancels the work too) |
+| `Ctrl-C` | cancel, or exit when idle |
+| `/plan` | plan mode — the agent presents a plan and waits before changing anything |
+| `/tools`, `/setup`, `/help` | |
+
+Scrolling up to read something keeps you there while output arrives; submitting anything snaps back to the newest.
+
+When the agent asks a question, the options appear inline: pick with `1`-`9` or `↑↓`+`Enter`, `e` to answer in your own words, `Esc` to skip.
+- `scripts/setup-pinchtab.sh start` — PinchTab browser sidecar (optional, for browser tools)
+- `scripts/optimize_skill.py` / `scripts/smoke_e2e.py` — skill optimizer and end-to-end smoke
+
+### Chat app (`app/`)
+
+```bash
+cd app
+npm install
 npm run tauri dev
 ```
 
-This launches the floating pill widget. Press `Cmd+Shift+Space` (or `Ctrl+Shift+Space`) to expand it into the full pipeline view, type an instruction, and submit. The first task you run will build the background workspace's Docker image, which takes a minute or two; after that it's reused.
-
-Without an API key (see below), tasks run a scripted demo instead of a real agent, so you can confirm the whole pipeline — Docker workspace, headless browser, live status streaming — works before wiring up a model.
-
-## Giving Daimon a real brain: `ANTHROPIC_API_KEY`
-
-The agent (`agents/src/graph.ts`) uses Claude via `@langchain/anthropic`. Without an API key, it falls back to a fixed demo task instead of actually reasoning about your instruction.
-
-**Recommended: a `.env` file.** This is read directly by the app at startup, so it works no matter how you launch Daimon — no dependency on which terminal tab you happened to run a shell export in.
-
-1. Get a key from the [Anthropic Console](https://console.anthropic.com/settings/keys).
-2. In the project root:
-   ```sh
-   cp .env.example .env
-   ```
-3. Open `.env` in an editor and fill in `ANTHROPIC_API_KEY=`. This file is gitignored — it never gets committed.
-4. Run `npm run tauri dev`. On startup, the terminal will print `[daimon] ANTHROPIC_API_KEY present: true` (or `false`) so you can confirm it loaded before doing anything else.
-
-An already-exported shell environment variable always takes priority over `.env`, if you'd rather set it that way instead.
-
-**Either way, this only matters at container creation time.** If you already ran Daimon before the key was in place, there's a stale container without it — remove it so the next task recreates it with the key present:
-
-```sh
-docker rm -f daimon-workspace-default
-```
-
-The key isn't baked into the Docker image or committed anywhere — it lives only in your local, gitignored `.env` and is passed into the container as a runtime environment variable, per the non-disruption/secrets guidelines in `ARCHITECTURE.md`.
-
-## Verifying things manually
-
-```sh
-# frontend typecheck + build
-npm run build
-
-# rust build
-cd src-tauri && cargo check
-
-# rust tests, including an end-to-end IPC test against the live Docker workspace
-cd src-tauri && cargo test
-
-# agent server typecheck
-cd agents && npm run typecheck
-```
-
-## Project layout
-
-```text
-/daimon
-├── src-tauri/   # Rust backend: IPC handlers, workspace/container manager
-├── src/         # React frontend: ambient pill UI + expanded pipeline view
-├── agents/      # LangGraph agent server (runs inside the background workspace)
-├── sandbox/     # Dockerfile for the background workspace image
-├── memory/      # Local SQLite task/skill memory (gitignored — see ARCHITECTURE.md)
-├── assets/      # Brand source files (e.g. logo.png, used to regenerate src-tauri/icons)
-├── website/     # Public landing page (Astro) — self-contained, see website/README.md
-├── ARCHITECTURE.md
-└── PROMPT.md
-```
-
-`gateway/` (remote chat access) is Phase 3 and doesn't exist yet — see `PROMPT.md`.
-
-## Landing page
-
-The public landing page lives in `website/` and is a completely separate Astro project (its own `package.json`, not part of the desktop app's dependency tree). See `website/README.md` for dev/build/deploy instructions.
-
-## Regenerating app icons
-
-The app icon set in `src-tauri/icons/` is generated from `assets/logo.png`:
-
-```sh
-npx tauri icon assets/logo.png
-```
-
-Recommended IDE setup: [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).
+The app spawns and supervises its own agent server (`uv run daimon-agent` with cwd `agents/`), so `agents/.env` must hold the API key. In dev the spawn relies on `uv` being on PATH; bundling Python into the app is future work.
