@@ -218,7 +218,7 @@ export function Panel({
                 </button>
                 <button
                   onClick={() => onCloseChat(id)}
-                  title="close chat"
+                  title="close chat (⌘W)"
                   className="rounded-full px-1 text-neutral-500 transition hover:bg-white/10 hover:text-neutral-200 active:scale-90"
                 >
                   ×
@@ -238,7 +238,7 @@ export function Panel({
           ))}
           <button
             onClick={onAddChat}
-            title="start a new chat"
+            title="start a new chat (⌘T)"
             className="liquid-glass-subtle flex shrink-0 items-center justify-center rounded-full px-2 py-1 text-xs text-neutral-400 transition duration-200 hover:text-[#4f8dff] hover:[border-color:rgba(79,141,255,0.4)] active:scale-90"
           >
             +
@@ -263,7 +263,7 @@ export function Panel({
               </button>
               <button
                 onClick={() => onCloseTerminal(id)}
-                title="close terminal"
+                title="close terminal (⌘W)"
                 className="rounded-full px-1 text-neutral-500 transition hover:bg-white/10 hover:text-neutral-200 active:scale-90"
               >
                 ×
@@ -272,7 +272,7 @@ export function Panel({
           ))}
           <button
             onClick={onAddTerminal}
-            title="open a new terminal"
+            title="open a new terminal (⌘T)"
             className="liquid-glass-subtle flex shrink-0 items-center justify-center rounded-full px-2 py-1 text-xs text-neutral-400 transition duration-200 hover:text-[#4f8dff] hover:[border-color:rgba(79,141,255,0.4)] active:scale-90"
           >
             +

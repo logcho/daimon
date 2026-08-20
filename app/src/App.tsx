@@ -21,6 +21,7 @@ import type {
   VoiceModelStatus,
 } from "./types";
 import { insertText } from "./lib/voice";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { Panel } from "./components/Panel";
 import { Pill } from "./components/Pill";
 
@@ -159,6 +160,19 @@ export default function App() {
     });
   }, []);
 
+  // Defined above closeChat because that one now depends on it — see the
+  // never-empty note there.
+  const newChat = useCallback(async () => {
+    try {
+      const sid = await startChat();
+      commitSessions((prev) => ({ ...prev, [sid]: [] }));
+      setSessionOrder((order) => [...order, sid]);
+      setActiveSessionId(sid);
+    } catch {
+      // keep the current session; the status dot shows the agent is down
+    }
+  }, [commitSessions]);
+
   // Closing a chat tab is a UI decision only: the server keeps running the
   // turn, and its result lands in the checkpointer thread (`daimon -n <uuid>`
   // could pick it up). There is no kill-the-turn endpoint, by design.
@@ -174,9 +188,37 @@ export default function App() {
         setActiveSessionId((current) => (current !== id ? current : remaining[remaining.length - 1] ?? null));
         return remaining;
       });
+      // Never leave the chat view tab-less — the same guarantee
+      // closeTerminalTab makes above. Without it, closing the last chat leaves
+      // activeSessionId null and an input nothing can be typed into, which
+      // Cmd+W turns from a deliberate click into a one-keystroke accident.
+      // Deliberately outside the updater: `startChat` hits the server and is
+      // not idempotent, and React is free to re-run a state updater for a
+      // render it later discards.
+      if (sessionOrder.length === 1 && sessionOrder[0] === id) void newChat();
     },
-    [commitSessions],
+    [commitSessions, newChat, sessionOrder],
   );
+
+  // Cmd+T / Cmd+1-9 / Cmd+W / Cmd+Shift+[ ] over whichever tab strip the
+  // current view is showing. Everything it drives already exists above; the
+  // hook only reads state and calls these handlers.
+  useKeyboardShortcuts({
+    expanded,
+    expand,
+    view,
+    setView,
+    sessionOrder,
+    activeSessionId,
+    selectChat: setActiveSessionId,
+    newChat,
+    closeChat,
+    terminalTabs,
+    activeTerminalId,
+    selectTerminal: setActiveTerminalId,
+    newTerminal: openNewTerminalTab,
+    closeTerminal: closeTerminalTab,
+  });
 
   const handleEvent = useCallback(
     (payload: SessionStatusPayload) => {
@@ -281,17 +323,6 @@ export default function App() {
     openNewTerminalTab();
     return () => clearInterval(poll);
   }, [refreshStatus, commitSessions, openNewTerminalTab]);
-
-  const newChat = async () => {
-    try {
-      const sid = await startChat();
-      commitSessions((prev) => ({ ...prev, [sid]: [] }));
-      setSessionOrder((order) => [...order, sid]);
-      setActiveSessionId(sid);
-    } catch {
-      // keep the current session; the status dot shows the agent is down
-    }
-  };
 
   const send = async (text: string) => {
     const sid = activeSessionId;
