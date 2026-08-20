@@ -1,20 +1,26 @@
-//! macOS-only global "Fn key" trigger for dictation, additive alongside the
-//! standard `CommandOrControl+Shift+D` hotkey registered from the frontend
-//! (see `voice.rs`'s module doc for why that one was chosen as the *initial*
-//! trigger, and this module's existence for the deferred "real" one).
+//! macOS-only global "Fn key" trigger: the app's summon gesture and its
+//! dictation trigger, both on one key.
 //!
 //! The bare Fn key isn't a normal key/hotkey — it's a hardware modifier flag
-//! that Tauri's `global-shortcut` plugin (and every standard cross-platform
-//! hotkey crate) has no visibility into. The only reliable way to observe it
-//! is an `NSEvent` global monitor watching `.flagsChanged` events and
+//! that no standard cross-platform hotkey crate has visibility into. That
+//! turns out to be a feature rather than a limitation: the one attempt this
+//! app made at a conventional global hotkey (`CommandOrControl+Shift+Space`,
+//! via Tauri's `global-shortcut` plugin) was removed after it proved
+//! unregisterable under that plugin's intentionally-empty default ACL, and
+//! the Fn monitors below had been working the whole time. The only reliable
+//! way to observe Fn is an `NSEvent` global monitor watching `.flagsChanged`
+//! events and
 //! comparing the `Function` modifier bit across consecutive events: a
 //! transition from unset to set is a "rising edge" (press), unset-to-set-to-
 //! unset the reverse is a "falling edge" (release). This is the same
 //! technique real dictation apps that trigger off Fn use.
 //!
-//! Unlike the standard hotkey (a simple toggle — unchanged, see `voice.rs`),
-//! the Fn key gives genuine press/release granularity, so it drives three
-//! distinct gestures instead of one flat toggle:
+//! The Fn key gives genuine press/release granularity, so it drives several
+//! distinct gestures rather than one flat toggle. What a press *means*
+//! depends on whether the panel is open, which the frontend mirrors down via
+//! `set_panel_expanded` (see `crate::PanelExpanded`).
+//!
+//! **While the panel is open:**
 //! - **Hold-to-talk:** press and hold -> records while held; release ->
 //!   stops and transcribes.
 //! - **Double-tap-to-lock:** two quick taps -> keeps recording hands-free
@@ -25,7 +31,17 @@
 //!   another press), so the ambiguity is resolved after the fact rather than
 //!   guessed up front.
 //!
-//! See `GesturePhase`/`on_fn_key_edge`/`on_double_tap_timeout` for the actual
+//! **While collapsed to the pill**, Fn is how Daimon is summoned at all:
+//! - **Tap:** expand the panel. Nothing is recorded.
+//! - **Hold:** expand, then start recording once the press outlives
+//!   `TAP_MAX_HOLD`; release stops and transcribes, exactly like an ordinary
+//!   hold. Recording *cannot* start on the press here the way it does above,
+//!   precisely because a tap has to capture nothing — so this one branch
+//!   resolves the tap/hold ambiguity up front (by waiting) instead of after
+//!   the fact, at the cost of the first `TAP_MAX_HOLD` of audio.
+//!
+//! See `GesturePhase`/`on_fn_key_edge`/`on_double_tap_timeout`/
+//! `on_hold_threshold_timeout` for the actual
 //! state machine, kept as pure, synchronously-testable logic separate from
 //! the real `NSEvent` plumbing (which isn't unit-testable without a live
 //! AppKit run loop and a physical key).
@@ -106,6 +122,12 @@ pub(super) enum GesturePhase {
     PendingDoubleTap { first_release_at: std::time::Instant },
     /// Recording is running, hands-free; the next press stops it.
     Locked,
+    /// The panel was collapsed when this press arrived, so the press means
+    /// "open Daimon" — nothing is recording yet. If the key is still down
+    /// `TAP_MAX_HOLD` later this becomes a real hold and recording starts
+    /// (see `on_hold_threshold_timeout`); if it's released first it was just
+    /// a tap to open, and nothing is captured at all.
+    HeldFromCollapsed { pressed_at: std::time::Instant },
 }
 
 /// Gesture state plus a generation counter bumped on every transition.
@@ -149,6 +171,12 @@ pub(super) enum GestureAction {
     /// `on_double_tap_timeout`). Carries the generation captured at the
     /// moment this action was produced, for that guard.
     ScheduleDoubleTapCheck { generation: u64 },
+    /// Ask the frontend to expand the panel — Fn pressed while collapsed.
+    ExpandPanel,
+    /// Schedule a check, `TAP_MAX_HOLD` from now, of whether a press that
+    /// opened the panel is still being held (see `on_hold_threshold_timeout`).
+    /// Same generation guard as `ScheduleDoubleTapCheck`.
+    ScheduleHoldCheck { generation: u64 },
 }
 
 fn transition(state: &mut GestureState, phase: GesturePhase) {
@@ -174,8 +202,25 @@ pub(super) fn on_fn_key_edge(
     state: &mut GestureState,
     pressed: bool,
     now: std::time::Instant,
+    expanded: bool,
 ) -> Vec<GestureAction> {
     match (pressed, state.phase) {
+        // Fn while collapsed means "open Daimon" first and foremost. Recording
+        // can't start here the way it does when the panel is already open: a
+        // press-down is still ambiguous between a tap and a hold, and a tap
+        // must capture nothing at all. So expand now and defer the decision to
+        // the `TAP_MAX_HOLD` check — the cost is that a held summon-and-dictate
+        // loses its first 280ms of audio, which is roughly the panel's own
+        // open animation.
+        (true, GesturePhase::Idle) if !expanded => {
+            transition(state, GesturePhase::HeldFromCollapsed { pressed_at: now });
+            vec![
+                GestureAction::ExpandPanel,
+                GestureAction::ScheduleHoldCheck {
+                    generation: state.generation,
+                },
+            ]
+        }
         (true, GesturePhase::Idle) => {
             transition(state, GesturePhase::HeldWaitingRelease { pressed_at: now });
             vec![GestureAction::StartRecording]
@@ -197,7 +242,15 @@ pub(super) fn on_fn_key_edge(
             vec![GestureAction::StopAndTranscribe]
         }
         // Shouldn't happen (the key is already down) — no-op defensively.
-        (true, GesturePhase::HeldWaitingRelease { .. }) => vec![],
+        (true, GesturePhase::HeldWaitingRelease { .. } | GesturePhase::HeldFromCollapsed { .. }) => {
+            vec![]
+        }
+        // Released before the hold threshold: a tap to open. The panel is
+        // already expanding; nothing was recorded, so there is nothing to stop.
+        (false, GesturePhase::HeldFromCollapsed { .. }) => {
+            transition(state, GesturePhase::Idle);
+            vec![]
+        }
         (false, GesturePhase::HeldWaitingRelease { pressed_at }) => {
             let held_duration = now.saturating_duration_since(pressed_at);
             if held_duration >= TAP_MAX_HOLD {
@@ -214,6 +267,21 @@ pub(super) fn on_fn_key_edge(
         // "stop" action already fired on the press itself (Locked -> stop),
         // or don't need release-driven action at all — no-op.
         (false, GesturePhase::PendingDoubleTap { .. } | GesturePhase::Locked | GesturePhase::Idle) => vec![],
+    }
+}
+
+/// Invoked once `TAP_MAX_HOLD` has elapsed since a press that opened the panel
+/// from collapsed. Still held, same episode -> the user meant a hold, so start
+/// recording and hand the gesture to the ordinary `HeldWaitingRelease` path,
+/// preserving the original `pressed_at` so the release arm still reads it as a
+/// hold. Same `generation` staleness guard as `on_double_tap_timeout`.
+pub(super) fn on_hold_threshold_timeout(state: &mut GestureState, generation: u64) -> Vec<GestureAction> {
+    match state.phase {
+        GesturePhase::HeldFromCollapsed { pressed_at } if state.generation == generation => {
+            transition(state, GesturePhase::HeldWaitingRelease { pressed_at });
+            vec![GestureAction::StartRecording]
+        }
+        _ => vec![],
     }
 }
 
@@ -248,7 +316,10 @@ mod imp {
         NSHapticFeedbackPerformanceTime, NSHapticFeedbackPerformer,
     };
 
-    use super::{on_double_tap_timeout, on_fn_key_edge, GestureAction, GestureState, DOUBLE_TAP_WINDOW};
+    use super::{
+        on_double_tap_timeout, on_fn_key_edge, on_hold_threshold_timeout, GestureAction, GestureState,
+        DOUBLE_TAP_WINDOW, TAP_MAX_HOLD,
+    };
 
     // `AXIsProcessTrusted()` is a plain C function on `ApplicationServices`/
     // `HIServices` — a full binding crate would be overkill for one
@@ -334,6 +405,26 @@ mod imp {
                     }
                 });
             }
+            GestureAction::ExpandPanel => {
+                // No haptic: the panel visibly animating open is its own
+                // confirmation, and a tap-to-open that also buzzed would be
+                // indistinguishable from a recording having started.
+                crate::voice::emit_ui_command(app, "expand");
+            }
+            GestureAction::ScheduleHoldCheck { generation } => {
+                let app = app.clone();
+                let gesture_state = gesture_state.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(TAP_MAX_HOLD).await;
+                    let actions = {
+                        let mut guard = gesture_state.lock().expect("fn_key gesture state mutex poisoned");
+                        on_hold_threshold_timeout(&mut guard, generation)
+                    };
+                    for action in actions {
+                        perform_action(&app, &gesture_state, action);
+                    }
+                });
+            }
         }
     }
 
@@ -374,9 +465,16 @@ mod imp {
 
         log::info!("fn_key: Fn key {} detected", if pressed { "press" } else { "release" });
 
+        // Whether the panel is open decides what this press *means* — see
+        // `on_fn_key_edge`. Read per-edge rather than cached: a gesture can
+        // easily span an expand (that's the whole point of tap-to-open).
+        let expanded = tauri::Manager::state::<crate::PanelExpanded>(app)
+            .0
+            .load(std::sync::atomic::Ordering::Relaxed);
+
         let actions = {
             let mut guard = gesture_state.lock().expect("fn_key gesture state mutex poisoned");
-            on_fn_key_edge(&mut guard, pressed, now)
+            on_fn_key_edge(&mut guard, pressed, now, expanded)
         };
         for action in actions {
             perform_action(app, gesture_state, action);
@@ -409,8 +507,8 @@ mod imp {
             Some(monitor) => {
                 log::info!("fn_key: global Fn-key monitor installed");
                 // This monitor (and the block backing it) is meant to live
-                // for the whole process lifetime, exactly like the tray icon
-                // or the global-shortcut registration — there's no shutdown
+                // for the whole process lifetime, exactly like a tray icon
+                // or a menu-bar item would — there's no shutdown
                 // path that calls `removeMonitor:`, so intentionally leak
                 // both the handle and the block rather than invent a static
                 // to hold a non-`Send` `Retained<AnyObject>`/`RcBlock` for no
@@ -580,6 +678,92 @@ mod tests {
         Instant::now() - Duration::from_millis(ms)
     }
 
+    /// Every test below this point except the `collapsed_*` ones describes the
+    /// panel-already-open gestures, which this round must leave byte-identical
+    /// — so they go through a helper that pins `expanded: true` rather than
+    /// repeating the flag at ~20 call sites.
+    fn edge(state: &mut GestureState, pressed: bool, now: Instant) -> Vec<GestureAction> {
+        on_fn_key_edge(state, pressed, now, true)
+    }
+
+    /// Fn pressed while collapsed opens the panel and records nothing yet —
+    /// a press-down still can't tell a tap from a hold.
+    #[test]
+    fn collapsed_press_expands_and_defers_the_recording_decision() {
+        let mut state = GestureState::new();
+
+        let actions = on_fn_key_edge(&mut state, true, ago(500), false);
+        assert!(matches!(
+            actions.as_slice(),
+            [GestureAction::ExpandPanel, GestureAction::ScheduleHoldCheck { .. }]
+        ));
+        assert!(matches!(state.phase, GesturePhase::HeldFromCollapsed { .. }));
+    }
+
+    /// A tap to open captures nothing at all: the release produces no action,
+    /// so no recording is ever started and none has to be thrown away.
+    #[test]
+    fn collapsed_tap_opens_without_recording() {
+        let mut state = GestureState::new();
+
+        let press_at = ago(500);
+        on_fn_key_edge(&mut state, true, press_at, false);
+
+        // Released after 50ms — a tap, well inside TAP_MAX_HOLD.
+        let actions = on_fn_key_edge(&mut state, false, press_at + Duration::from_millis(50), false);
+        assert_eq!(actions, vec![]);
+        assert_eq!(state.phase, GesturePhase::Idle);
+    }
+
+    /// Still held when the threshold check fires: recording starts and the
+    /// gesture joins the ordinary hold path, so releasing stops and
+    /// transcribes exactly as holding Fn with the panel already open does.
+    #[test]
+    fn collapsed_hold_starts_recording_at_the_threshold_then_stops_on_release() {
+        let mut state = GestureState::new();
+
+        let press_at = ago(500);
+        let actions = on_fn_key_edge(&mut state, true, press_at, false);
+        let generation = match actions.as_slice() {
+            [GestureAction::ExpandPanel, GestureAction::ScheduleHoldCheck { generation }] => *generation,
+            other => panic!("expected ExpandPanel + ScheduleHoldCheck, got {other:?}"),
+        };
+
+        let actions = on_hold_threshold_timeout(&mut state, generation);
+        assert_eq!(actions, vec![GestureAction::StartRecording]);
+        // `pressed_at` must survive the promotion, or the release below would
+        // measure its hold from the threshold instead of the original press.
+        assert!(matches!(
+            state.phase,
+            GesturePhase::HeldWaitingRelease { pressed_at } if pressed_at == press_at
+        ));
+
+        let actions = on_fn_key_edge(&mut state, false, press_at + Duration::from_millis(900), true);
+        assert_eq!(actions, vec![GestureAction::StopAndTranscribe]);
+        assert_eq!(state.phase, GesturePhase::Idle);
+    }
+
+    /// A hold check left over from an episode the state has already moved on
+    /// from must not start a recording out of nowhere — same staleness guard
+    /// the double-tap timeout has.
+    #[test]
+    fn stale_hold_check_is_ignored() {
+        let mut state = GestureState::new();
+
+        let press_at = ago(500);
+        let actions = on_fn_key_edge(&mut state, true, press_at, false);
+        let generation = match actions.as_slice() {
+            [GestureAction::ExpandPanel, GestureAction::ScheduleHoldCheck { generation }] => *generation,
+            other => panic!("expected ExpandPanel + ScheduleHoldCheck, got {other:?}"),
+        };
+
+        // The user let go before the check fired.
+        on_fn_key_edge(&mut state, false, press_at + Duration::from_millis(50), false);
+
+        assert_eq!(on_hold_threshold_timeout(&mut state, generation), vec![]);
+        assert_eq!(state.phase, GesturePhase::Idle);
+    }
+
     /// Hold-to-talk: press, hold well past `TAP_MAX_HOLD_MS`, release ->
     /// starts recording on press, stops+transcribes on release, no
     /// scheduled double-tap check at all.
@@ -588,13 +772,13 @@ mod tests {
         let mut state = GestureState::new();
 
         let press_at = ago(500);
-        let actions = on_fn_key_edge(&mut state, true, press_at);
+        let actions = edge(&mut state, true, press_at);
         assert_eq!(actions, vec![GestureAction::StartRecording]);
         assert!(matches!(state.phase, GesturePhase::HeldWaitingRelease { .. }));
 
         // Released 400ms later — comfortably past TAP_MAX_HOLD_MS (280ms).
         let release_at = press_at + Duration::from_millis(400);
-        let actions = on_fn_key_edge(&mut state, false, release_at);
+        let actions = edge(&mut state, false, release_at);
         assert_eq!(actions, vec![GestureAction::StopAndTranscribe]);
         assert_eq!(state.phase, GesturePhase::Idle);
     }
@@ -608,11 +792,11 @@ mod tests {
         let mut state = GestureState::new();
 
         let press_at = ago(500);
-        on_fn_key_edge(&mut state, true, press_at);
+        edge(&mut state, true, press_at);
 
         // Released after only 50ms — a real tap, not a hold.
         let release_at = press_at + Duration::from_millis(50);
-        let actions = on_fn_key_edge(&mut state, false, release_at);
+        let actions = edge(&mut state, false, release_at);
         let generation = match actions.as_slice() {
             [GestureAction::ScheduleDoubleTapCheck { generation }] => *generation,
             other => panic!("expected a single ScheduleDoubleTapCheck action, got {other:?}"),
@@ -636,32 +820,32 @@ mod tests {
 
         let first_press = ago(1000);
         assert_eq!(
-            on_fn_key_edge(&mut state, true, first_press),
+            edge(&mut state, true, first_press),
             vec![GestureAction::StartRecording]
         );
 
         let first_release = first_press + Duration::from_millis(60);
         assert!(matches!(
-            on_fn_key_edge(&mut state, false, first_release).as_slice(),
+            edge(&mut state, false, first_release).as_slice(),
             [GestureAction::ScheduleDoubleTapCheck { .. }]
         ));
 
         // Second press arrives 150ms after the first release — well within
         // the 400ms double-tap window.
         let second_press = first_release + Duration::from_millis(150);
-        let actions = on_fn_key_edge(&mut state, true, second_press);
+        let actions = edge(&mut state, true, second_press);
         assert_eq!(actions, vec![GestureAction::ConfirmDoubleTapLock]);
         assert_eq!(state.phase, GesturePhase::Locked);
 
         // The second press's own release is a no-op — the lock is already
         // engaged and doesn't care about this key being physically down.
         let second_release = second_press + Duration::from_millis(30);
-        assert_eq!(on_fn_key_edge(&mut state, false, second_release), Vec::new());
+        assert_eq!(edge(&mut state, false, second_release), Vec::new());
         assert_eq!(state.phase, GesturePhase::Locked);
 
         // A later, independent press stops the locked recording.
         let stop_press = second_release + Duration::from_millis(2000);
-        let actions = on_fn_key_edge(&mut state, true, stop_press);
+        let actions = edge(&mut state, true, stop_press);
         assert_eq!(actions, vec![GestureAction::StopAndTranscribe]);
         assert_eq!(state.phase, GesturePhase::Idle);
     }
@@ -675,15 +859,15 @@ mod tests {
         let mut state = GestureState::new();
 
         let first_press = ago(1000);
-        on_fn_key_edge(&mut state, true, first_press);
+        edge(&mut state, true, first_press);
         let first_release = first_press + Duration::from_millis(60);
-        let generation = match on_fn_key_edge(&mut state, false, first_release).as_slice() {
+        let generation = match edge(&mut state, false, first_release).as_slice() {
             [GestureAction::ScheduleDoubleTapCheck { generation }] => *generation,
             other => panic!("expected ScheduleDoubleTapCheck, got {other:?}"),
         };
 
         let second_press = first_release + Duration::from_millis(100);
-        on_fn_key_edge(&mut state, true, second_press);
+        edge(&mut state, true, second_press);
         assert_eq!(state.phase, GesturePhase::Locked);
 
         // The stale timeout for the *first* tap's generation fires late,
@@ -703,9 +887,9 @@ mod tests {
         let mut state = GestureState::new();
 
         let first_press = ago(1000);
-        on_fn_key_edge(&mut state, true, first_press);
+        edge(&mut state, true, first_press);
         let first_release = first_press + Duration::from_millis(60);
-        let stale_generation = match on_fn_key_edge(&mut state, false, first_release).as_slice() {
+        let stale_generation = match edge(&mut state, false, first_release).as_slice() {
             [GestureAction::ScheduleDoubleTapCheck { generation }] => *generation,
             other => panic!("expected ScheduleDoubleTapCheck, got {other:?}"),
         };
@@ -718,7 +902,7 @@ mod tests {
 
         // A brand new press starts a fresh gesture.
         let new_press = first_release + Duration::from_millis(500);
-        on_fn_key_edge(&mut state, true, new_press);
+        edge(&mut state, true, new_press);
         assert!(matches!(state.phase, GesturePhase::HeldWaitingRelease { .. }));
 
         // Calling the timeout again with the old (now stale) generation
@@ -735,10 +919,10 @@ mod tests {
     fn rising_edge_while_already_held_is_a_defensive_no_op() {
         let mut state = GestureState::new();
         let press_at = ago(500);
-        on_fn_key_edge(&mut state, true, press_at);
+        edge(&mut state, true, press_at);
         let phase_before = state.phase;
 
-        let actions = on_fn_key_edge(&mut state, true, press_at + Duration::from_millis(10));
+        let actions = edge(&mut state, true, press_at + Duration::from_millis(10));
         assert_eq!(actions, Vec::new());
         assert_eq!(state.phase, phase_before);
     }
@@ -753,14 +937,14 @@ mod tests {
         let mut state = GestureState::new();
 
         let first_press = ago(2000);
-        on_fn_key_edge(&mut state, true, first_press);
+        edge(&mut state, true, first_press);
         let first_release = first_press + Duration::from_millis(60);
-        on_fn_key_edge(&mut state, false, first_release);
+        edge(&mut state, false, first_release);
         assert!(matches!(state.phase, GesturePhase::PendingDoubleTap { .. }));
 
         // Arrives 500ms after the release — outside the 400ms window.
         let late_press = first_release + Duration::from_millis(500);
-        let actions = on_fn_key_edge(&mut state, true, late_press);
+        let actions = edge(&mut state, true, late_press);
         assert_eq!(
             actions,
             vec![GestureAction::StopAndTranscribe, GestureAction::StartRecording]
@@ -776,10 +960,10 @@ mod tests {
     fn held_for_exactly_the_threshold_counts_as_a_hold() {
         let mut state = GestureState::new();
         let press_at = ago(1000);
-        on_fn_key_edge(&mut state, true, press_at);
+        edge(&mut state, true, press_at);
 
         let release_at = press_at + super::TAP_MAX_HOLD;
-        let actions = on_fn_key_edge(&mut state, false, release_at);
+        let actions = edge(&mut state, false, release_at);
         assert_eq!(actions, vec![GestureAction::StopAndTranscribe]);
         assert_eq!(state.phase, GesturePhase::Idle);
     }

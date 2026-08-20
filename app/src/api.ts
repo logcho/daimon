@@ -83,6 +83,13 @@ export const accessibilityTrusted = (): Promise<boolean> => invoke<boolean>("acc
 export const onDictationStatus = (handler: (status: DictationStatus) => void): Promise<UnlistenFn> =>
   listen<DictationStatus>("dictation-status", (e) => handler(e.payload));
 
+// Rust asking the UI to do something to itself. Today the only action is
+// "expand" (a tap of Fn while collapsed — see fn_key.rs); the payload is an
+// object rather than a bare string so adding a second action doesn't break the
+// channel's shape.
+export const onUiCommand = (handler: (action: string) => void): Promise<UnlistenFn> =>
+  listen<{ action: string }>("ui-command", (e) => handler(e.payload.action));
+
 export const onVoiceModelDownload = (handler: (payload: VoiceModelDownloadPayload) => void): Promise<UnlistenFn> =>
   listen<VoiceModelDownloadPayload>("voice-model-download", (e) => handler(e.payload));
 

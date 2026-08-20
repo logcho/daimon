@@ -3,6 +3,7 @@ import {
   agentStatus,
   closeTerminal,
   onDictationStatus,
+  onUiCommand,
   onVoiceModelDownload,
   sendMessage,
   setWindowVibrancy,
@@ -206,6 +207,7 @@ export default function App() {
   useKeyboardShortcuts({
     expanded,
     expand,
+    collapse,
     view,
     setView,
     sessionOrder,
@@ -273,6 +275,7 @@ export default function App() {
   useEffect(() => {
     let unlistenDictation: (() => void) | undefined;
     let unlistenDownload: (() => void) | undefined;
+    let unlistenUi: (() => void) | undefined;
     let cancelled = false;
 
     onDictationStatus((status) => {
@@ -288,6 +291,16 @@ export default function App() {
       else unlistenDictation = u;
     });
 
+    // A tap of Fn while collapsed. Deliberately just `expand()` with no
+    // setView — you land back on whatever view you left, and the panel's
+    // view state already survives a collapse.
+    onUiCommand((action) => {
+      if (action === "expand") expand();
+    }).then((u) => {
+      if (cancelled) u();
+      else unlistenUi = u;
+    });
+
     onVoiceModelDownload((payload) => {
       setVoiceModelDownload(payload);
       if (payload.done) refreshVoiceModel();
@@ -300,6 +313,7 @@ export default function App() {
       cancelled = true;
       unlistenDictation?.();
       unlistenDownload?.();
+      unlistenUi?.();
     };
   }, [expand, refreshVoiceModel]);
 

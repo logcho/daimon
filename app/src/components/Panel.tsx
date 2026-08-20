@@ -137,6 +137,7 @@ export function Panel({
         <div className="flex-1" />
         <button
           onClick={() => onViewChange("chat")}
+          title="chat (⌘⇧1)"
           className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
             view === "chat"
               ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
@@ -147,6 +148,7 @@ export function Panel({
         </button>
         <button
           onClick={() => onViewChange("terminal")}
+          title="terminal (⌘⇧2)"
           className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
             view === "terminal"
               ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
@@ -157,6 +159,7 @@ export function Panel({
         </button>
         <button
           onClick={() => onViewChange("vault")}
+          title="vault (⌘⇧3)"
           className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
             view === "vault"
               ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
@@ -167,6 +170,7 @@ export function Panel({
         </button>
         <button
           onClick={() => onViewChange("settings")}
+          title="settings (⌘⇧4)"
           className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-tight transition duration-200 ${
             view === "settings"
               ? "bg-[#4f8dff]/20 text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)]"
@@ -182,6 +186,7 @@ export function Panel({
         />
         <button
           onClick={onCollapse}
+          title="collapse (Esc)"
           className="rounded-full px-2 py-1 text-xs font-medium text-neutral-400 transition duration-200 hover:bg-white/5 hover:text-neutral-100 active:scale-90"
         >
           collapse

@@ -13,6 +13,8 @@ fn main() {
             "close_agent",
             "set_window_vibrancy",
             "activate_and_focus_window",
+            "deactivate_app",
+            "set_panel_expanded",
             "start_terminal",
             "write_to_terminal",
             "resize_terminal",

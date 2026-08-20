@@ -13,6 +13,15 @@ use agent::{AgentManager, AgentStatus};
 use serde::Serialize;
 use tauri::Manager;
 
+/// Whether the panel is expanded or collapsed to the pill.
+///
+/// The frontend owns this state (`App.tsx`'s `expanded`); this is a mirror it
+/// pushes down on every transition, because `fn_key.rs` has to branch on it
+/// from inside an `NSEvent` monitor with no way to ask the webview. Nothing on
+/// the Rust side writes it — see `set_panel_expanded`, called from
+/// `expandToPanel`/`collapseToPill` in `lib/window.ts`.
+pub(crate) struct PanelExpanded(pub std::sync::atomic::AtomicBool);
+
 /// Every NDJSON event the agent streams is forwarded to the webview wrapped
 /// in this envelope (the legacy `session-status` channel, kept verbatim).
 #[derive(Clone, Serialize)]
@@ -94,6 +103,20 @@ async fn activate_and_focus_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) 
     window_focus::activate_and_focus(&app).await
 }
 
+#[tauri::command]
+async fn deactivate_app<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    window_focus::deactivate(&app).await
+}
+
+/// Mirrors the frontend's pill/panel state down to Rust so the Fn-key gesture
+/// machine can branch on it. Fire-and-forget from the frontend's side: a
+/// dropped update only means an Fn press is read against a stale state, never
+/// anything worse.
+#[tauri::command]
+fn set_panel_expanded(state: tauri::State<'_, PanelExpanded>, expanded: bool) {
+    state.0.store(expanded, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Shared app builder — used by both `run()` and `#[test]` ACL reachability
 /// tests (see vault.rs). Tests pass `mock_builder()` so no real window/event
 /// loop is created. Uses the concrete `Wry` runtime so `#[tauri::command]`
@@ -101,6 +124,9 @@ async fn activate_and_focus_window<R: tauri::Runtime>(app: tauri::AppHandle<R>) 
 pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri::Wry> {
     builder
         .manage(AgentManager::new())
+        // Starts collapsed — App.tsx's mount effect calls collapseToPill(),
+        // which pushes the same value straight back down.
+        .manage(PanelExpanded(std::sync::atomic::AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             agent_status,
             start_chat,
@@ -110,6 +136,8 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             close_agent,
             set_window_vibrancy,
             activate_and_focus_window,
+            deactivate_app,
+            set_panel_expanded,
             terminal::start_terminal,
             terminal::write_to_terminal,
             terminal::resize_terminal,

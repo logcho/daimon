@@ -43,6 +43,27 @@ pub async fn activate_and_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) ->
     Ok(())
 }
 
+/// The mirror image of `activate_and_focus`: hands app-level activation back to
+/// whatever the user was in before Daimon came forward. Without this, dismissing
+/// the panel leaves a 96x96 always-on-top pill holding keyboard focus, and the
+/// next thing typed goes nowhere.
+///
+/// `deactivate()`, deliberately not `hide()` — hiding would take the pill off
+/// screen, and an ambient always-visible pill is the entire point of the app.
+/// Same generic-over-`R` shape as above, so the `#[tauri::command]` wrapper
+/// again lives in lib.rs (see `deactivate_app`).
+#[cfg(target_os = "macos")]
+pub async fn deactivate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+    imp::deactivate(app).await
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn deactivate<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> Result<(), String> {
+    // No cross-platform equivalent — on Windows/Linux the window manager
+    // handles focus handoff itself when a window shrinks out of the way.
+    Ok(())
+}
+
 fn focus_window_and_webview<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> Result<(), String> {
     window.set_focus().map_err(|e| e.to_string())?;
     let webview: &tauri::Webview<R> = window.as_ref();
@@ -84,11 +105,33 @@ mod imp {
         }
         Ok(())
     }
+
+    pub async fn deactivate<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
+        app.run_on_main_thread(move || {
+            let result = (|| -> Result<(), String> {
+                let mtm = MainThreadMarker::new().ok_or_else(|| {
+                    "deactivate_app: run_on_main_thread callback did not run on the main thread"
+                        .to_string()
+                })?;
+                NSApplication::sharedApplication(mtm).deactivate();
+                Ok(())
+            })();
+            let _ = tx.send(result);
+        })
+        .map_err(|e| format!("deactivate_app: failed to dispatch to main thread: {e}"))?;
+
+        rx.await.map_err(|_| {
+            "deactivate_app: main-thread deactivation closure was dropped before it could respond"
+                .to_string()
+        })?
+    }
 }
 
-// ACL-reachability test omitted — the command takes a generic `AppHandle<R>`
-// so it can't carry `#[tauri::command]` directly (MockRuntime isn't `Wry`),
+// ACL-reachability tests omitted — these commands take a generic `AppHandle<R>`
+// so they can't carry `#[tauri::command]` directly (MockRuntime isn't `Wry`),
 // and `crate::build_app` is also concrete (`Builder<Wry>`). Command wiring is
-// verified by its presence in lib.rs's handler, build.rs's command list, and
+// verified by their presence in lib.rs's handler, build.rs's command list, and
 // capabilities/default.json. Actual focus behavior can only be verified in a
 // live macOS session with a real WindowServer.

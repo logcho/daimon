@@ -186,6 +186,11 @@ function savePanelSize(size: { width: number; height: number }) {
 }
 
 export async function collapseToPill() {
+  // Mirrored down to Rust *first*, not after the animation: fn_key.rs branches
+  // on this to decide whether an Fn press means "open Daimon" or "dictate", and
+  // the 220ms animation below is easily long enough to catch a press in
+  // between. Fire-and-forget — a dropped update only misreads one gesture.
+  void invoke("set_panel_expanded", { expanded: false });
   const win = getCurrentWindow();
   // Save the panel's current size before collapsing so the next expand
   // restores it instead of always landing at the fixed default.
@@ -207,9 +212,18 @@ export async function collapseToPill() {
   // Harmless no-op in the common case (the window is already visible) —
   // a cheap safety net in case anything upstream ever hides it.
   await win.show();
+  // The mirror of expandToPanel's `activate_and_focus_window` below. Daimon is
+  // an Accessory app that stays on screen after collapsing, so without an
+  // explicit deactivate it remains the *active* application — a 56px pill
+  // silently holding keyboard focus while the user types into nothing. Handing
+  // activation back is what makes Esc (and the collapse button) a real
+  // dismiss rather than just a shrink.
+  await invoke("deactivate_app");
 }
 
 export async function expandToPanel() {
+  // See collapseToPill — set before animating, for the same reason.
+  void invoke("set_panel_expanded", { expanded: true });
   const saved = loadPanelSize();
   await animateTo(saved ?? EXPANDED_SIZE);
   const win = getCurrentWindow();

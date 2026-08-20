@@ -548,6 +548,16 @@ fn emit_dictation_status<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: se
     let _ = app.emit("dictation-status", event);
 }
 
+/// Rust asking the frontend to do something to its own UI. Lives here next to
+/// the dictation funnel because its only caller is `fn_key.rs`, which reaches
+/// the webview exclusively through this module — before this, the only way it
+/// could make the panel appear was as a side effect of `dictation-status`
+/// (`App.tsx` expands on `recording`), which is no use for a tap that opens
+/// without recording anything.
+pub(crate) fn emit_ui_command<R: tauri::Runtime>(app: &tauri::AppHandle<R>, action: &str) {
+    let _ = app.emit("ui-command", serde_json::json!({ "action": action }));
+}
+
 /// Stops the mic thread, recovers its buffer, resamples, and transcribes —
 /// everything here is either blocking I/O (joining a thread) or CPU-bound
 /// (resampling, whisper inference), so both halves run via `spawn_blocking`

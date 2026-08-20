@@ -13,6 +13,8 @@
     "allow-close-agent",
     "allow-set-window-vibrancy",
     "allow-activate-and-focus-window",
+    "allow-deactivate-app",
+    "allow-set-panel-expanded",
     "allow-start-terminal",
     "allow-write-to-terminal",
     "allow-resize-terminal",

@@ -1,6 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchConfig, updateConfig, type AgentConfig } from "../api";
 
+// The app's full chord list, kept here as the single place a user can look it
+// up — the header buttons carry the same hints as tooltips, but only one at a
+// time. Mirrors useKeyboardShortcuts.ts (tabs and views) plus the system-wide
+// Fn gestures in src-tauri/src/fn_key.rs; keep the three in sync.
+const SHORTCUTS: [string, string][] = [
+  ["Open Daimon", "tap Fn"],
+  ["Open and dictate", "hold Fn"],
+  ["Dictate hands-free", "double-tap Fn"],
+  ["Collapse", "Esc — Esc Esc in terminal"],
+  ["Previous / next view", "⌃⇧Tab / ⌃Tab"],
+  ["Go to chat / terminal / vault / settings", "⌘⇧1 – ⌘⇧4"],
+  ["New chat or terminal tab", "⌘T"],
+  ["Go to tab 1–8 / last tab", "⌘1 – ⌘8 / ⌘9"],
+  ["Previous / next tab", "⌘⇧[ / ⌘⇧]"],
+  ["Close the current tab", "⌘W"],
+  ["Send a message / newline", "Enter / ⇧Enter"],
+];
+
 /** Settings panel — read-only configuration display with editable API key. */
 export function SettingsPanel() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
@@ -146,6 +164,8 @@ export function SettingsPanel() {
         ["Reflection", config.reflect],
         ["Compaction", `${(config.compaction_chars / 1000).toFixed(0)}k chars`],
       ])}
+
+      {section("Keyboard", SHORTCUTS)}
 
       {section("Browser (PinchTab)", [
         ["URL", config.pinchtab_base],

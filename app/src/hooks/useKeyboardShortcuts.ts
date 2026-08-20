@@ -6,6 +6,7 @@ import type { View } from "../types";
 export interface ShortcutContext {
   expanded: boolean;
   expand: () => void;
+  collapse: () => void;
   view: View;
   setView: (view: View) => void;
   sessionOrder: string[];
@@ -19,6 +20,14 @@ export interface ShortcutContext {
   newTerminal: () => void;
   closeTerminal: (id: string) => void;
 }
+
+/** Direct-jump order for Cmd+Shift+1..4 — matches the header button order in
+ *  Panel.tsx, so the digit you press lines up with what you see. */
+const VIEW_ORDER: View[] = ["chat", "terminal", "vault", "settings"];
+
+/** How close together two Escapes must be, in the terminal view, to mean
+ *  "collapse" rather than two ordinary Escapes headed for the shell. */
+const DOUBLE_ESC_WINDOW_MS = 400;
 
 /** Which tab strip a shortcut acts on. The vault and settings views have no
  *  tabs of their own, so they fall through to chat — Cmd+T there gives you a
@@ -58,14 +67,20 @@ function resolveScope(ctx: ShortcutContext): ResolvedScope {
 /**
  * Browser/iTerm-style tab shortcuts for the chat and terminal strips.
  *
- * | Chord                            | Action                          |
- * |----------------------------------|---------------------------------|
- * | Cmd+T                            | new tab in the current scope    |
- * | Cmd+1 – Cmd+8                    | select the Nth tab              |
- * | Cmd+9                            | select the *last* tab           |
- * | Cmd+W                            | close the active tab            |
- * | Cmd+Shift+] / Ctrl+Tab           | next tab, wrapping              |
- * | Cmd+Shift+[ / Ctrl+Shift+Tab     | previous tab, wrapping          |
+ * Two levels, split by modifier family: **Cmd acts on tabs, Ctrl and
+ * Cmd+Shift+digit act on views.**
+ *
+ * | Chord              | Action                                    |
+ * |--------------------|-------------------------------------------|
+ * | Cmd+T              | new tab in the current scope              |
+ * | Cmd+1 – Cmd+8      | select the Nth tab                        |
+ * | Cmd+9              | select the *last* tab                     |
+ * | Cmd+W              | close the active tab                      |
+ * | Cmd+Shift+]        | next tab, wrapping                        |
+ * | Cmd+Shift+[        | previous tab, wrapping                    |
+ * | Ctrl+Tab           | next view, wrapping (Shift for previous)  |
+ * | Cmd+Shift+1 – 4    | jump to chat / terminal / vault / settings|
+ * | Escape             | collapse (twice, in the terminal view)    |
  *
  * Two details carry the whole design:
  *
@@ -87,6 +102,8 @@ function resolveScope(ctx: ShortcutContext): ResolvedScope {
 export function useKeyboardShortcuts(ctx: ShortcutContext) {
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
+  // Only meaningful in the terminal view — see the Escape branch below.
+  const lastEscapeAt = useRef(0);
 
   useEffect(() => {
     function handler(event: KeyboardEvent) {
@@ -99,6 +116,36 @@ export function useKeyboardShortcuts(ctx: ShortcutContext) {
       const code = event.code;
       const cmd = event.metaKey && !event.ctrlKey && !event.altKey;
       const ctrl = event.ctrlKey && !event.metaKey && !event.altKey;
+
+      // Escape dismisses. Handled ahead of the chord table below and
+      // returning early, because that path ends by *expanding* the panel —
+      // the exact opposite of what this wants.
+      const bare = !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+      if (code === "Escape" && bare) {
+        // The API-key field in settings binds Escape itself to cancel editing.
+        // Narrow on purpose: the chat draft is a <textarea>, and Escape is
+        // meant to collapse from there (the draft survives — panel state
+        // outlives a collapse).
+        if ((event.target as HTMLElement | null)?.tagName === "INPUT") return;
+
+        if (ctx.view !== "terminal") {
+          event.preventDefault();
+          event.stopPropagation();
+          ctx.collapse();
+          return;
+        }
+
+        // In the terminal, Escape belongs to the shell — vim's mode exit,
+        // readline's meta prefix, a TUI's cancel. So this never calls
+        // preventDefault: both Escapes still reach the PTY, and only the
+        // second one within the window also collapses. Swallowing it would be
+        // worse than the duplicate, which is harmless everywhere it lands.
+        const now = event.timeStamp;
+        const isDouble = now - lastEscapeAt.current <= DOUBLE_ESC_WINDOW_MS;
+        lastEscapeAt.current = isDouble ? 0 : now;
+        if (isDouble) ctx.collapse();
+        return;
+      }
 
       // Resolved lazily so an unmatched key does no work at all.
       let action: (() => void) | null = null;
@@ -130,11 +177,24 @@ export function useKeyboardShortcuts(ctx: ShortcutContext) {
           ctx.setView(scope);
           select(target);
         };
-      } else if (
-        (cmd && event.shiftKey && (code === "BracketLeft" || code === "BracketRight")) ||
-        (ctrl && code === "Tab")
-      ) {
-        const forward = code === "Tab" ? !event.shiftKey : code === "BracketRight";
+      } else if (cmd && event.shiftKey && /^Digit[1-4]$/.test(code)) {
+        // The outer level: shift means "view", not "tab". Unambiguous against
+        // the plain Cmd+1-9 branch above, which requires !shiftKey.
+        const target = VIEW_ORDER[Number(code.slice(5)) - 1];
+        action = () => ctx.setView(target);
+      } else if (ctrl && code === "Tab") {
+        // Ctrl+Tab walks the whole view ring, wrapping — chat -> terminal ->
+        // vault -> settings -> chat. Ctrl+Shift+Tab walks it backwards, which
+        // is what keeps chat and terminal one press apart in either direction
+        // even though they sit at opposite ends of a four-stop loop.
+        const forward = !event.shiftKey;
+        action = () => {
+          const current = VIEW_ORDER.indexOf(ctx.view);
+          const next = (current + (forward ? 1 : -1) + VIEW_ORDER.length) % VIEW_ORDER.length;
+          ctx.setView(VIEW_ORDER[next]);
+        };
+      } else if (cmd && event.shiftKey && (code === "BracketLeft" || code === "BracketRight")) {
+        const forward = code === "BracketRight";
         action = () => {
           const { scope, tabs, activeId, select } = resolveScope(ctx);
           if (tabs.length === 0) return;
