@@ -11,13 +11,14 @@ import os
 import signal
 import time
 from collections import Counter
+from dataclasses import replace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from langchain_core.messages import AIMessage
 
 from daimon_agent import server
-from daimon_agent.graph import build_graph, make_sqlite_checkpointer
+from daimon_agent.graph import build_graph, close_checkpointer, make_sqlite_checkpointer
 from daimon_agent.server import create_app
 from fakes import FakeRouter
 
@@ -791,3 +792,104 @@ async def test_cleanup_removes_the_pidfile(settings, tmp_path) -> None:
     async with TestClient(TestServer(app)):
         assert pidfile.exists()  # still there while the app is up
     assert not pidfile.exists()  # cleanup() removed it on shutdown
+
+
+# --- one tool set per session, not one per server -----------------------------
+
+async def test_each_session_gets_its_own_graph(settings, tmp_path) -> None:
+    """A single server-wide tool set shared three things keyed on the session
+    id `build_tools` is handed: the todo list, the IPython kernel, and the read
+    registry. Two chat sessions clobbered each other's checklist, saw each
+    other's kernel variables, and vouched for each other's file reads."""
+    from daimon_agent.server import build_default_graph
+
+    _graph, checkpointer, _router, for_session = await build_default_graph(
+        replace(settings, workspace_dir=tmp_path), memory=None
+    )
+    try:
+        a, b = for_session("chat-a"), for_session("chat-b")
+        assert a is not b
+        # Different tool *instances*, because the closures capture the id.
+        assert {t.name for t in a.tools} == {t.name for t in b.tools}
+        assert next(t for t in a.tools if t.name == "update_todos") is not next(
+            t for t in b.tools if t.name == "update_todos"
+        )
+    finally:
+        await close_checkpointer(checkpointer)
+
+
+async def test_two_sessions_keep_separate_todo_lists(settings, tmp_path) -> None:
+    from daimon_agent.server import build_default_graph
+    from daimon_agent.tools.todo import clear_todos, get_todos
+
+    _graph, checkpointer, _router, for_session = await build_default_graph(
+        replace(settings, workspace_dir=tmp_path), memory=None
+    )
+    try:
+        a = next(t for t in for_session("chat-a").tools if t.name == "update_todos")
+        b = next(t for t in for_session("chat-b").tools if t.name == "update_todos")
+        await a.ainvoke({"todos": "in_progress|alpha's work"})
+        await b.ainvoke({"todos": "pending|beta's work"})
+
+        assert [i["text"] for i in get_todos("chat-a")] == ["alpha's work"]
+        assert [i["text"] for i in get_todos("chat-b")] == ["beta's work"]
+    finally:
+        clear_todos("chat-a")
+        clear_todos("chat-b")
+        await close_checkpointer(checkpointer)
+
+
+async def _session_graph_builder(settings, *, memory=None):
+    """Like fake_graph_builder, but with the per-session factory — a real
+    compiled graph per session over its own scripted model."""
+    checkpointer = await make_sqlite_checkpointer(settings.resolved_checkpoints_db)
+
+    def for_session(session_id: str):
+        router = FakeRouter()
+        graph = build_graph(settings, router, [], checkpointer=checkpointer)
+        graph.router = router
+        return graph
+
+    return for_session("server"), checkpointer, FakeRouter(), for_session
+
+
+async def test_a_turn_builds_a_graph_for_its_own_session(settings) -> None:
+    app = await create_app(settings, graph_builder=_session_graph_builder)
+    async with TestClient(TestServer(app)) as client:
+        await _post_task(client, "hello", session_id="chat-a")
+        await _post_task(client, "hello", session_id="chat-b")
+
+        graphs = app["graphs"]
+        assert set(graphs) == {"chat-a", "chat-b"}
+        assert graphs["chat-a"] is not graphs["chat-b"]
+
+        # A second turn on the same session reuses the graph rather than
+        # building a fresh tool set (and a fresh kernel) under it.
+        existing = graphs["chat-a"]
+        await _post_task(client, "again", session_id="chat-a")
+        assert app["graphs"]["chat-a"] is existing
+
+
+async def test_session_graphs_are_capped(settings, monkeypatch) -> None:
+    """Nothing tells the server a chat tab closed — the app closes it locally
+    and the turn keeps running — so the cache has to bound itself."""
+    monkeypatch.setattr(server, "MAX_SESSION_GRAPHS", 2)
+    app = await create_app(settings, graph_builder=_session_graph_builder)
+    async with TestClient(TestServer(app)) as client:
+        for sid in ("s1", "s2", "s3"):
+            await _post_task(client, "hi", session_id=sid)
+
+        # Least-recently-used goes first.
+        assert set(app["graphs"]) == {"s2", "s3"}
+
+
+async def test_an_injected_builder_still_shares_one_graph(settings) -> None:
+    """A test that injects its own 3-tuple builder is asking for one scripted
+    graph; the per-session path must not quietly replace it."""
+    app = await create_app(settings, graph_builder=fake_graph_builder)
+    async with TestClient(TestServer(app)) as client:
+        await _post_task(client, "hello", session_id="chat-a")
+        await _post_task(client, "hello", session_id="chat-b")
+
+        assert app["make_session_graph"] is None
+        assert app["graphs"] == {}  # nothing per-session was ever built

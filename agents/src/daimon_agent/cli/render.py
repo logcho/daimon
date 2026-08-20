@@ -409,6 +409,16 @@ def continuation_line(event: dict) -> str:
     return f"  {BLUE}↻{RESET} {DIM}continuing · {' · '.join(parts)}{RESET}"
 
 
+def retry_line(event: dict) -> str:
+    """A model call that died mid-stream and is being restarted."""
+    attempt = int(event.get("attempt", 2))
+    total = int(event.get("max_attempts", 3))
+    return (
+        f"  {BLUE}↺{RESET} {DIM}connection lost — retrying "
+        f"({attempt}/{total}){RESET}"
+    )
+
+
 def compaction_line(event: dict) -> str:
     before = int(event.get("before_tokens", 0))
     after = int(event.get("after_tokens", 0))

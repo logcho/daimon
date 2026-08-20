@@ -12,13 +12,14 @@ import {
   startChat,
   voiceModelStatus,
 } from "./api";
-import { applyEvent, isSessionBusy, onSessionStatus } from "./sessionEvents";
+import { applyEvent, applyTodoEvent, isSessionBusy, onSessionStatus } from "./sessionEvents";
 import { collapseToPill, expandToPanel } from "./lib/window";
 import type {
   AgentStatus,
   ChatMessage,
   DictationStatus,
   SessionStatusPayload,
+  TodoItem,
   View,
   VoiceModelDownloadPayload,
   VoiceModelStatus,
@@ -34,6 +35,12 @@ export default function App() {
   // session streams independently (the server serializes turns per session,
   // not globally), so switching tabs mid-turn is the point, not an edge.
   const [sessions, setSessions] = useState<Record<string, ChatMessage[]>>({});
+  // Todos are session state, not message state — they describe what the agent
+  // is doing *now*. Attached to a message they vanished the moment the next
+  // turn started, which is exactly when a checklist earns its keep. Kept as
+  // its own map rather than folded into `sessions` so `applyEvent` stays a
+  // pure function over messages.
+  const [sessionTodos, setSessionTodos] = useState<Record<string, TodoItem[]>>({});
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
@@ -95,6 +102,7 @@ export default function App() {
   // session is working OR the server reports global busy (CLI turns, queued
   // turns, etc.). The local check gives instant reactivity between polls.
   const messages = activeSessionId ? (sessions[activeSessionId] ?? []) : [];
+  const todos = activeSessionId ? (sessionTodos[activeSessionId] ?? []) : [];
   const busy = isSessionBusy(messages);
   const anyBusy = (status?.busy ?? false) || sessionOrder.some((sid) => isSessionBusy(sessions[sid] ?? []));
   const hasError = sessionOrder.some((sid) => (sessions[sid] ?? []).some((m) => m.error));
@@ -193,6 +201,12 @@ export default function App() {
         delete next[id];
         return next;
       });
+      setSessionTodos((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       setSessionOrder((order) => {
         const remaining = order.filter((sid) => sid !== id);
         setActiveSessionId((current) => (current !== id ? current : remaining[remaining.length - 1] ?? null));
@@ -269,6 +283,9 @@ export default function App() {
       // side, this UI just isn't showing it anymore.
       if (!(sid in sessionsRef.current)) return;
       commitSessions((prev) => ({ ...prev, [sid]: applyEvent(prev[sid], event) }));
+      if (event.type === "todo") {
+        setSessionTodos((prev) => ({ ...prev, [sid]: applyTodoEvent(prev[sid] ?? [], event) }));
+      }
       if (event.type === "done" || event.type === "error") {
         refreshStatus();
         // If the panel is collapsed, light the green "success" dot so the user
@@ -431,6 +448,7 @@ export default function App() {
           onCloseChat={closeChat}
           onAddChat={newChat}
           messages={messages}
+          todos={todos}
           onSend={send}
           terminalTabs={terminalTabs}
           activeTerminalId={activeTerminalId}

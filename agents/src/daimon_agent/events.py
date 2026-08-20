@@ -155,6 +155,23 @@ def compaction_event(before_tokens: int, after_tokens: int, dropped: int) -> dic
     }
 
 
+# --- retry -------------------------------------------------------------------
+def retry_event(attempt: int, max_attempts: int, reason: str) -> dict:
+    """A model call died mid-stream and is being restarted.
+
+    Silence and a retry look identical from outside, and the retry is the one
+    the user should not worry about — so say it. It also keeps the turn's
+    inactivity watchdog fed across a backoff that would otherwise be a gap with
+    nothing in it.
+    """
+    return {
+        "type": "retry",
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "reason": reason[:200],
+    }
+
+
 # --- done / error / ask ------------------------------------------------------
 def done_event(result: str, *, usage: dict | None = None) -> dict:
     event: dict = {"type": "done", "result": result}

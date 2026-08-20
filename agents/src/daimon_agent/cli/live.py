@@ -201,6 +201,9 @@ class LiveState:
     def _on_compaction(self, event: dict) -> list[str]:
         return [render.compaction_line(event)]
 
+    def _on_retry(self, event: dict) -> list[str]:
+        return [render.retry_line(event)]
+
     def _on_continuation(self, event: dict) -> list[str]:
         # Promoted, not live: it marks a moment rather than describing
         # something still in flight.

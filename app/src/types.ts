@@ -51,7 +51,14 @@ export interface TodoItem {
   status: TodoStatus;
 }
 
-/** The whole checklist every time — a snapshot, not a patch. */
+/** The whole checklist every time — a snapshot, not a patch.
+ *
+ *  Todos belong to the *session*, not to any one message: they describe what
+ *  the agent is doing now, and a checklist that scrolls away with the turn
+ *  that created it disappears exactly when the work gets long enough to need
+ *  one. See `applyTodoEvent` and the pinned strip above the composer — the
+ *  same split `cli/live.py` makes, where todos live in LiveState and never
+ *  enter the transcript. */
 export interface TodoEvent {
   type: "todo";
   items: TodoItem[];
@@ -64,6 +71,16 @@ export interface ContinuationEvent {
   steps: number;
   max_steps: number;
   tokens: number;
+}
+
+/** A model call died mid-stream and is being restarted. Not an error — the
+ *  turn is still running — but silence and a retry look identical from the
+ *  outside, and the retry is the one not to worry about. */
+export interface RetryEvent {
+  type: "retry";
+  attempt: number;
+  max_attempts: number;
+  reason: string;
 }
 
 export interface CompactionEvent {
@@ -135,6 +152,7 @@ export type AgentEvent =
   | TodoEvent
   | ContinuationEvent
   | CompactionEvent
+  | RetryEvent
   | DoneEvent
   | ErrorEvent
   | AskEvent
@@ -187,10 +205,11 @@ export const emptyUsage = (): TurnUsage => ({
 });
 
 /** A one-line notice in the transcript — continuing past the step cap,
- *  compacting the context. Not an error, and not a tool call. */
+ *  compacting the context, retrying a dropped connection. Not an error, and
+ *  not a tool call. */
 export interface Notice {
   id: string;
-  kind: "continuation" | "compaction";
+  kind: "continuation" | "compaction" | "retry";
   text: string;
 }
 
@@ -204,8 +223,6 @@ export interface ChatMessage {
   error?: string;
   /** Assistant only: tokens and cost for this turn. */
   usage?: TurnUsage;
-  /** Assistant only: the agent's task list, as of the last snapshot. */
-  todos?: TodoItem[];
   notices?: Notice[];
   /** Wall-clock start, for the elapsed readout. */
   startedAt?: number;

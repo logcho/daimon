@@ -18,7 +18,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,7 +49,8 @@ from .skills.injector import discover_skills
 from .skills.registry import RegistryError, SkillRegistry, install_bundle
 from .tools import build_tools
 from .tools.files import forget_reads
-from .tools.repl import close_all_repls
+from .tools.repl import close_all_repls, close_repl
+from .tools.todo import clear_todos
 from .tools.search import aclose_search_provider
 from .tools.web import aclose_web_fetcher
 
@@ -194,13 +195,38 @@ def adopt_legacy_skills(settings: Settings) -> int:
     return copied
 
 
-async def build_default_graph(settings: Settings, *, memory: MemoryStore | None = None) -> tuple[Any, Any, Any]:
-    """Build the agent graph with the unified tool set. Returns (graph, checkpointer, router)."""
+#: Session graphs kept alive at once. Each holds a tool set and three
+#: sub-graphs, and nothing tells the server when a chat tab closes — the app
+#: closes it locally and the turn keeps running. So it is an LRU, not a leak.
+MAX_SESSION_GRAPHS = 32
+
+async def build_default_graph(
+    settings: Settings, *, memory: MemoryStore | None = None
+) -> tuple[Any, Any, Any, Any]:
+    """Build the agent graph. Returns (graph, checkpointer, router, factory).
+
+    The fourth element builds a *further* graph for one session id, sharing the
+    checkpointer, router, and memory store — those are genuinely process-wide —
+    while getting its own tool set.
+
+    That last part is the point. Three things key off the session id
+    `build_tools` is handed: the todo list (`todo._lists`), the IPython kernel
+    (`repl._repls`), and the read registry (`files._reads`). A single
+    server-wide tool set meant every chat session shared all three, so two of
+    them clobbered each other's checklist, saw each other's kernel variables,
+    and vouched for each other's file reads.
+
+    The graph returned first is still built once and still serves `/tools`,
+    which only wants the schemas.
+    """
     router = ModelRouter(settings)
-    tools = build_tools(settings, memory=memory, session_id="server")
     checkpointer = await make_sqlite_checkpointer(settings.resolved_checkpoints_db)
-    graph = build_graph(settings, router, tools, checkpointer=checkpointer)
-    return graph, checkpointer, router
+
+    def for_session(session_id: str) -> Any:
+        tools = build_tools(settings, memory=memory, session_id=session_id)
+        return build_graph(settings, router, tools, checkpointer=checkpointer)
+
+    return for_session("server"), checkpointer, router, for_session
 
 
 async def _idle_shutdown_loop(
@@ -250,6 +276,10 @@ async def create_app(
     app = web.Application()
     app["settings"] = settings
     app["graph"] = None
+    # session_id -> its own graph, built on first use. An OrderedDict so the
+    # cap below can evict least-recently-used rather than arbitrarily.
+    app["graphs"] = OrderedDict()
+    app["make_session_graph"] = None
     app["checkpointer"] = None
     app["memory"] = memory or MemoryStore(settings.resolved_memory_db)
     app["locks"] = {}
@@ -269,11 +299,40 @@ async def create_app(
         "last_active_at": time.monotonic(),
     }
 
+    async def release_session(session_id: str) -> None:
+        """Drop a session's graph and everything keyed to its id."""
+        app["graphs"].pop(session_id, None)
+        clear_todos(session_id)
+        forget_reads(session_id)
+        await close_repl(session_id)
+
+    async def graph_for(session_id: str) -> Any:
+        """The graph this session runs on — its own, or the shared one."""
+        make = app["make_session_graph"]
+        if make is None:
+            return app["graph"]
+        graphs: OrderedDict = app["graphs"]
+        if session_id in graphs:
+            graphs.move_to_end(session_id)
+            return graphs[session_id]
+        graphs[session_id] = make(session_id)
+        # Bounded: each graph carries a tool set and three sub-graphs, and a
+        # long-lived server has no "session closed" signal to prune on — the
+        # app closes a chat tab locally and the server is never told.
+        while len(graphs) > MAX_SESSION_GRAPHS:
+            await release_session(next(iter(graphs)))
+        return graphs[session_id]
+
     async def startup(app: web.Application) -> None:
         nonlocal settings
         # Build the graph first — PinchTab auto-start runs in the background
         # so the server is reachable on /health immediately.
-        graph, checkpointer, router = await graph_builder(settings, memory=app["memory"])
+        built = await graph_builder(settings, memory=app["memory"])
+        graph, checkpointer, router = built[:3]
+        # A test injecting its own builder returns the 3-tuple and no factory;
+        # every session then shares that one graph, which is what such a test
+        # is asking for.
+        app["make_session_graph"] = built[3] if len(built) > 3 else None
         app["graph"] = graph
         app["checkpointer"] = checkpointer
         app["router"] = router
@@ -334,6 +393,7 @@ async def create_app(
         asyncio.ensure_future(_idle_shutdown_loop(app["turn_registry"], settings.idle_timeout_s))
 
     async def cleanup(app: web.Application) -> None:
+        app["graphs"].clear()
         await close_checkpointer(app["checkpointer"])
         await aclose_browser()
         await aclose_web_fetcher()
@@ -508,7 +568,7 @@ async def create_app(
         # there is a single unified agent now.
         print(f"[daimon-agent] received task: {instruction}", file=sys.stderr)
 
-        graph = app["graph"]
+        graph = await graph_for(session_id)
         # Re-scan every turn rather than trusting the startup scan: a skill the
         # agent saved a moment ago, or one the user just dropped into the
         # folder, has to be usable now. It's a directory glob.
@@ -544,7 +604,7 @@ async def create_app(
         if "answer" not in body:
             return web.Response(status=400, text="answer is required")
         answer = body["answer"]
-        graph = app["graph"]
+        graph = await graph_for(session_id)
 
         async def run(emit) -> Any:
             return await resume_turn(

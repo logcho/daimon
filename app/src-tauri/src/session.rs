@@ -9,7 +9,13 @@ use tauri::{AppHandle, Emitter};
 
 use crate::SessionStatusPayload;
 
-const STALL_TIMEOUT: Duration = Duration::from_secs(90);
+/// Transport backstop only. The agent server owns the real "has this turn
+/// stalled" decision (`DAIMON_INACTIVITY_TIMEOUT_S`, 180s by default) and
+/// reports it as a proper `error` event with a result attached. This timer
+/// exists for the case where the server goes away without closing the socket,
+/// so it must sit comfortably above the server's own limit — when it fires
+/// first, a working turn dies with a message that explains nothing.
+const STALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Kicks off a turn. Returns once the HTTP request is away — the stream runs
 /// on the async runtime and emits events as they arrive.
@@ -67,7 +73,13 @@ async fn run_and_stream(
     loop {
         let next = tokio::time::timeout(STALL_TIMEOUT, stream.next())
             .await
-            .map_err(|_| "agent stalled (no output for 90s)".to_string())?;
+            .map_err(|_| {
+                format!(
+                    "lost contact with the agent server — nothing arrived on the stream \
+                     for {}s",
+                    STALL_TIMEOUT.as_secs()
+                )
+            })?;
         let Some(chunk) = next else { break };
         let chunk = match chunk {
             Ok(bytes) => bytes,

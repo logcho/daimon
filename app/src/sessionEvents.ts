@@ -7,6 +7,7 @@ import {
   type SessionStatusPayload,
   type Step,
   type StepEvent,
+  type TodoItem,
   type TurnUsage,
 } from "./types";
 
@@ -40,6 +41,22 @@ export function hasCompletedTurn(messages: ChatMessage[]): boolean {
   if (idx < 0) return false;
   const msg = messages[idx];
   return !!msg.content && !msg.thinking && !msg.error;
+}
+
+/**
+ * Fold a todo event into a session's checklist.
+ *
+ * Deliberately separate from `applyEvent`: todos are session state, not
+ * message state. Attaching them to the last assistant message meant a new turn
+ * started with an empty list, so the checklist vanished at exactly the point
+ * the work got long enough to want one. `cli/live.py` never had this problem —
+ * `LiveState.todos` is turn state that never enters the transcript.
+ *
+ * The event carries the whole list every time, so a client that missed one
+ * still converges.
+ */
+export function applyTodoEvent(todos: TodoItem[], event: AgentEvent): TodoItem[] {
+  return event.type === "todo" ? event.items : todos;
 }
 
 function upsertStep(steps: Step[], ev: StepEvent): Step[] {
@@ -84,9 +101,10 @@ function addUsage(usage: TurnUsage | undefined, ev: Extract<AgentEvent, { type: 
  * Fold one agent event into the message list. Pure — returns a new list.
  *
  * chat-only scope: ui_action / host_action / live_frame are handled elsewhere
- * (App.tsx routes ui_action to a terminal tab) and ignored here. `ask` never
- * reaches the app: the server only offers the ask tools to clients that
- * advertise the capability on /task.
+ * (App.tsx routes ui_action to a terminal tab) and ignored here, and `todo`
+ * goes to `applyTodoEvent` because it is session state rather than message
+ * state. `ask` never reaches the app: the server only offers the ask tools to
+ * clients that advertise the capability on /task.
  */
 export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMessage[] {
   const idx = lastAssistant(messages);
@@ -120,10 +138,6 @@ export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMess
     case "usage":
       next = { ...next, usage: addUsage(next.usage, event) };
       break;
-    case "todo":
-      // A snapshot, not a patch — a client that missed one still converges.
-      next = { ...next, todos: event.items };
-      break;
     case "continuation":
       next = {
         ...next,
@@ -146,6 +160,19 @@ export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMess
             id: crypto.randomUUID(),
             kind: "compaction",
             text: `compacted context ${fmtTokens(event.before_tokens)} → ${fmtTokens(event.after_tokens)} tokens`,
+          },
+        ],
+      };
+      break;
+    case "retry":
+      next = {
+        ...next,
+        notices: [
+          ...(next.notices ?? []),
+          {
+            id: crypto.randomUUID(),
+            kind: "retry",
+            text: `connection lost — retrying (${event.attempt}/${event.max_attempts})`,
           },
         ],
       };

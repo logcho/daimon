@@ -56,7 +56,11 @@ class Settings:
     request_timeout: float = 60.0
 
     # Turn loop.
-    inactivity_timeout_s: float = 60.0
+    #: Seconds with *no emitted events at all* before a turn is declared stalled.
+    #: It has to clear the longest single tool timeout with room to spare — a
+    #: `run_tests` or `check_code` caps at 120s and says nothing between its
+    #: start and end events — which is why 60s tripped on real work.
+    inactivity_timeout_s: float = 180.0
     #: Graph steps before LangGraph raises. This is a *loop guard*, not a
     #: task-length budget — real looping is caught by guardrails.py. Hitting it
     #: no longer ends the turn; the turn continues from the checkpoint.
@@ -204,6 +208,7 @@ class Settings:
             pinchtab_token=get("PINCHTAB_TOKEN"),
             port=int(get("PORT") or "4711"),
             idle_timeout_s=float(get("DAIMON_IDLE_TIMEOUT_S") or "2700"),
+            inactivity_timeout_s=float(get("DAIMON_INACTIVITY_TIMEOUT_S") or "180"),
             recursion_limit=int(get("DAIMON_RECURSION_LIMIT") or "150"),
             max_steps_per_turn=int(get("DAIMON_MAX_STEPS") or "600"),
             live_frames=get_bool("DAIMON_LIVE_FRAMES", False),

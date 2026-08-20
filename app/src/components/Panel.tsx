@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AgentStatus, ChatMessage, DictationStatus, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
+import type { AgentStatus, ChatMessage, DictationStatus, TodoItem, View, VoiceModelDownloadPayload, VoiceModelStatus } from "../types";
 import type { AgentConfig } from "../api";
 import { hasCompletedTurn, isSessionBusy, sessionTotals } from "../sessionEvents";
 import { ChatInput } from "./ChatInput";
@@ -12,6 +12,7 @@ import { VoiceIndicator } from "./VoiceIndicator";
 import { SkillsPanel } from "./SkillsPanel";
 import { VaultPanel } from "./VaultPanel";
 import { ChatStatusBar } from "./ChatStatusBar";
+import { TodoList } from "./TodoList";
 
 interface PanelProps {
   /** Active session only — gates ChatInput. */
@@ -39,6 +40,9 @@ interface PanelProps {
   config: AgentConfig | null;
   onAddChat: () => void;
   messages: ChatMessage[];
+  /** The active session's checklist — pinned above the composer rather than
+   *  buried in a message, so it survives the turn that created it. */
+  todos: TodoItem[];
   onSend: (text: string) => void;
   terminalTabs: string[];
   activeTerminalId: string | null;
@@ -83,6 +87,7 @@ export function Panel({
   config,
   onAddChat,
   messages,
+  todos,
   onSend,
   terminalTabs,
   activeTerminalId,
@@ -316,6 +321,9 @@ export function Panel({
       {view === "chat" && (
         <div className="flex min-h-0 flex-1 flex-col">
           <MessageList messages={messages} />
+          {/* Between the transcript and the composer, and `shrink-0`, so it
+              never competes with the transcript for scroll. */}
+          <TodoList items={todos} />
           <ErrorBanner
             message={
               status?.running === false

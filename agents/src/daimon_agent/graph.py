@@ -51,6 +51,7 @@ from .events import (
     ask_event,
     assistant_delta_event,
     compaction_event,
+    retry_event,
     step_event,
     usage_event,
 )
@@ -496,6 +497,10 @@ async def stream_model(
         except Exception as exc:
             if index == STREAM_ATTEMPTS - 1 or not _is_transient(exc):
                 raise
+            # Say so. A silent retry is indistinguishable from a hang, and the
+            # backoff is otherwise a gap with nothing in it — which is exactly
+            # what the turn's inactivity watchdog is looking for.
+            emit(retry_event(index + 2, STREAM_ATTEMPTS, f"{type(exc).__name__}: {exc}"))
             await asyncio.sleep(STREAM_BACKOFF_S[index])
     raise AssertionError("unreachable: the last attempt either returns or raises")
 

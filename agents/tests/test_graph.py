@@ -258,9 +258,23 @@ async def test_stream_retries_a_mid_stream_failure(settings, monkeypatch) -> Non
     router._pro.raise_mid_stream = 2  # fail twice, succeed on the third attempt
     graph = build_graph(settings, router, [])
 
-    state = await graph.ainvoke({"messages": [HumanMessage(content="go")]}, run_config("retry-1"))
+    events: list[dict] = []
+    from daimon_agent.emitter import set_active_emit
+
+    set_active_emit(events.append)
+    try:
+        state = await graph.ainvoke(
+            {"messages": [HumanMessage(content="go")]}, run_config("retry-1")
+        )
+    finally:
+        set_active_emit(None)
 
     assert extract_result(state["messages"]) == "survived the reset"
+    # A silent retry is indistinguishable from a hang, and the turn watchdog
+    # is watching for exactly that silence.
+    retries = [e for e in events if e.get("type") == "retry"]
+    assert [e["attempt"] for e in retries] == [2, 3]
+    assert "ConnectionError" in retries[0]["reason"]
 
 
 async def test_stream_does_not_retry_a_permanent_failure(settings) -> None:

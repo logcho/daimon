@@ -13,6 +13,8 @@ the stream identically, which is why they share the terminal slot.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
@@ -35,18 +37,77 @@ class TurnTimeoutError(TimeoutError):
     pass
 
 
-async def _stream_with_inactivity_timeout(stream: Any, timeout_s: float) -> None:
-    """Race each streamed chunk against the inactivity timeout, like legacy's
-    per-`next()` race: a long-but-progressing turn is fine as long as
-    *something* keeps arriving; only true silence trips."""
-    iterator = stream.__aiter__()
+#: How often the watchdog looks up from what it's doing. Short enough that a
+#: real stall is noticed promptly, long enough that the polling costs nothing.
+WATCHDOG_POLL_S = 1.0
+
+
+class Activity:
+    """When something last happened this turn.
+
+    A turn is alive when *events* are flowing — not when graph nodes are
+    completing. `stream_mode="updates"` yields once per node, and several nodes
+    routinely run for minutes: one model call (whose own request timeout is
+    60s), a `run_tests` capped at 120s, a fan-out of four sub-agents. All of
+    them stream deltas, step lifecycles and usage the entire time.
+
+    Timing the gap between node boundaries therefore measured the wrong thing,
+    and killed turns the user could watch working. Every emitted event stamps
+    this instead.
+    """
+
+    def __init__(self) -> None:
+        self._last = time.monotonic()
+
+    def stamp(self) -> None:
+        self._last = time.monotonic()
+
+    def idle_for(self) -> float:
+        return time.monotonic() - self._last
+
+    def tracking(self, emit: Callable[[dict], None]) -> Callable[[dict], None]:
+        """`emit` wrapped so that emitting anything counts as being alive."""
+
+        def tracked(event: dict) -> None:
+            self.stamp()
+            emit(event)
+
+        return tracked
+
+
+async def _stream_with_inactivity_timeout(
+    stream: Any, timeout_s: float, activity: Activity | None = None
+) -> None:
+    """Consume the graph stream, giving up only on genuine silence.
+
+    The stream is drained in its own task and *polled*, rather than racing each
+    `anext` against `wait_for`. That is not a style choice: `wait_for` cancels
+    the awaitable it times out, and cancelling an `anext` on a live async
+    generator leaves the generator wedged mid-step. Here a timeout cancels the
+    whole consumer, which cancels the graph run — the right response to a turn
+    that has actually stopped.
+    """
+    activity = activity or Activity()
+
+    async def drain() -> None:
+        async for _ in stream:
+            activity.stamp()  # a node finishing is activity too
+
+    # Never poll slower than half the budget, or a short timeout is noticed a
+    # whole interval late — which matters for a test, and for anyone who turns
+    # DAIMON_INACTIVITY_TIMEOUT_S down.
+    poll = min(WATCHDOG_POLL_S, max(timeout_s / 2, 0.01))
+    consumer = asyncio.create_task(drain())
     while True:
-        try:
-            await asyncio.wait_for(anext(iterator), timeout_s)
-        except asyncio.TimeoutError:
-            raise TurnTimeoutError(f"agent produced no output for {timeout_s:g}s") from None
-        except StopAsyncIteration:
+        done, _ = await asyncio.wait({consumer}, timeout=poll)
+        if consumer in done:
+            consumer.result()  # re-raises GraphRecursionError for _drive to catch
             return
+        if activity.idle_for() > timeout_s:
+            consumer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await consumer
+            raise TurnTimeoutError(f"agent produced no output for {timeout_s:g}s")
 
 
 def _pending_ask(state: Any) -> dict | None:
@@ -92,6 +153,7 @@ async def _drive(
     *,
     graph: Any,
     thinking_id: str,
+    activity: Activity,
     can_ask: bool = False,
     steps: int = 0,
 ) -> tuple[str | None, dict | None]:
@@ -114,7 +176,9 @@ async def _drive(
     while True:
         stream = graph.astream(payload, config, stream_mode="updates")
         try:
-            await _stream_with_inactivity_timeout(stream, settings.inactivity_timeout_s)
+            await _stream_with_inactivity_timeout(
+                stream, settings.inactivity_timeout_s, activity
+            )
         except GraphRecursionError:
             steps += limit
             if steps >= settings.max_steps_per_turn:
@@ -199,6 +263,11 @@ async def run_turn(
     """Run one turn and stream TaskEvents. Returns the final result string, or
     None when the turn errored or paused on a question (the terminal event
     carries the detail either way)."""
+    # Every event this turn emits — from the graph, the tools, the sub-agents —
+    # goes through this wrapper, which is what lets the watchdog below know the
+    # turn is alive without caring which node it is currently inside.
+    activity = Activity()
+    emit = activity.tracking(emit)
     set_active_emit(emit)
     usage = UsageAccumulator()
     set_active_usage(usage)
@@ -243,6 +312,7 @@ async def run_turn(
             emit,
             graph=graph,
             thinking_id=thinking_id,
+            activity=activity,
             can_ask="ask" in (capabilities or []),
         )
         if ask is not None:
@@ -286,6 +356,8 @@ async def resume_turn(
     already saw are its to keep adding to, and a resumed segment that
     re-reported the whole turn's tokens would double-count.
     """
+    activity = Activity()
+    emit = activity.tracking(emit)
     set_active_emit(emit)
     usage = UsageAccumulator()
     set_active_usage(usage)
@@ -330,6 +402,7 @@ async def resume_turn(
             emit,
             graph=graph,
             thinking_id=thinking_id,
+            activity=activity,
             can_ask=True,  # they just answered one, so they can answer another
         )
         if ask is not None:

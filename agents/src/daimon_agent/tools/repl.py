@@ -91,6 +91,18 @@ def get_repl(session_id: str, workspace_root: Path) -> ReplManager:
     return _repls[session_id]
 
 
+async def close_repl(session_id: str) -> None:
+    """Shut down one session's kernel. A kernel is a real child process, so a
+    session whose graph is evicted has to take its kernel with it."""
+    repl = _repls.pop(session_id, None)
+    if repl is None:
+        return
+    try:
+        await repl.stop()
+    except Exception:
+        pass  # teardown is best-effort; a stuck kernel must not fail a request
+
+
 async def close_all_repls() -> None:
     for repl in _repls.values():
         try:

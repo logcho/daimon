@@ -25,7 +25,7 @@ def test_defaults() -> None:
     assert s.resolved_checkpoints_db == s.resolved_workspace_dir / ".daimon" / "memory" / "checkpoints.db"
     assert s.port == 4711
     assert s.temperature == 0.0
-    assert s.inactivity_timeout_s == 60.0
+    assert s.inactivity_timeout_s == 180.0
 
 
 def test_env_overrides() -> None:
@@ -138,3 +138,16 @@ def test_memory_and_checkpoints_can_be_overridden(clean_env, tmp_path) -> None:
     )
     assert settings.resolved_memory_db == Path("/tmp/custom-memory.db")
     assert settings.resolved_checkpoints_db == Path("/tmp/custom-checkpoints.db")
+
+
+def test_inactivity_timeout_is_configurable(clean_env) -> None:
+    """It had no env name at all, so the only way to change it was to edit
+    config.py — and it was the setting most likely to need changing."""
+    s = Settings.from_env({**clean_env, "DAIMON_INACTIVITY_TIMEOUT_S": "45"})
+    assert s.inactivity_timeout_s == 45.0
+
+
+def test_inactivity_timeout_clears_the_longest_tool_timeout() -> None:
+    """A run_tests or check_code caps at 120s and emits nothing between its
+    start and end events. A budget under that kills a working turn."""
+    assert Settings().inactivity_timeout_s > 120.0
