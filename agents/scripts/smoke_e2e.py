@@ -39,9 +39,12 @@ def _emit(event: dict) -> None:
 
 async def _run(instruction: str, settings: Settings) -> str | None:
     router = ModelRouter(settings)
-    memory = MemoryStore(settings.memory_db)
+    # The resolved_* properties, not the raw fields: those default to None and
+    # the property is what computes the per-workspace path. This script predates
+    # them and had been unrunnable since.
+    memory = MemoryStore(settings.resolved_memory_db)
     tools = build_tools(settings, memory=memory, session_id="smoke")
-    checkpointer = await make_sqlite_checkpointer(settings.checkpoints_db)
+    checkpointer = await make_sqlite_checkpointer(settings.resolved_checkpoints_db)
     graph = build_graph(settings, router, tools, checkpointer=checkpointer)
     skills = discover_skills(settings.resolved_skills_dir)
     try:

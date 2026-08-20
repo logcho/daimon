@@ -24,27 +24,60 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AnyMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import (
+    AnyMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+)
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from .usage import get_active_usage
 
 # How many of the most recent messages survive verbatim under a summary.
-KEEP_LAST = 6
+# Twelve, not six: a coding hop is an assistant message plus its tool results,
+# so six covered barely two rounds of work and cut the ground out from under
+# whatever the agent was in the middle of.
+KEEP_LAST = 12
 
 #: Rough chars-per-token for the cold-start estimate (Chinese/English mix).
 CHARS_PER_TOKEN = 3.5
 
-_SUMMARY_PROMPT = """You are summarizing a conversation for the assistant's context window.
+#: A paragraph is the wrong shape for this. What replaces the dropped history
+#: is not a description of the conversation — it is the working state an agent
+#: needs to carry on: what it is doing, what it already decided, which files it
+#: touched, what is still open. Headed sections make each of those survivable
+#: on its own; prose lets the model compress away the file paths first.
+_SUMMARY_PROMPT = """You are compacting a working session so the assistant can carry on without \
+re-reading it. This is a handover, not a description.
 
-Summarize everything up to the most recent messages in one compact paragraph,
-preserving: the user's goal, facts established, tools used, and results that
-are still needed. Omit what is no longer relevant.
+Write these sections, omitting any that genuinely has no content. Be specific — \
+file paths, function names, commands, and exact values are the whole point. Do \
+not summarize away an identifier.
+
+## Goal
+What the user is ultimately trying to achieve, in their terms.
+
+## Decisions made
+Choices already settled, and why. These must not be relitigated.
+
+## Files and state touched
+Every file read or changed, by path, with what changed about it. Also any \
+kernel/shell state established.
+
+## Findings
+Facts established that the assistant would otherwise have to rediscover.
+
+## Open threads
+What is unfinished, what failed, what was deliberately deferred.
+
+## Immediate next step
+The single thing to do next.
 
 CONVERSATION SO FAR:
 {history}
 
-SUMMARY:
+HANDOVER:
 """
 
 
@@ -73,13 +106,41 @@ def context_tokens(messages: list[AnyMessage]) -> int:
     return estimate_tokens(messages)
 
 
+def projected_tokens(messages: list[AnyMessage]) -> int:
+    """The size of the request we are *about* to send.
+
+    `context_tokens` is what the provider billed for the last one, which is the
+    conversation as it stood one hop ago — it cannot see the assistant message
+    and tool results appended since. Compacting on that number means the first
+    over-threshold request always goes out anyway and the trigger only fires
+    once it comes back, which on a hop that reads three large files is exactly
+    the request you wanted to avoid.
+
+    So: take the measured number and add a character estimate of everything
+    appended since. Estimates are only ever used for the delta, never for the
+    stable prefix, which is where they were always weakest.
+    """
+    acc = get_active_usage()
+    if acc is None or acc.context_tokens <= 0:
+        return estimate_tokens(messages)
+    fresh = messages[acc.context_messages :] if acc.context_messages else []
+    return acc.context_tokens + estimate_tokens(fresh)
+
+
 def should_compact(messages: list[AnyMessage], threshold_tokens: int) -> bool:
-    return context_tokens(messages) > threshold_tokens
+    return projected_tokens(messages) > threshold_tokens
 
 
-def _history_block(messages: list[AnyMessage]) -> str:
+def _history_block(dropped: list[AnyMessage]) -> str:
+    """The messages being summarized, rendered for the summarizer.
+
+    Takes the dropped list explicitly rather than re-deriving it from
+    KEEP_LAST: `_compact_keep` extends the kept window backward for tool
+    pairing and for the newest instruction, so the two no longer agree, and a
+    message that is both summarized and kept is wasted budget.
+    """
     lines = []
-    for m in messages[:-KEEP_LAST]:
+    for m in dropped:
         role = getattr(m, "type", "message")
         content = str(getattr(m, "content", ""))
         lines.append(f"{role}: {content[:2000]}")
@@ -111,6 +172,18 @@ def _compact_keep(messages: list[AnyMessage]) -> list[AnyMessage]:
                 needed_ids -= tc_ids
                 kept.insert(0, m)
 
+    # The instruction being worked on survives verbatim, however long the tool
+    # loop has run. On a long turn it falls out of the window early, and
+    # "the user asked about the parser" is a poor stand-in for the words they
+    # actually used — those are what the rest of the turn is measured against.
+    if not any(isinstance(m, HumanMessage) for m in kept):
+        for m in reversed(messages[:-KEEP_LAST]):
+            if isinstance(m, HumanMessage):
+                # Ahead of any AIMessage pulled in above: that message answers
+                # this instruction, so it comes after it.
+                kept.insert(0, m)
+                break
+
     return kept
 
 
@@ -141,8 +214,11 @@ async def compact(
     """Summarize the old tail with flash; keep the recent messages verbatim.
     Returns None when the summary came back empty — better to carry a long
     context than to drop history for nothing."""
+    kept = _compact_keep(messages)
+    kept_ids = {id(m) for m in kept}
+    dropped = [m for m in messages if id(m) not in kept_ids]
     summary = await router.flash().ainvoke(
-        _SUMMARY_PROMPT.format(history=_history_block(messages))
+        _SUMMARY_PROMPT.format(history=_history_block(dropped))
     )
     # The summarizer is a real model call and costs real money; count it.
     from .usage import extract_usage, record
@@ -152,9 +228,13 @@ async def compact(
     summary_text = str(summary.content).strip()
     if not summary_text:
         return None
-    kept = _compact_keep(messages)
     replacement = [
-        SystemMessage(content=f"Earlier conversation summary: {summary_text}"),
+        SystemMessage(
+            content=(
+                "Handover from the earlier part of this session, which has been "
+                f"compacted away:\n\n{summary_text}"
+            )
+        ),
         *kept,
     ]
     return CompactionResult(
@@ -162,7 +242,7 @@ async def compact(
         replacement=replacement,
         before_tokens=before_tokens or estimate_tokens(messages),
         after_tokens=estimate_tokens(replacement),
-        dropped=len(messages) - len(kept),
+        dropped=len(dropped),
     )
 
 
@@ -170,7 +250,7 @@ async def compact_if_needed(
     settings: Any, router: Any, messages: list[AnyMessage]
 ) -> CompactionResult | None:
     """The agent-node entry point: None under the threshold, else a result."""
-    size = context_tokens(messages)
+    size = projected_tokens(messages)
     if size <= settings.compaction_tokens:
         return None
     return await compact(router, messages, before_tokens=size)

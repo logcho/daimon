@@ -112,3 +112,61 @@ def test_for_role_matches_the_named_roles(settings) -> None:
 def test_flash_falls_back_to_the_main_model(settings) -> None:
     router = ModelRouter(replace(settings, model="deepseek-chat", flash_model=None))
     assert router.model_name("flash") == "deepseek-chat"
+
+
+# --- the markers actually reaching the request --------------------------------
+
+def test_cache_breakpoints_land_on_system_and_the_newest_instruction() -> None:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from daimon_agent.graph import with_prompt_cache
+
+    out = with_prompt_cache(
+        "the rules",
+        [
+            HumanMessage(content="first turn"),
+            AIMessage(content="answered"),
+            HumanMessage(content="second turn"),
+        ],
+    )
+
+    system = out[0]
+    assert isinstance(system, SystemMessage)
+    assert system.content[0]["cache_control"] == {"type": "ephemeral"}
+    assert system.content[0]["text"] == "the rules"
+
+    marked = [
+        m for m in out[1:]
+        if isinstance(m.content, list) and m.content[0].get("cache_control")
+    ]
+    assert len(marked) == 1
+    assert marked[0].content[0]["text"] == "second turn"  # the newest, not the first
+
+
+async def test_the_graph_marks_the_prompt_only_for_providers_that_want_it(settings) -> None:
+    """The capability check existed with a passing unit test and zero call
+    sites, so Anthropic runs paid full price for the system prompt and every
+    tool schema on every hop."""
+    from dataclasses import replace
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from daimon_agent.graph import build_graph, run_config
+
+    from fakes import FakeRouter
+
+    async def system_message_for(provider: str):
+        router = FakeRouter()
+        graph = build_graph(replace(settings, provider=provider), router, [])
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="hi")]}, run_config(f"cache-{provider}")
+        )
+        sent = router._pro.calls[0]
+        return next(m for m in sent if isinstance(m, SystemMessage))
+
+    anthropic = await system_message_for("anthropic")
+    assert isinstance(anthropic.content, list)
+    assert anthropic.content[0]["cache_control"] == {"type": "ephemeral"}
+
+    deepseek = await system_message_for("deepseek")
+    assert isinstance(deepseek.content, str)  # markers here would be a 400

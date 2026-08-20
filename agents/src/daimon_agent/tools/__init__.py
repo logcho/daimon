@@ -76,6 +76,16 @@ class FilePathArgs(BaseModel):
     file_path: str = Field(description="Path relative to the workspace root, or an absolute path inside it")
 
 
+class ReadArgs(BaseModel):
+    file_path: str = Field(description="Path relative to the workspace root, or an absolute path inside it")
+    offset: str = Field(
+        default="", description="1-indexed line to start at. Empty starts at the top."
+    )
+    limit: str = Field(
+        default="", description="How many lines to read. Empty reads the whole file."
+    )
+
+
 class WriteArgs(BaseModel):
     file_path: str = Field(description="Path relative to the workspace root, or an absolute path inside it")
     content: str = Field(description="The full content to write")
@@ -364,14 +374,14 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
 
     # ---- workspace files -------------------------------------------------
 
-    def read_file(file_path: str) -> str:
-        return _files.read_file(conf, file_path)
+    def read_file(file_path: str, offset: str = "", limit: str = "") -> str:
+        return _files.read_file(conf, file_path, offset, limit, session_id)
 
     def write_file(file_path: str, content: str) -> str:
-        return _files.write_file(conf, file_path, content)
+        return _files.write_file(conf, file_path, content, session_id)
 
     def edit_file(file_path: str, old_text: str, new_text: str) -> str:
-        return _files.edit_file(conf, file_path, old_text, new_text)
+        return _files.edit_file(conf, file_path, old_text, new_text, session_id)
 
     def glob_files(pattern: str) -> str:
         return _files.glob_files(conf, pattern)
@@ -760,21 +770,29 @@ def build_tools(settings: Any, *, memory: MemoryStore | None = None, session_id:
         ),
         _tool(
             "read_file",
-            "Read a file from the workspace. Paths are relative to the workspace root; "
-            "anything resolving outside it is blocked.",
-            FilePathArgs,
+            "Read a file from the workspace, with line numbers. Paths are relative to the "
+            "workspace root; anything resolving outside it is blocked. Long files come back "
+            "one page at a time — the footer tells you the offset to pass for the next page. "
+            "The line numbers are display only: quote lines straight into edit_file and the "
+            "numbering is stripped for you.",
+            ReadArgs,
             read_file,
         ),
         _tool(
             "write_file",
-            "Write (or overwrite) a file in the workspace. Creates parent directories as needed.",
+            "Write (or overwrite) a file in the workspace. Creates parent directories as "
+            "needed. Overwriting an existing file requires having read it in this session "
+            "first — otherwise you don't know what you're discarding. For a targeted change "
+            "to an existing file, prefer edit_file.",
             WriteArgs,
             write_file,
         ),
         _tool(
             "edit_file",
-            "Replace one occurrence of exact text in a workspace file. Use read_file first to get "
-            "the exact content — the match must be byte-identical.",
+            "Replace one occurrence of exact text in a workspace file. Read the file first: "
+            "the match must be byte-identical, an edit is refused outright on a file you "
+            "haven't read, and it is refused again if the file changed on disk since you read "
+            "it. old_text must be unique in the file — include surrounding lines until it is.",
             EditArgs,
             edit_file,
         ),

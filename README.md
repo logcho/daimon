@@ -20,7 +20,7 @@ A Jarvis-style general-purpose assistant for your own computer — ambient, on-d
 cd agents
 uv sync                          # creates .venv
 uv sync --extra anthropic        # optional: adds the Anthropic provider
-uv run pytest tests              # 413 pass (2 browser tests need a live PinchTab)
+uv run pytest tests              # 526 pass (2 browser tests need a live PinchTab)
 ```
 
 Configuration lives in `agents/.env` (copy `.env.example`). **API keys go there** — never in chat or in the repo. Running `uv run daimon` with no key configured starts a short setup: pick a provider, paste its key (masked, and never echoed into the transcript), choose your models from what that provider actually offers.
@@ -60,6 +60,12 @@ A full-screen interface: the transcript scrolls in its own pane, in-flight work 
 Scrolling up to read something keeps you there while output arrives; submitting anything snaps back to the newest.
 
 Long tasks run unattended. The graph's step cap is a loop guard, not a budget, so hitting it shows a `↻ continuing` line rather than stopping — `DAIMON_MAX_STEPS` is the real ceiling, and reaching it makes the agent ask whether to keep going.
+
+#### Standing instructions
+
+Write a `DAIMON.md` in a project's root and the agent reads it every turn — how to run the tests, where the source lives, what not to touch. A repo that already has an `AGENTS.md` or `CLAUDE.md` is read instead, so nothing needs duplicating under a third name. `~/.daimon/DAIMON.md` holds instructions that follow you everywhere and is read first, with the project's file taking precedence over it.
+
+Both sit in the per-turn tail alongside the date and the skill index, never in the rules prefix — that prefix has to stay byte-identical for the providers' prompt caches to hit.
 
 #### Skills
 

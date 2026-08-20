@@ -18,6 +18,17 @@ import json
 # subagents it spawns do their own (subgraph-bounded) web work.
 RESEARCH_TOOLS = frozenset({"web_search", "open_url", "read_page", "web_fetch", "research"})
 RESEARCH_TOOL_BUDGET = 10
+
+#: Tools the exact-repeat check skips. A resubmitted todo list is a no-op, not
+#: a loop, and warning about it would be pure noise.
+#:
+#: Nothing else needs to be here. Tools whose answer depends on the workspace
+#: (run_shell, read_file, run_tests) look repetitive but aren't: re-running the
+#: suite after a fix is the *correct* move. The graph handles that by clearing
+#: the non-research call log whenever a mutating tool executes — the world
+#: changed, so asking again is meaningful — rather than by exempting them here
+#: and losing the guard entirely.
+REPEAT_EXEMPT = frozenset({"update_todos"})
 NEAR_DUPLICATE_THRESHOLD = 0.6
 
 REPEAT_WARNING = (

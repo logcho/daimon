@@ -6,7 +6,11 @@ DeepSeek's prefix cache hits), with per-task memory/skills appended after.
 
 from __future__ import annotations
 
+import platform
+import subprocess
+import time
 from datetime import datetime
+from pathlib import Path
 
 from .config import Settings
 
@@ -18,10 +22,15 @@ search, and an optional background browser.
 Use file tools for file and directory operations — they are your primary tools for creating, \
 reading, editing, and navigating the project. read_file, write_file, edit_file, glob_files, and \
 grep_files operate on the workspace only — a path outside it will be blocked. Use edit_file for \
-targeted changes (its exact-match replaces one occurrence); use write_file for new files or \
-complete rewrites. Always read_file before edit_file so the old_text matches exactly. \
-mkdir creates directories, list_directory shows directory contents, delete_file removes files, \
-and move_file moves or renames files — all within the workspace.
+targeted changes; use write_file for new files or complete rewrites.
+
+Read a file before you change it. This is enforced, not advisory: edit_file refuses on a file you \
+haven't read this session, refuses again if the file changed on disk since you read it, and \
+refuses when old_text matches more than one place — include surrounding lines until it is unique. \
+write_file refuses to overwrite an existing file you haven't read. read_file numbers the lines and \
+pages long files; the numbers are display only, so you can quote lines straight back into \
+edit_file. mkdir creates directories, list_directory shows directory contents, delete_file removes \
+files, and move_file moves or renames files — all within the workspace.
 
 # The vault (the user's notes)
 The vault is where the user's notes live, and it is a different place from the workspace. When \
@@ -140,6 +149,149 @@ of yours has been approved, and tells you so. If you find yourself reading that 
 plan rather than trying a different tool."""
 
 
+#: How long a git probe is reused. Re-shelling out on every hop of a turn buys
+#: nothing — the branch does not change mid-turn, and the dirty flag changing
+#: has no bearing on what the agent should do next.
+_GIT_TTL_S = 30.0
+_git_cache: dict[str, tuple[float, str]] = {}
+
+
+def _git(root: Path, *args: str) -> str:
+    """One git command, or "" for anything that isn't a clean success. Not
+    being in a repo is the common case, not an error."""
+    try:
+        done = subprocess.run(
+            ["git", *args],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _git_line(root: Path) -> str:
+    key = str(root)
+    cached = _git_cache.get(key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _GIT_TTL_S:
+        return cached[1]
+
+    # `--show-current` first: it answers in a repo that has no commits yet,
+    # where rev-parse fails outright because there is no HEAD to resolve. It
+    # returns empty on a detached HEAD, which is what the fallback covers.
+    branch = _git(root, "branch", "--show-current") or _git(
+        root, "rev-parse", "--abbrev-ref", "HEAD"
+    )
+    line = ""
+    if branch:
+        dirty = bool(_git(root, "status", "--porcelain"))
+        line = f"Git branch: {branch}" + (" (uncommitted changes)" if dirty else " (clean)")
+    _git_cache[key] = (now, line)
+    return line
+
+
+def environment_block(settings: Settings) -> str:
+    """Where the agent is. Four lines it would otherwise spend tool calls
+    rediscovering at the start of every session — and often doesn't, which is
+    how you get a note written into whatever directory the CLI was launched
+    from."""
+    root = Path(settings.resolved_workspace_dir)
+    lines = [
+        "# Environment",
+        f"Workspace (file tools, shell, and the kernel all work here): {root}",
+        f"Vault (where notes go): {Path(settings.vault_dir)}",
+        f"Platform: {platform.system()} {platform.release()}",
+    ]
+    git = _git_line(root)
+    if git:
+        lines.append(git)
+    return "\n".join(lines)
+
+
+#: Project instruction files, most specific first. DAIMON.md is ours; the other
+#: two are read because a repo that already has one has already written down
+#: what an agent working here needs to know, and asking the user to duplicate it
+#: under a third name would be a poor trade.
+PROJECT_CONTEXT_FILES = ("DAIMON.md", "AGENTS.md", "CLAUDE.md")
+
+#: Cap on the combined project context. A file past this is being used as
+#: documentation rather than as instructions, and it is displacing the
+#: conversation to no purpose.
+MAX_PROJECT_CONTEXT_CHARS = 16_000
+
+_context_cache: dict[str, tuple[float, str]] = {}
+
+
+def _read_context_file(path: Path) -> str:
+    try:
+        if not path.is_file():
+            return ""
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return ""
+    cached = _context_cache.get(str(path))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        text = ""
+    _context_cache[str(path)] = (stamp, text)
+    return text
+
+
+def project_context(settings: Settings) -> str:
+    """Standing instructions for this machine and this project.
+
+    Two sources, global first so the project can override it in the same way a
+    project config beats a global one: `~/.daimon/DAIMON.md` follows the user
+    everywhere, and the first of DAIMON.md / AGENTS.md / CLAUDE.md found in the
+    workspace root travels with the repo.
+
+    This is the piece the harness was missing entirely. Conventions the user
+    has already written down — how to run the tests, which directory the source
+    lives in, what not to touch — were rediscovered by reading, every session,
+    or more often simply not discovered at all.
+    """
+    parts: list[tuple[str, str]] = []
+
+    global_file = Path(settings.resolved_global_context)
+    home = _read_context_file(global_file)
+    if home:
+        parts.append((f"{global_file.name} (global)", home))
+
+    root = Path(settings.resolved_workspace_dir)
+    for name in PROJECT_CONTEXT_FILES:
+        text = _read_context_file(root / name)
+        if text:
+            parts.append((name, text))
+            break  # most specific wins; two of them would just contradict
+
+    if not parts:
+        return ""
+
+    sections = [
+        "# Standing instructions",
+        "",
+        "Written down by the user for this machine and this project. They take "
+        "precedence over your own defaults, and over any general guidance above "
+        "that they contradict.",
+    ]
+    budget = MAX_PROJECT_CONTEXT_CHARS
+    for source, text in parts:
+        if budget <= 0:
+            break
+        body = text[:budget]
+        if len(body) < len(text):
+            body += f"\n\n… (truncated at {MAX_PROJECT_CONTEXT_CHARS:,} characters)"
+        budget -= len(body)
+        sections.append(f"\n## From {source}\n\n{body}")
+    return "\n".join(sections)
+
+
 def date_line() -> str:
     """Local date in one unambiguous line, so relative dates ("Friday", "in
     two weeks") resolve against the user's own machine — the era-1 `new
@@ -171,9 +323,17 @@ def build_system_prompt(
     reach the model through the `recall` tool, which the agent calls when it
     decides it needs them — injecting them into every prompt would pay for
     them on every turn whether or not they're relevant.
+
+    The environment and standing-instruction blocks go in the *tail*, with the
+    date and the skills index, and never in the prefix. They change when the
+    user switches branch or edits DAIMON.md, and a prefix that changes is a
+    prefix that never caches.
     """
     prefix = f"{DAIMON_RULES}\n\n{PLAN_MODE_RULES}" if mode == "plan" else DAIMON_RULES
-    parts = [prefix, date_line_text or date_line()]
+    parts = [prefix, date_line_text or date_line(), environment_block(settings)]
+    context = project_context(settings)
+    if context:
+        parts.append(context)
     if skills_block:
         parts.append(skills_block)
     return "\n\n".join(parts)

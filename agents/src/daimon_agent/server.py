@@ -48,6 +48,7 @@ from .run import resume_turn, run_turn
 from .skills.injector import discover_skills
 from .skills.registry import RegistryError, SkillRegistry, install_bundle
 from .tools import build_tools
+from .tools.files import forget_reads
 from .tools.repl import close_all_repls
 from .tools.search import aclose_search_provider
 from .tools.web import aclose_web_fetcher
@@ -338,6 +339,10 @@ async def create_app(
         await aclose_web_fetcher()
         await aclose_search_provider()
         await close_all_repls()
+        # The read registry is process-lived like the kernels, and outlives the
+        # files it describes — a stale stamp would refuse an edit on the next
+        # run for a change that happened while nothing was watching.
+        forget_reads()
         app["memory"].close()
         await _stop_pinchtab()
         pidfile = app.get("pidfile")

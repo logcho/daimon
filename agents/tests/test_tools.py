@@ -176,3 +176,241 @@ async def test_agent_cannot_choose_project_scope(settings, tmp_path) -> None:
     })
     assert (cfg.resolved_skills_dir / "sneaky" / "SKILL.md").is_file(), out
     assert not (cfg.project_skills_dir / "sneaky").exists(), out
+
+
+# --- search that stays inside the project ------------------------------------
+
+def test_grep_prunes_ignored_directories(settings, tmp_path) -> None:
+    """A workspace with a .venv used to be walked in full: rglob cannot prune,
+    so every vendored file was opened and decoded before being filtered out."""
+    from daimon_agent.tools.files import grep_files
+    from daimon_agent.workspace import Confinement
+
+    root = tmp_path / "ws"
+    (root / ".venv" / "lib").mkdir(parents=True)
+    (root / "node_modules").mkdir()
+    (root / "src").mkdir()
+    (root / ".venv" / "lib" / "vendored.py").write_text("NEEDLE in a vendored file\n")
+    (root / "node_modules" / "dep.js").write_text("NEEDLE in a dependency\n")
+    (root / "src" / "mine.py").write_text("NEEDLE in my own code\n")
+
+    out = grep_files(Confinement(root), "NEEDLE", "")
+
+    assert "src/mine.py" in out
+    assert ".venv" not in out
+    assert "node_modules" not in out
+
+
+def test_grep_caps_total_matches_not_matches_per_file(settings, tmp_path) -> None:
+    """The cap used to sit in the outer per-file loop, so one file with
+    thousands of hits returned every one of them."""
+    from daimon_agent.tools.files import MAX_RESULTS, grep_files
+    from daimon_agent.workspace import Confinement
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "big.txt").write_text("\n".join(f"NEEDLE {i}" for i in range(500)))
+
+    out = grep_files(Confinement(root), "NEEDLE", "")
+    body, _, note = out.partition("\n…(")
+
+    assert len(body.splitlines()) == MAX_RESULTS
+    assert "more remain" in note
+
+
+def test_grep_can_search_a_single_file(settings, tmp_path) -> None:
+    """file_path naming a file used to be walked as a directory, which yields
+    nothing — so the narrowing move the truncation note recommends silently
+    returned 'no matches'."""
+    from daimon_agent.tools.files import grep_files
+    from daimon_agent.workspace import Confinement
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "a.py").write_text("NEEDLE here\n")
+    (root / "b.py").write_text("NEEDLE there\n")
+
+    out = grep_files(Confinement(root), "NEEDLE", "a.py")
+
+    assert "a.py:1" in out
+    assert "b.py" not in out
+
+
+def test_grep_skips_binary_files(settings, tmp_path) -> None:
+    from daimon_agent.tools.files import grep_files
+    from daimon_agent.workspace import Confinement
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "image.bin").write_bytes(b"\x00\x01NEEDLE\x00")
+    (root / "text.txt").write_text("NEEDLE\n")
+
+    out = grep_files(Confinement(root), "NEEDLE", "")
+
+    assert "text.txt" in out
+    assert "image.bin" not in out
+
+
+def test_glob_prunes_ignored_directories(settings, tmp_path) -> None:
+    from daimon_agent.tools.files import glob_files
+    from daimon_agent.workspace import Confinement
+
+    root = tmp_path / "ws"
+    (root / ".venv").mkdir(parents=True)
+    (root / "src").mkdir()
+    (root / ".venv" / "vendored.py").write_text("x")
+    (root / "src" / "mine.py").write_text("x")
+
+    out = glob_files(Confinement(root), "*.py")
+
+    assert out == "src/mine.py"
+
+
+# --- read before you write ----------------------------------------------------
+
+@pytest.fixture
+def ws(tmp_path):
+    """A confined workspace plus a clean read registry."""
+    from daimon_agent.tools.files import forget_reads
+    from daimon_agent.workspace import Confinement
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    forget_reads()
+    yield Confinement(root)
+    forget_reads()
+
+
+def test_editing_an_unread_file_is_refused(ws) -> None:
+    """The old_text is a guess until the agent has actually looked. The prompt
+    always said 'read first'; nothing enforced it."""
+    from daimon_agent.tools.files import edit_file
+
+    (ws.root / "a.py").write_text("x = 1\n")
+
+    out = edit_file(ws, "a.py", "x = 1", "x = 2", "s1")
+
+    assert "have not read it" in out
+    assert (ws.root / "a.py").read_text() == "x = 1\n"  # untouched
+
+
+def test_read_then_edit_goes_through(ws) -> None:
+    from daimon_agent.tools.files import edit_file, read_file
+
+    (ws.root / "a.py").write_text("x = 1\n")
+    read_file(ws, "a.py", session_id="s1")
+
+    out = edit_file(ws, "a.py", "x = 1", "x = 2", "s1")
+
+    assert "replaced one occurrence" in out
+    assert (ws.root / "a.py").read_text() == "x = 2\n"
+
+
+def test_an_out_of_band_change_invalidates_the_read(ws) -> None:
+    """Something else wrote to the file — a shell command, the kernel, the
+    user. Editing against the stale copy would silently discard it."""
+    import os
+
+    from daimon_agent.tools.files import edit_file, read_file
+
+    path = ws.root / "a.py"
+    path.write_text("x = 1\n")
+    read_file(ws, "a.py", session_id="s1")
+
+    path.write_text("x = 1\ny = 2\n")
+    os.utime(path, (0, 0))  # make the change unmistakable to stat()
+
+    out = edit_file(ws, "a.py", "x = 1", "x = 2", "s1")
+
+    assert "changed on disk" in out
+    assert path.read_text() == "x = 1\ny = 2\n"  # the other change survives
+
+
+def test_a_second_edit_after_the_first_is_allowed(ws) -> None:
+    """A successful edit refreshes the stamp — otherwise the agent's own write
+    would lock it out of the next one."""
+    from daimon_agent.tools.files import edit_file, read_file
+
+    (ws.root / "a.py").write_text("x = 1\ny = 2\n")
+    read_file(ws, "a.py", session_id="s1")
+
+    assert "replaced" in edit_file(ws, "a.py", "x = 1", "x = 9", "s1")
+    assert "replaced" in edit_file(ws, "a.py", "y = 2", "y = 8", "s1")
+    assert (ws.root / "a.py").read_text() == "x = 9\ny = 8\n"
+
+
+def test_ambiguous_old_text_is_refused(ws) -> None:
+    """Replacing the first of several is a coin flip about which one was meant."""
+    from daimon_agent.tools.files import edit_file, read_file
+
+    (ws.root / "a.py").write_text("call()\ncall()\n")
+    read_file(ws, "a.py", session_id="s1")
+
+    out = edit_file(ws, "a.py", "call()", "other()", "s1")
+
+    assert "appears 2 times" in out
+    assert (ws.root / "a.py").read_text() == "call()\ncall()\n"
+
+
+def test_blind_overwrite_of_an_existing_file_is_refused(ws) -> None:
+    from daimon_agent.tools.files import write_file
+
+    (ws.root / "a.py").write_text("months of work\n")
+
+    out = write_file(ws, "a.py", "clobbered", "s1")
+
+    assert "Refusing to overwrite" in out
+    assert (ws.root / "a.py").read_text() == "months of work\n"
+
+
+def test_a_new_file_needs_no_prior_read(ws) -> None:
+    from daimon_agent.tools.files import edit_file, write_file
+
+    assert "Wrote" in write_file(ws, "new.py", "fresh\n", "s1")
+    # And writing it counts as having seen it, so an immediate edit works.
+    assert "replaced" in edit_file(ws, "new.py", "fresh", "changed", "s1")
+
+
+def test_the_registry_is_per_session(ws) -> None:
+    from daimon_agent.tools.files import edit_file, read_file
+
+    (ws.root / "a.py").write_text("x = 1\n")
+    read_file(ws, "a.py", session_id="s1")
+
+    assert "have not read it" in edit_file(ws, "a.py", "x = 1", "x = 2", "s2")
+
+
+# --- paging and line numbers --------------------------------------------------
+
+def test_read_file_numbers_lines_and_pages(ws) -> None:
+    from daimon_agent.tools.files import read_file
+
+    (ws.root / "big.py").write_text("\n".join(f"line {i}" for i in range(1, 101)))
+
+    page = read_file(ws, "big.py", offset="10", limit="3", session_id="s1")
+
+    assert "  10→line 10" in page
+    assert "  12→line 12" in page
+    assert "line 13" not in page
+    assert "offset=13" in page  # how to get the rest
+
+
+def test_edit_accepts_text_quoted_back_with_its_line_numbers(ws) -> None:
+    """The most natural thing for a model to do with a numbered read is paste
+    the lines straight back. Without stripping the gutter that never matches."""
+    from daimon_agent.tools.files import edit_file, read_file
+
+    (ws.root / "a.py").write_text("alpha\nbeta\n")
+    read_file(ws, "a.py", session_id="s1")
+
+    out = edit_file(ws, "a.py", "   1→alpha", "   1→omega", "s1")
+
+    assert "replaced one occurrence" in out
+    assert (ws.root / "a.py").read_text() == "omega\nbeta\n"
+
+
+def test_read_past_the_end_says_so(ws) -> None:
+    from daimon_agent.tools.files import read_file
+
+    (ws.root / "a.py").write_text("one\ntwo\n")
+    assert "past the end" in read_file(ws, "a.py", offset="99", session_id="s1")

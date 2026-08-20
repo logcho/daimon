@@ -35,6 +35,7 @@ class Settings:
     memory_db: Path | None = None  # defaults to resolved_workspace_dir/.daimon/memory/daimon.db
     checkpoints_db: Path | None = None  # defaults to resolved_workspace_dir/.daimon/memory/checkpoints.db
     skills_dir: Path | None = None  # defaults to vault_dir / "skills"
+    global_context: Path | None = None  # defaults to ~/.daimon/DAIMON.md
 
     #: Seconds a server may sit with no active turns before it self-terminates
     #: (SIGTERM). A per-workspace server has nothing else watching it once the
@@ -115,6 +116,17 @@ class Settings:
         return self.skills_dir or (Path.home() / ".daimon" / "skills")
 
     @property
+    def resolved_global_context(self) -> Path:
+        """Standing instructions that follow the user everywhere.
+
+        Beside the global skill library, and global for the same reason: it must
+        not depend on cwd, the workspace, or the vault. `DAIMON_GLOBAL_CONTEXT`
+        overrides it — which is also what keeps a test run from reading the
+        developer's own file.
+        """
+        return self.global_context or (Path.home() / ".daimon" / "DAIMON.md")
+
+    @property
     def registry_cache_dir(self) -> Path:
         """Cached registry/GitHub responses. Lives beside the databases because
         it is derived data — deleting it costs a re-fetch, nothing else."""
@@ -185,6 +197,9 @@ class Settings:
             memory_db=Path(get("DAIMON_MEMORY_DB")) if get("DAIMON_MEMORY_DB") else None,
             checkpoints_db=Path(get("DAIMON_CHECKPOINTS_DB")) if get("DAIMON_CHECKPOINTS_DB") else None,
             skills_dir=Path(get("DAIMON_SKILLS_DIR")) if get("DAIMON_SKILLS_DIR") else None,
+            global_context=(
+                Path(get("DAIMON_GLOBAL_CONTEXT")) if get("DAIMON_GLOBAL_CONTEXT") else None
+            ),
             pinchtab_base=get("PINCHTAB_BASE") or "http://127.0.0.1:9867",
             pinchtab_token=get("PINCHTAB_TOKEN"),
             port=int(get("PORT") or "4711"),

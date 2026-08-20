@@ -38,6 +38,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         "ANTHROPIC_API_KEY", "ANTHROPIC_API_BASE",
         "DAIMON_VAULT_DIR", "DAIMON_WORKSPACE_DIR",
         "DAIMON_MEMORY_DB", "DAIMON_CHECKPOINTS_DB", "DAIMON_SKILLS_DIR",
+        "DAIMON_GLOBAL_CONTEXT",
         "PINCHTAB_BASE", "PINCHTAB_TOKEN", "PORT", "DAIMON_LIVE_FRAMES", "TAVILY_API_KEY",
         "DAIMON_RECURSION_LIMIT", "DAIMON_MAX_STEPS", "DAIMON_COMPACTION_TOKENS",
         "DAIMON_COMPACTION_CHARS", "DAIMON_CONTEXT_WINDOW", "DAIMON_PRICES",
@@ -70,6 +71,10 @@ def settings(clean_env: dict[str, str], tmp_path: Path) -> Settings:
             **clean_env,
             "DAIMON_VAULT_DIR": str(vault),
             "DAIMON_SKILLS_DIR": str(tmp_path / "skills"),
+            # Same reasoning as the skills dir: without pinning it, every test
+            # that builds a prompt would read the developer's own standing
+            # instructions and behave differently on their machine than in CI.
+            "DAIMON_GLOBAL_CONTEXT": str(tmp_path / "DAIMON.md"),
             "DAIMON_MEMORY_DB": str(tmp_path / "memory" / "daimon.db"),
             "DAIMON_CHECKPOINTS_DB": str(tmp_path / "memory" / "checkpoints.db"),
         }

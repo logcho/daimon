@@ -199,6 +199,15 @@ class UsageAccumulator:
     #: Input tokens of the most recent main-agent call — the live context size,
     #: which is what a context-usage indicator actually wants to show.
     context_tokens: int = 0
+    #: How many conversation messages that call carried. `context_tokens` is a
+    #: measurement of the prompt as it was one hop ago; pairing it with the
+    #: count lets compaction estimate what has been appended since, and so
+    #: compact *before* an over-budget request goes out rather than after.
+    context_messages: int = 0
+
+    def note_context_messages(self, count: int) -> None:
+        """Record the conversation length behind the next `context_tokens`."""
+        self.context_messages = count
 
     def add(self, usage: CallUsage, *, is_context: bool = False) -> None:
         self.calls += 1
@@ -265,6 +274,14 @@ def record(usage: CallUsage | None, *, is_context: bool = False) -> None:
     acc = _active.get()
     if acc is not None:
         acc.add(usage, is_context=is_context)
+
+
+def note_context_messages(count: int) -> None:
+    """Companion to `record` for the conversation length. A no-op outside a
+    turn, for the same reason."""
+    acc = _active.get()
+    if acc is not None:
+        acc.note_context_messages(count)
 
 
 def format_tokens(n: int) -> str:

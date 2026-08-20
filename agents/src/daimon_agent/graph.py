@@ -59,13 +59,15 @@ from .guardrails import (
     check_page_unchanged,
     check_repeat,
     check_research_budget,
+    REPEAT_EXEMPT,
     RESEARCH_TOOLS,
 )
 from .model import ModelRouter
 from .prompts import build_system_prompt
+from .providers import supports_prompt_cache_control
 from .state import AgentState
 from .tools.ask import ASK_TOOLS, parse_options
-from .usage import extract_usage, record
+from .usage import extract_usage, note_context_messages, record
 from collections.abc import Callable
 
 # Era-1 value, kept.
@@ -105,6 +107,28 @@ MUTATING_TOOLS = frozenset({
     "run_shell", "kernel_execute", "save_skill", "stage_terminal_command",
 })
 
+MALFORMED_CALL = (
+    "{tool} was not run: its arguments did not parse ({error}). Every argument in "
+    "this tool set is a flat string — no nested objects, no trailing commas, no "
+    "unquoted values. Re-issue the call with valid JSON, or use a different tool."
+)
+
+#: Tools that may run at the same time as their neighbours. Strictly read-only:
+#: they touch no shared mutable state, so two of them in flight together cannot
+#: observe each other.
+#:
+#: What is deliberately absent matters more than what is here. RESEARCH_TOOLS
+#: stay sequential because their budget and duplicate-detection bookkeeping is
+#: order-dependent. `kernel_execute` and `run_shell` stay sequential because
+#: they share a kernel and a filesystem. Every MUTATING_TOOLS entry stays
+#: sequential by definition.
+CONCURRENT_SAFE_TOOLS = frozenset({
+    "read_file", "glob_files", "grep_files", "list_directory",
+    "read_note", "list_notes",
+    "read_skill", "list_skills",
+    "recall",
+})
+
 PLAN_REQUIRED = (
     "Plan mode is on and you have not had a plan approved yet, so {tool} did not "
     "run and nothing was changed. Call present_plan with what you intend to do — "
@@ -125,6 +149,33 @@ def _tool_result_text(content: Any) -> str:
                 parts.append(str(block))
         return "\n".join(parts)
     return str(content)
+
+
+#: Ceiling on any single tool result, in characters. Individual tools have
+#: their own limits — 40k for a file read, 8k for a shell command, 12k for a
+#: web fetch — but they are inconsistent, and several tools (a note, a skill,
+#: a registry search) had none at all. Those are the ones that surprise you: a
+#: 200KB note read into a 60k-token budget is a wasted turn. This is the
+#: backstop under all of them, applied where every result passes through.
+MAX_TOOL_RESULT_CHARS = 25_000
+
+
+def clip_result(text: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """Cut an oversized tool result, saying what was cut and what to do about it.
+
+    The message matters as much as the cut. A result that simply stops invites
+    the model to run the same call again and hope; naming the narrowing move
+    points it at the tool arguments instead.
+    """
+    if len(text) <= limit:
+        return text
+    dropped = len(text) - limit
+    return (
+        text[:limit]
+        + f"\n\n… ({dropped:,} more characters were cut here. Narrow the request — a "
+        f"line range, a subdirectory, a more specific query — rather than repeating "
+        f"this call unchanged.)"
+    )
 
 
 #: Per-tool, the argument worth showing next to the tool name. First match
@@ -185,6 +236,10 @@ def sanitize_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
       to a preceding message with 'tool_calls'". Repaired by dropping them.
     - **Duplicate responses.** Two results for one call id. Same rejection.
       Repaired by keeping the first.
+    - **Malformed calls.** The model emitted unparseable arguments, so the call
+      landed in `invalid_tool_calls` rather than `tool_calls` and the tools node
+      never answered it. Repaired the same way as an unanswered call, because
+      the API cannot tell the two apart.
 
     This runs before every model call *and* before compaction persists its
     result. The second one matters more than it looks: compaction now rewrites
@@ -223,8 +278,17 @@ def sanitize_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
 
         close_batch()
         repaired.append(msg)
-        if isinstance(msg, AIMessage) and msg.tool_calls:
-            open_calls = {call["id"]: None for call in msg.tool_calls}
+        if isinstance(msg, AIMessage) and (msg.tool_calls or msg.invalid_tool_calls):
+            # invalid_tool_calls count as open calls. The OpenAI-compatible
+            # serializer emits them into the request's `tool_calls` array
+            # alongside the valid ones, so a stored AIMessage carrying one that
+            # nothing answered makes every future request in the session
+            # invalid — not just the turn it happened on.
+            open_calls = {
+                call["id"]: None
+                for call in [*msg.tool_calls, *msg.invalid_tool_calls]
+                if call.get("id")
+            }
 
     close_batch()
     return repaired
@@ -232,6 +296,61 @@ def sanitize_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
 
 #: Old name, kept because the behaviour it described is a subset of this one.
 _repair_orphaned_tool_calls = sanitize_messages
+
+
+def with_prompt_cache(system_prompt: str, messages: list[AnyMessage]) -> list[AnyMessage]:
+    """The model-call message list with explicit cache breakpoints.
+
+    Anthropic caches everything *before* a `cache_control` marker, and orders a
+    request tools → system → messages. So two markers cover the two things that
+    are stable and expensive:
+
+    - **On the system prompt**, which caches the tool schemas with it. That is
+      the single largest fixed cost in every request — forty-odd schemas plus
+      the rules text, re-sent on every hop of every turn.
+    - **On the newest user instruction**, which caches the whole conversation
+      that precedes it. That prefix only ever grows, so each turn re-reads what
+      the last one paid to write.
+
+    Not marked: the tool results accumulating *after* the instruction within a
+    turn. A rolling marker there would cache those too, but it means writing
+    `cache_control` into tool_result blocks, and the extra write on every hop
+    is not obviously cheaper than the read it saves.
+
+    DeepSeek never comes through here — it caches its prefix automatically,
+    which is what `prompts.py`'s frozen-prefix layout is built for. Marking a
+    provider that doesn't want markers is how you get a 400.
+    """
+    out: list[AnyMessage] = [
+        SystemMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        ),
+        *messages,
+    ]
+    for index in range(len(out) - 1, 0, -1):
+        message = out[index]
+        # String content only: a message already carrying content blocks has
+        # been shaped by something else, and re-wrapping it would drop whatever
+        # that was.
+        if isinstance(message, HumanMessage) and isinstance(message.content, str):
+            out[index] = HumanMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": message.content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                id=message.id,
+            )
+            break
+    return out
 
 
 def _chunk_reasoning(chunk: Any) -> str:
@@ -283,6 +402,49 @@ def _as_message(final: AIMessageChunk) -> AIMessage:
     )
 
 
+#: Attempts per model call, and the backoff between them. Deliberately small:
+#: this covers a blip — a reset connection, a 503, a rate limit — not an
+#: outage. The provider client's own `max_retries` only covers establishing the
+#: request; a stream that dies after the first chunk is ours to handle.
+STREAM_ATTEMPTS = 3
+STREAM_BACKOFF_S = (1.0, 2.0)
+
+
+def _status_code(exc: BaseException) -> int | None:
+    """The HTTP status behind a provider exception, wherever it hides."""
+    for attr in ("status_code", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    value = getattr(getattr(exc, "response", None), "status_code", None)
+    return value if isinstance(value, int) else None
+
+
+#: Exception family names that mean "the network misbehaved". Matched by name
+#: rather than by type because the real classes live in httpx, openai, and
+#: anthropic — and a DeepSeek-only install must not have to import anthropic's
+#: exception tree to decide whether to retry.
+_TRANSIENT_MARKERS = (
+    "timeout", "connection", "connect", "remoteprotocol", "readerror",
+    "internalserver", "serviceunavailable", "overloaded", "ratelimit",
+)
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Whether a failed model call is worth retrying.
+
+    Status first, because it is unambiguous: 429 and 5xx are the provider
+    asking us to come back later, while every other 4xx is our own request
+    being wrong and will fail identically forever. Only with no status to go on
+    do we fall back to the exception's family name.
+    """
+    status = _status_code(exc)
+    if status is not None:
+        return status == 429 or 500 <= status < 600
+    name = type(exc).__name__.lower()
+    return any(marker in name for marker in _TRANSIENT_MARKERS)
+
+
 async def stream_model(
     model: Any,
     messages: list[AnyMessage],
@@ -296,21 +458,46 @@ async def stream_model(
     arriving as fragments across chunks. `emit_deltas` is off for sub-agents:
     two agents' narration interleaved in one transcript is noise, and the UI
     shows their tool steps instead.
+
+    A transient failure restarts the whole stream rather than ending the turn.
+    That matters more than it sounds: the exception used to propagate out of the
+    agent node and close the turn with an `error` event, throwing away however
+    many steps of real work came before it. Restarting is safe because the
+    request is a pure function of `messages`, which this call never mutates.
     """
-    final: AIMessageChunk | None = None
-    async for chunk in model.astream(messages):
-        final = chunk if final is None else final + chunk
-        if not emit_deltas:
-            continue
-        reasoning = _chunk_reasoning(chunk)
-        if reasoning:
-            emit(assistant_delta_event(reasoning, channel="reasoning", agent_id=agent_id))
-        text = _chunk_text(chunk)
-        if text:
-            emit(assistant_delta_event(text, agent_id=agent_id))
-    if final is None:  # a model that yielded nothing at all
-        return AIMessage(content="")
-    return _as_message(final)
+    emitted = False
+
+    async def attempt(*, deltas: bool) -> AIMessage:
+        nonlocal emitted
+        final: AIMessageChunk | None = None
+        async for chunk in model.astream(messages):
+            final = chunk if final is None else final + chunk
+            if not deltas:
+                continue
+            reasoning = _chunk_reasoning(chunk)
+            if reasoning:
+                emitted = True
+                emit(assistant_delta_event(reasoning, channel="reasoning", agent_id=agent_id))
+            text = _chunk_text(chunk)
+            if text:
+                emitted = True
+                emit(assistant_delta_event(text, agent_id=agent_id))
+        if final is None:  # a model that yielded nothing at all
+            return AIMessage(content="")
+        return _as_message(final)
+
+    for index in range(STREAM_ATTEMPTS):
+        try:
+            # Stay silent on a retry only if the dead attempt already wrote to
+            # the transcript — re-streaming a paragraph the user just watched
+            # appear reads as the agent stuttering. A stream that died before
+            # emitting anything has nothing to duplicate, so it keeps streaming.
+            return await attempt(deltas=emit_deltas and not emitted)
+        except Exception as exc:
+            if index == STREAM_ATTEMPTS - 1 or not _is_transient(exc):
+                raise
+            await asyncio.sleep(STREAM_BACKOFF_S[index])
+    raise AssertionError("unreachable: the last attempt either returns or raises")
 
 
 def build_graph(
@@ -397,7 +584,10 @@ def build_graph(
 
         # Last line of defence before the request goes out.
         messages = sanitize_messages(messages)
-        messages = [SystemMessage(content=system_prompt), *messages]
+        if supports_prompt_cache_control(router.spec_for_role(role), settings.provider):
+            messages = with_prompt_cache(system_prompt, messages)
+        else:
+            messages = [SystemMessage(content=system_prompt), *messages]
 
         response = await stream_model(
             model,
@@ -412,6 +602,12 @@ def build_graph(
             emit(assistant_delta_event("\n", agent_id=state.get("agent_id")))
 
         # Usage: the main agent's input count is also the live context size.
+        # The message count goes with it, so compaction can tell how much has
+        # been appended since and compact *before* the next request rather than
+        # after it has already been paid for. The system message is excluded —
+        # `compact_if_needed` is handed the bare conversation.
+        if is_main:
+            note_context_messages(len(messages) - 1)
         call_usage = extract_usage(response, fallback_model=router.model_name(role))
         record(call_usage, is_context=is_main)
         if call_usage is not None:
@@ -446,12 +642,76 @@ def build_graph(
 
     async def tools_node(state: AgentState) -> dict:
         last: AIMessage = state["messages"][-1]
-        results: list[ToolMessage] = []
+        # Sparse while a batch is open: a scheduled read reserves its slot with
+        # None and drain() fills it in.
+        results: list[ToolMessage | None] = []
         pending: list[tuple[str, str, str, str, str]] = list(state.get("research_pending", []))
         research_used = state.get("research_used", 0)
         call_log = list(state.get("call_log", []))
         last_sig = state.get("last_read_signature")
         agent_id = state.get("agent_id")
+
+        # Consecutive concurrent-safe calls accumulate here and run together.
+        # Each entry is (slot, call_id, name, args, tool, detail); `slot` is the
+        # index in `results` reserved for its answer, so the batch can finish in
+        # any order and still rejoin the conversation in the order the model
+        # asked for.
+        batch: list[tuple[int, str, str, dict, BaseTool, str | None]] = []
+
+        async def execute(
+            call_id: str, name: str, args: dict, tool: BaseTool, detail: str | None
+        ) -> tuple[str, ToolMessage | None]:
+            """Run one tool. Returns (content, None) on success, or
+            ("", error_message) when it raised — a tool failure is a message the
+            model can act on, not a crash that ends the turn."""
+            started = time.monotonic()
+            try:
+                content = clip_result(_tool_result_text(await tool.ainvoke(args)))
+            except Exception as exc:
+                emit(
+                    step_event(
+                        call_id, name, "error", name,
+                        detail=detail,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        agent_id=agent_id,
+                    )
+                )
+                return "", ToolMessage(
+                    content=f"{name} failed: {exc}"[:2000],
+                    tool_call_id=call_id,
+                    name=name,
+                    status="error",
+                )
+            emit(
+                step_event(
+                    call_id, name, "done", name,
+                    detail=detail,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    agent_id=agent_id,
+                )
+            )
+            return content, None
+
+        async def drain() -> None:
+            """Run the open batch concurrently and fill in its reserved slots."""
+            if not batch:
+                return
+            # Snapshot and clear in one step, so a tool that somehow scheduled
+            # more work can't be drained twice. Named `open_batch` rather than
+            # `pending` to stay clear of the research fan-out list of that name.
+            open_batch, batch[:] = list(batch), []
+
+            async def run_one(entry: tuple) -> ToolMessage:
+                _slot, call_id, name, args, tool, detail = entry
+                content, failure = await execute(call_id, name, args, tool, detail)
+                if failure is not None:
+                    return failure
+                return ToolMessage(content=content, tool_call_id=call_id, name=name)
+
+            for entry, message in zip(
+                open_batch, await asyncio.gather(*map(run_one, open_batch))
+            ):
+                results[entry[0]] = message
 
         # --- questions first, before anything executes ---------------------
         # interrupt() suspends the graph here; resuming re-runs this node from
@@ -483,6 +743,26 @@ def build_graph(
             ):
                 plan_approved = True
                 gate_plan = False
+
+        # --- malformed calls, answered before anything runs -----------------
+        # The model named a tool but its arguments didn't parse, so LangChain
+        # put the call in `invalid_tool_calls` and it has no `args` to execute.
+        # It still needs a ToolMessage: the API counts it as an open call, and
+        # an unanswered one is stored and re-sent on every later turn.
+        for bad in getattr(last, "invalid_tool_calls", None) or []:
+            call_id = bad.get("id") or f"call_{len(results)}"
+            name = bad.get("name") or "tool"
+            results.append(
+                ToolMessage(
+                    content=MALFORMED_CALL.format(
+                        tool=name, error=bad.get("error") or "unparseable arguments"
+                    ),
+                    tool_call_id=call_id,
+                    name=name,
+                    status="error",
+                )
+            )
+            emit(step_event(call_id, name, "error", name, agent_id=agent_id))
 
         for call in last.tool_calls:
             name = call.get("name", "")
@@ -530,17 +810,21 @@ def build_graph(
                 continue
 
             # --- guardrail pre-check (never executes on a warning) ----------
+            # The budget and near-duplicate checks are research-specific. The
+            # exact-repeat check is not: an agent stuck on an edit_file whose
+            # old_text never matches will reissue it verbatim until the step
+            # budget runs out, and nothing used to stop it.
+            warning: str | None = None
             if name in RESEARCH_TOOLS:
-                warning = (
-                    check_research_budget(name, research_used)
-                    or check_repeat(name, args, call_log)
-                )
+                warning = check_research_budget(name, research_used)
                 if name == "web_search":
                     warning = warning or check_near_duplicate(str(args.get("query", "")), call_log)
-                if warning:
-                    results.append(ToolMessage(content=warning, tool_call_id=call_id, name=name))
-                    emit(step_event(call_id, name, "done", name, detail=detail, agent_id=agent_id))
-                    continue
+            if warning is None and name not in REPEAT_EXEMPT:
+                warning = check_repeat(name, args, call_log)
+            if warning:
+                results.append(ToolMessage(content=warning, tool_call_id=call_id, name=name))
+                emit(step_event(call_id, name, "done", name, detail=detail, agent_id=agent_id))
+                continue
 
             # --- fan-out: delegated to subagents, not executed here ---------
             if name in ("research", "task"):
@@ -605,28 +889,38 @@ def build_graph(
                 emit(step_event(call_id, name, "error", name, detail=detail, agent_id=agent_id))
                 continue
 
-            started = time.monotonic()
-            try:
-                content = _tool_result_text(await tool.ainvoke(args))
-            except Exception as exc:  # a tool failure is a message, not a crash
-                message = f"{name} failed: {exc}"[:2000]
-                results.append(
-                    ToolMessage(content=message, tool_call_id=call_id, name=name, status="error")
-                )
-                emit(
-                    step_event(
-                        call_id, name, "error", name,
-                        detail=detail,
-                        elapsed_ms=int((time.monotonic() - started) * 1000),
-                        agent_id=agent_id,
-                    )
-                )
+            # --- concurrent-safe reads: scheduled, not run here -------------
+            # They join the open batch and execute together at the next drain.
+            # The repeat guard sees this call logged immediately, so two
+            # identical reads in one batch are still caught.
+            if name in CONCURRENT_SAFE_TOOLS:
+                call_log.append((name, json.dumps(args, sort_keys=True, default=str)))
+                results.append(None)  # placeholder; drain() fills this slot
+                batch.append((len(results) - 1, call_id, name, args, tool, detail))
                 continue
 
-            # --- post-execution bookkeeping for research tools ---------------
+            # Everything else runs inline — and the open batch has to land
+            # first. A read scheduled before a write must not observe that
+            # write, which is exactly what a drain here guarantees and what a
+            # partition-everything-then-gather approach would lose.
+            await drain()
+
+            content, message = await execute(call_id, name, args, tool, detail)
+            if message is not None:  # the tool raised; its error is the answer
+                results.append(message)
+                continue
+
+            # --- post-execution bookkeeping ---------------------------------
+            call_log.append((name, json.dumps(args, sort_keys=True, default=str)))
+            # A tool that changed something invalidates the repeat log. Reading
+            # a file you just edited, or re-running the suite after a fix, is
+            # the correct move rather than a loop — the answer genuinely differs
+            # now. Research entries survive: the web didn't change because we
+            # wrote a file.
+            if name in MUTATING_TOOLS:
+                call_log = [row for row in call_log if row[0] in RESEARCH_TOOLS]
             if name in RESEARCH_TOOLS:
                 research_used += 1
-                call_log.append((name, json.dumps(args, sort_keys=True, default=str)))
                 if name == "read_page":
                     warning, last_sig = check_page_unchanged(last_sig, content)
                     if warning:
@@ -635,14 +929,9 @@ def build_graph(
                         content = warning
 
             results.append(ToolMessage(content=content, tool_call_id=call_id, name=name))
-            emit(
-                step_event(
-                    call_id, name, "done", name,
-                    detail=detail,
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                    agent_id=agent_id,
-                )
-            )
+
+        # Whatever is still open when the calls run out.
+        await drain()
 
         return {
             "messages": results,
@@ -771,7 +1060,10 @@ def build_graph(
 
     def route_after_agent(state: AgentState) -> str:
         last = state["messages"][-1]
-        if getattr(last, "tool_calls", None):
+        # invalid_tool_calls route to `tools` as well. They are calls the model
+        # meant to make and got wrong; ending the turn here would leave them
+        # unanswered in the stored history, which poisons the session.
+        if getattr(last, "tool_calls", None) or getattr(last, "invalid_tool_calls", None):
             return "tools"
         return END
 

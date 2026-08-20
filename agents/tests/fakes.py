@@ -32,6 +32,11 @@ class ScriptedModel(BaseChatModel):
     script: list[AIMessage] = []
     calls: list[list[BaseMessage]] = []
     raise_on_call: bool = False
+    #: Attempts that yield one chunk and *then* raise a transient-looking
+    #: error, before the next attempt succeeds. This is the failure the
+    #: provider client's own max_retries cannot see: the request was accepted,
+    #: the stream started, and it died partway through.
+    raise_mid_stream: int = 0
     #: Seconds to sleep inside _astream, so a test can prove two subagents
     #: overlap in time rather than merely both finishing.
     delay: float = 0.0
@@ -71,6 +76,11 @@ class ScriptedModel(BaseChatModel):
     ) -> AsyncIterator[ChatGenerationChunk]:
         import asyncio
 
+        if self.raise_mid_stream:
+            self.raise_mid_stream -= 1
+            yield ChatGenerationChunk(message=AIMessageChunk(content="partial"))
+            raise ConnectionError("the stream died partway through")
+
         message = self._next(messages)
         if self.delay:
             await asyncio.sleep(self.delay)
@@ -85,6 +95,10 @@ class ScriptedModel(BaseChatModel):
                 # Tool calls and usage ride the final chunk, as they do for a
                 # real provider.
                 tool_calls=message.tool_calls if last else [],
+                # Malformed calls ride the final chunk too. They are how a
+                # real provider reports arguments that didn't parse, and the
+                # graph has to answer them like any other open call.
+                invalid_tool_calls=message.invalid_tool_calls if last else [],
                 usage_metadata=getattr(message, "usage_metadata", None) if last else None,
                 # A scripted message's own metadata wins, so a test can name
                 # the model it wants priced.
@@ -109,9 +123,25 @@ class FakeTool(BaseTool):
     description: str = "A fake tool for tests."
     responses: list[str] = []
     calls: list[dict] = []
+    #: Seconds `_arun` awaits before answering. A test proves the tools node
+    #: runs calls concurrently by making each one slow and timing the batch —
+    #: sequential execution shows up as the sum, concurrent as the max.
+    delay: float = 0.0
 
     def _run(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
+        if self.responses:
+            return self.responses.pop(0)
+        raise RuntimeError("fake tool exploded")
+
+    async def _arun(self, **kwargs: Any) -> Any:
+        import asyncio
+
+        # Record the call before sleeping: concurrent calls must all be visible
+        # as in-flight, not appear one at a time as each finishes.
+        self.calls.append(kwargs)
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.responses:
             return self.responses.pop(0)
         raise RuntimeError("fake tool exploded")
@@ -158,4 +188,30 @@ def tool_call(name: str, args: dict, id: str | None = None, content: str = "") -
     return AIMessage(
         content=content,
         tool_calls=[{"name": name, "args": args, "id": id or f"call-{name}", "type": "tool_call"}],
+    )
+
+
+def invalid_tool_call(name: str, raw_args: str = "abc", id: str | None = None) -> AIMessage:
+    """An AIMessage carrying one *malformed* tool call.
+
+    Built through `tool_call_chunks` rather than by setting the field directly,
+    so LangChain's own parser decides it's invalid — the same route a real
+    provider's stream takes when the model emits unparseable arguments.
+    """
+    chunk = AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            {
+                "name": name,
+                "args": raw_args,
+                "id": id or f"call-{name}-bad",
+                "index": 0,
+                "type": "tool_call_chunk",
+            }
+        ],
+    )
+    return AIMessage(
+        content="",
+        tool_calls=list(chunk.tool_calls),
+        invalid_tool_calls=list(chunk.invalid_tool_calls),
     )

@@ -8,11 +8,13 @@ from dataclasses import replace
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 
 from daimon_agent.compaction import (
+    KEEP_LAST,
     compact,
     compact_if_needed,
     context_tokens,
     estimate_size,
     estimate_tokens,
+    projected_tokens,
     should_compact,
 )
 from daimon_agent.graph import build_graph, run_config
@@ -65,8 +67,9 @@ async def test_compact_summarizes_with_flash_and_keeps_recent(settings) -> None:
     # The last K messages survive verbatim, in order.
     assert out[-1].content == "a9"
     assert out[-2].content == "q9"
-    assert sum(1 for m in out if isinstance(m, HumanMessage)) == 3  # KEEP_LAST=6 holds 3 pairs
-    assert result.dropped == len(messages) - 6
+    # KEEP_LAST holds whole q/a pairs, so half of the kept window is human.
+    assert sum(1 for m in out if isinstance(m, HumanMessage)) == KEEP_LAST // 2
+    assert result.dropped == len(messages) - KEEP_LAST
 
 
 async def test_compact_returns_a_wholesale_state_replacement(settings) -> None:
@@ -102,15 +105,16 @@ async def test_agent_node_compacts_before_the_model_call(settings) -> None:
     )
     graph = build_graph(small, router, [])
 
+    turns = KEEP_LAST  # 2*KEEP_LAST messages — comfortably wider than the window
     final = await graph.ainvoke(
-        {"messages": [HumanMessage(content="q")] + _chat(6)}, run_config("compact")
+        {"messages": [HumanMessage(content="q")] + _chat(turns)}, run_config("compact")
     )
 
     assert len(router._flash.calls) == 1
     prompt = router._pro.calls[0]
     texts = [str(getattr(m, "content", "")) for m in prompt]
     assert any("compressed history" in t for t in texts)  # summary present
-    assert any("a5" in t for t in texts)  # recent messages still there
+    assert any(f"a{turns - 1}" in t for t in texts)  # recent messages still there
     assert texts[0].startswith("You are Daimon")  # rules prefix still first
 
     # And the compaction landed in state: the pre-compaction messages are gone,
@@ -155,3 +159,59 @@ async def test_second_hop_does_not_resummarize(settings) -> None:
     # Two agent-node visits, one summarization.
     assert len(router._pro.calls) == 2
     assert len(router._flash.calls) == 1
+
+
+# --- compacting before the over-budget request, not after ---------------------
+
+def test_projected_size_counts_what_was_appended_since_the_last_call() -> None:
+    """`context_tokens` measures the prompt as it stood one hop ago. Triggering
+    on it alone means the first over-threshold request is always sent — the
+    trigger only fires once it comes back."""
+    sent = _chat(2)                       # what the last call carried
+    appended = [AIMessage(content="x" * 7000)]   # a big tool hop since then
+
+    acc = UsageAccumulator()
+    acc.note_context_messages(len(sent))
+    acc.add(CallUsage(model="m", input_tokens=1000, output_tokens=1), is_context=True)
+    set_active_usage(acc)
+    try:
+        assert context_tokens(sent + appended) == 1000       # blind to the append
+        assert projected_tokens(sent + appended) > 2500      # sees it
+    finally:
+        set_active_usage(None)
+
+
+async def test_the_newest_instruction_survives_a_long_tool_loop(settings) -> None:
+    """On a long turn the user's actual words fall out of the window early, and
+    a summary of them is a poor stand-in for what the work is measured against."""
+    from langchain_core.messages import ToolMessage
+
+    router = FakeRouter(flash_script=[AIMessage(content="handover")])
+    instruction = HumanMessage(content="rename the parser module")
+    loop: list = []
+    for i in range(KEEP_LAST + 4):
+        loop.append(
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "read_file", "args": {}, "id": f"c{i}", "type": "tool_call"}],
+            )
+        )
+        loop.append(ToolMessage(content=f"body {i}", tool_call_id=f"c{i}", name="read_file"))
+
+    result = await compact(router, [instruction, *loop])
+
+    assert result is not None
+    assert any(
+        isinstance(m, HumanMessage) and m.content == "rename the parser module"
+        for m in result.replacement
+    )
+
+
+async def test_the_summary_asks_for_a_handover_not_a_paragraph(settings) -> None:
+    router = FakeRouter(flash_script=[AIMessage(content="the handover")])
+    await compact(router, _chat(KEEP_LAST + 4))
+
+    asked = str(router._flash.calls[0][0].content)
+    for section in ("## Goal", "## Decisions made", "## Files and state touched",
+                    "## Open threads", "## Immediate next step"):
+        assert section in asked
