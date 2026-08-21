@@ -86,11 +86,9 @@ def _cmd_help(text: str, session_name: str | None) -> list[str]:
 
 
 def _cmd_clear(text: str, session_name: str | None) -> list[str]:
-    """``/clear`` — reset the output area to the banner."""
-    # Special return value convention: an empty list with a sentinel.
-    # The TUI detects this and resets output_lines to the banner.
-    # We use a special marker that the TUI checks.
-    return ["__DAIMON_CLEAR__"]
+    """``/clear`` — handled by the TUI directly (it owns the transcript, and
+    the conversation the server has to be told to forget)."""
+    return [""]  # never reached; the TUI intercepts before dispatch
 
 
 def _cmd_status(text: str, session_name: str | None) -> list[str]:
@@ -181,7 +179,7 @@ def _cmd_setup(text: str, session_name: str | None) -> list[str]:
 
 # Register built-in commands
 register("help", "show available commands", _cmd_help)
-register("clear", "clear the output", _cmd_clear)
+register("clear", "clear the screen and the conversation", _cmd_clear)
 register("status", "session and terminal info", _cmd_status)
 register("model", "current model configuration", _cmd_model)
 register("tools", "list available tools", _cmd_tools)

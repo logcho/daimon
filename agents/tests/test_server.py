@@ -125,6 +125,61 @@ async def test_task_missing_instruction_returns_400(client: TestClient) -> None:
     assert await resp.text() == "instruction is required"
 
 
+async def test_clearing_a_session_forgets_its_history(client: TestClient) -> None:
+    """`/clear` in the CLI is only honest if the next turn starts blank."""
+    graph = client.app["graph"]
+    graph.router._pro.script = [
+        AIMessage(content="first turn"),
+        AIMessage(content="after the clear"),
+    ]
+
+    await _post_task(client, "remember X", session_id="s1")
+    resp = await client.delete("/sessions/s1")
+    assert resp.status == 200
+    assert await resp.json() == {"ok": True, "session": "s1"}
+
+    await _post_task(client, "what did you remember?", session_id="s1")
+    second_turn_messages = graph.router._pro.calls[-1]
+    assert not any(
+        "remember X" in getattr(m, "content", "") for m in second_turn_messages
+    )
+    assert not any(
+        "first turn" in getattr(m, "content", "") for m in second_turn_messages
+    )
+
+
+async def test_clearing_one_session_leaves_the_others_alone(client: TestClient) -> None:
+    graph = client.app["graph"]
+    graph.router._pro.script = [AIMessage(content=f"turn {i}") for i in range(3)]
+
+    await _post_task(client, "remember X", session_id="s1")
+    await _post_task(client, "remember Y", session_id="s2")
+    assert (await client.delete("/sessions/s1")).status == 200
+
+    await _post_task(client, "and?", session_id="s2")
+    assert any(
+        "remember Y" in getattr(m, "content", "")
+        for m in graph.router._pro.calls[-1]
+    )
+
+
+async def test_clearing_an_unknown_session_is_fine(client: TestClient) -> None:
+    """Nothing stored is the asked-for state already — not a 404."""
+    resp = await client.delete("/sessions/never-used")
+    assert resp.status == 200
+    assert (await resp.json())["ok"] is True
+
+
+async def test_clearing_is_refused_while_a_turn_is_running(client: TestClient) -> None:
+    """The running turn holds its message list in memory and would write the
+    history straight back — better to say so than to clear nothing."""
+    client.app["locks"]["busy"] = asyncio.Lock()
+    async with client.app["locks"]["busy"]:
+        resp = await client.delete("/sessions/busy")
+    assert resp.status == 409
+    assert "turn is running" in (await resp.json())["error"]
+
+
 async def test_config_endpoint(client: TestClient) -> None:
     """GET /config returns non-secret settings as JSON."""
     resp = await client.get("/config")

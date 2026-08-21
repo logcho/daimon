@@ -827,6 +827,26 @@ async def run_tui(
         app.invalidate()
         return cfg
 
+    async def forget_history() -> None:
+        """The other half of `/clear`: the agent forgets the conversation too,
+        so a cleared screen isn't a lie about what the next turn will see.
+
+        Prefer the running server — it drops the session's todo list, read
+        registry and REPL kernel along with the history. With nothing running
+        there is still the checkpoint DB, which is where the history lives
+        between servers, so go at it directly rather than spawning a server
+        just to ask it to forget."""
+        port = await client.find_server(settings)
+        if port is not None:
+            result = await client.clear_session(http, port, session_id)
+            if isinstance(result, dict) and result.get("error"):
+                emit(["", f"  {RED}the screen is clear, but the agent still "
+                          f"remembers:{RESET} {result['error']}"])
+            return
+        if not client.forget_session_history(settings.resolved_checkpoints_db, session_id):
+            emit(["", f"  {RED}the screen is clear, but the agent still remembers "
+                      f"— the checkpoint database could not be written{RESET}"])
+
     async def show_config() -> None:
         emit(_config_lines(await refresh_config(), settings.port))
 
@@ -865,9 +885,15 @@ async def run_tui(
             app.exit()
             return
         if name == "clear":
+            # Clearing the screen under a running turn would wipe a history
+            # that turn is about to write straight back.
+            if state.busy:
+                emit(["", f"  {DIM}a turn is running — esc to cancel it, then /clear{RESET}"])
+                return
             transcript.clear()
             transcript.append(display.render_banner(session_name))
             scroll_to_bottom()
+            app.create_background_task(forget_history())
             return
         if name == "plan":
             mode = "normal" if mode == "plan" else "plan"

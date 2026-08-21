@@ -272,6 +272,23 @@ async def ensure_server(settings: Settings, *, run_dir: Path | None = None) -> t
     return port, True
 
 
+async def find_server(settings: Settings, *, run_dir: Path | None = None) -> int | None:
+    """The port of this workspace's running server, or None if there isn't one.
+
+    The adopt half of `ensure_server` with none of the spawning, for work only
+    worth doing when a server already exists — clearing a session's in-memory
+    state, say, where starting a server just to tell it to forget nothing would
+    be absurd. Leaves a stale pidfile alone; whoever spawns next sweeps it."""
+    run_dir = run_dir or workspace_run_dir(settings.resolved_workspace_dir.resolve())
+    pidfile = run_dir / "daimon-agent.pid"
+    if not pidfile.exists():
+        return None
+    pid, port = _read_pid(pidfile), _read_port(pidfile)
+    if pid is None or port is None or not _pid_alive(pid) or not await _health(port):
+        return None
+    return port
+
+
 async def stop_server(settings: Settings | None = None, *, run_dir: Path | None = None) -> tuple[bool, str]:
     """Stop the CLI-spawned server for this workspace, and only that:
     pidfile present AND pid alive AND the recorded port still answers
@@ -540,6 +557,13 @@ async def delete_skill(http: aiohttp.ClientSession, port: int, name: str) -> Any
     return await _delete(http, f"http://127.0.0.1:{port}/skills/{quote(name)}")
 
 
+async def clear_session(http: aiohttp.ClientSession, port: int, session_id: str) -> Any:
+    """DELETE /sessions/{id} — the server forgets this conversation: its
+    stored history, and the todo list, read registry and REPL kernel keyed to
+    the same id. 409 while a turn is running."""
+    return await _delete(http, f"http://127.0.0.1:{port}/sessions/{quote(session_id)}")
+
+
 async def registry_search(
     http: aiohttp.ClientSession, port: int, query: str, limit: int = 12
 ) -> Any:
@@ -577,6 +601,34 @@ async def install_skill(
             return body
     except (aiohttp.ClientError, OSError, ValueError) as exc:
         return {"error": str(exc)}
+
+
+def forget_session_history(db_path: Path, session_id: str) -> bool:
+    """Delete one thread's checkpoints straight from the DB — the no-server
+    path for the same job `clear_session` asks the server to do. The history
+    outlives the server process, so "nothing is running" is not the same as
+    "nothing to forget". Clears both tables `AsyncSqliteSaver.adelete_thread`
+    does. Returns False only when the delete genuinely failed; a missing file
+    or table is nothing stored yet, which is the asked-for state already."""
+    if not db_path.exists():
+        return True
+    try:
+        conn = sqlite3.connect(str(db_path))
+    except sqlite3.Error:
+        return False
+    try:
+        # The server (app or CLI) may hold the write lock — wait, as the
+        # checkpointer itself does, rather than failing the clear.
+        conn.execute("PRAGMA busy_timeout = 10000")
+        for table in ("checkpoints", "writes"):
+            with contextlib.suppress(sqlite3.OperationalError):  # table not created yet
+                conn.execute(f"DELETE FROM {table} WHERE thread_id = ?", (session_id,))
+        conn.commit()
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
 
 
 def list_sessions(db_path: Path) -> list[str]:

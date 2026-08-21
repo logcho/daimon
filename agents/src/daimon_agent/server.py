@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -619,6 +620,48 @@ async def create_app(
             )
 
         return await _stream_turn_response(request, session_id, run)
+
+    async def session_delete_handler(request: web.Request) -> web.Response:
+        """DELETE /sessions/{session_id} — forget a conversation.
+
+        Two halves, and the second is the one that matters. `release_session`
+        drops what this process holds for the id (graph, todo list, read
+        registry, REPL kernel); the checkpointer delete drops the persisted
+        message history, which outlives the process — without it the next turn
+        on this id resumes the conversation the user just asked to forget.
+        """
+        session_id = request.match_info.get("session_id", "")
+        if not session_id:
+            return web.Response(status=400, text="session id is required")
+        # A running turn is part-way through writing checkpoints, and it holds
+        # its own message list in memory — deleting underneath it would wipe
+        # the history and then have the turn write it straight back. The
+        # caller cancels the turn first, then clears.
+        lock = app["locks"].get(session_id)
+        if lock is not None and lock.locked():
+            return web.json_response(
+                {"error": "a turn is running for this session"}, status=409
+            )
+        await release_session(session_id)
+        # A test that injects its own 3-tuple graph builder may hand us a
+        # checkpointer that cannot do this; say so rather than claim success.
+        forget = getattr(app["checkpointer"], "adelete_thread", None)
+        if forget is None:
+            return web.json_response(
+                {"error": "this checkpointer cannot forget a thread"}, status=500
+            )
+        try:
+            await forget(session_id)
+        except sqlite3.OperationalError as exc:
+            # The checkpoint tables are created lazily on the first write, so
+            # a server that has not run a turn yet has nothing to forget —
+            # which is the state being asked for. Any other operational error
+            # (a locked database, say) is a real failure to clear.
+            if "no such table" not in str(exc):
+                return web.json_response({"error": str(exc)}, status=500)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response({"ok": True, "session": session_id})
 
     async def status(request: web.Request) -> web.Response:
         """Global busy state — the pill polls this to drive its activity dot.
@@ -1248,6 +1291,7 @@ async def create_app(
     app.router.add_post("/config", config_update_handler)
     app.router.add_post("/task", task)
     app.router.add_post("/resume", resume)
+    app.router.add_delete("/sessions/{session_id}", session_delete_handler)
     return app
 
 

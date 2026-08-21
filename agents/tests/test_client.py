@@ -417,6 +417,67 @@ def test_list_sessions_missing_db_and_table(tmp_path):
     assert client.list_sessions(db) == []
 
 
+async def test_find_server_returns_the_port_of_a_live_server(monkeypatch, settings, tmp_path):
+    (tmp_path / "daimon-agent.pid").write_text("4242\n9999\n")
+    monkeypatch.setattr(client, "_pid_alive", lambda pid: True)
+    async def fake_health(port):
+        return True
+    monkeypatch.setattr(client, "_health", fake_health)
+    assert await client.find_server(settings, run_dir=tmp_path) == 9999
+
+
+async def test_find_server_never_spawns(monkeypatch, settings, tmp_path):
+    """The point of it: no pidfile, or a dead one, means None — not a server
+    started just to be told to forget nothing."""
+    def boom(*a, **k):
+        raise AssertionError("spawned a server")
+    monkeypatch.setattr(client, "_spawn_server", boom)
+    assert await client.find_server(settings, run_dir=tmp_path) is None
+
+    (tmp_path / "daimon-agent.pid").write_text("4242\n9999\n")
+    monkeypatch.setattr(client, "_pid_alive", lambda pid: False)
+    assert await client.find_server(settings, run_dir=tmp_path) is None
+    # The stale pidfile is left for whoever spawns next to sweep.
+    assert (tmp_path / "daimon-agent.pid").exists()
+
+
+async def test_find_server_ignores_a_pid_that_stopped_answering(monkeypatch, settings, tmp_path):
+    (tmp_path / "daimon-agent.pid").write_text("4242\n9999\n")
+    monkeypatch.setattr(client, "_pid_alive", lambda pid: True)
+    async def fake_health(port):
+        return False
+    monkeypatch.setattr(client, "_health", fake_health)
+    assert await client.find_server(settings, run_dir=tmp_path) is None
+
+
+def test_forget_session_history_deletes_one_thread(tmp_path):
+    db = tmp_path / "checkpoints.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE checkpoints (thread_id TEXT NOT NULL)")
+    conn.execute("CREATE TABLE writes (thread_id TEXT NOT NULL)")
+    for table in ("checkpoints", "writes"):
+        conn.executemany(
+            f"INSERT INTO {table} (thread_id) VALUES (?)", [("cli",), ("work",), ("cli",)]
+        )
+    conn.commit()
+    conn.close()
+
+    assert client.forget_session_history(db, "cli") is True
+    assert client.list_sessions(db) == ["work"]
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT thread_id FROM writes").fetchall() == [("work",)]
+    conn.close()
+
+
+def test_forget_session_history_on_nothing_stored_yet(tmp_path):
+    """A missing DB or an empty one is already the asked-for state, so the
+    CLI must not report it as a failure to clear."""
+    assert client.forget_session_history(tmp_path / "nope.db", "cli") is True
+    db = tmp_path / "empty.db"
+    sqlite3.connect(db).close()
+    assert client.forget_session_history(db, "cli") is True
+
+
 def test_agents_cwd_is_the_agents_root():
     root = client._agents_cwd()
     assert (root / "pyproject.toml").exists()
