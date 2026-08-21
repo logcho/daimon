@@ -502,6 +502,83 @@ class TestTranscript:
         assert t.rows[-1] == f"line {tui_mod.MAX_TRANSCRIPT_LINES + 499}"
 
 
+class TestTranscriptFolds:
+    """A collapsed run opens in place. The rows are derived from the blocks, so
+    the one-row-per-row equality the whole module rests on has to survive a
+    toggle just as it survives a resize."""
+
+    def _fold(self, n=4):
+        from daimon_agent.cli.render import Fold
+
+        return Fold(
+            closed="collapsed",
+            open="expanded",
+            detail=[f"  call {i}" for i in range(n)],
+        )
+
+    def _transcript(self, width=40):
+        from daimon_agent.cli.tui import Transcript
+
+        return Transcript(width)
+
+    def test_a_fold_shows_one_row_until_it_is_opened(self):
+        t = self._transcript()
+        fold = self._fold()
+        t.append(["before", fold, "after"])
+        assert t.rows == ["before", "collapsed", "after"]
+        t.toggle(fold)
+        assert t.rows == ["before", "expanded", *fold.detail, "after"]
+        t.toggle(fold)
+        assert t.rows == ["before", "collapsed", "after"]
+
+    def test_toggling_keeps_rows_and_text_in_agreement(self):
+        t = self._transcript()
+        fold = self._fold()
+        t.append(["x", fold])
+        t.toggle(fold)
+        assert t.text().count("\n") + 1 == len(t.rows)
+
+    def test_every_row_of_a_fold_maps_back_to_it(self):
+        t = self._transcript()
+        fold = self._fold()
+        t.append(["plain", fold])
+        assert t.fold_at(0) is None and t.fold_at(1) is fold
+        t.toggle(fold)
+        assert all(t.fold_at(i) is fold for i in range(1, len(t.rows)))
+        assert t.fold_at(-1) is None and t.fold_at(999) is None
+
+    def test_expansion_survives_a_resize(self):
+        t = self._transcript(60)
+        fold = self._fold()
+        t.append([fold])
+        t.toggle(fold)
+        opened = len(t.rows)
+        t.set_width(20)
+        assert fold.expanded and len(t.rows) >= opened
+
+    def test_last_fold_finds_the_most_recent_one(self):
+        t = self._transcript()
+        first, second = self._fold(), self._fold()
+        t.append([first, "text", second, "more text"])
+        assert t.last_fold() is second
+        assert self._transcript().last_fold() is None
+
+    def test_a_folds_budget_does_not_move_when_it_is_toggled(self):
+        """The cap is charged against a fold's open size whatever it shows.
+        A fold that got cheaper by closing would evict old output as a side
+        effect of a keypress."""
+        from daimon_agent.cli import tui as tui_mod
+
+        t = self._transcript(20)
+        fold = self._fold()
+        t.append([f"line {i}" for i in range(tui_mod.MAX_TRANSCRIPT_LINES - 10)])
+        t.append([fold])
+        before = len(t._blocks)
+        t.toggle(fold)
+        t.append(["one more"])
+        assert len(t._blocks) == before + 1
+
+
 class TestConfigSources:
     """Everything that reports configuration must read it from the server.
 

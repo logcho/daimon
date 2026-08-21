@@ -3,7 +3,7 @@ import remarkGfm from "remark-gfm";
 import { fmtDuration } from "../lib/format";
 import type { ChatMessage, Step } from "../types";
 import { ThinkingIndicator } from "./ThinkingIndicator";
-import { MAX_EXPANDED, StepSummary, summarise } from "./StepSummary";
+import { categoryParts, MAX_EXPANDED, StepSummary, summarise } from "./StepSummary";
 
 /** A tool call. Shows what it was called *with*, not just its name — twelve
  *  `read_file` lines say nothing; twelve paths say what the agent read. */
@@ -33,6 +33,77 @@ function StepLine({ step, indented }: { step: Step; indented?: boolean }) {
   );
 }
 
+/** The rows behind a disclosure, capped. Expanding a 200-step run should not
+ *  lock the webview, and past a certain length nobody is reading anyway. */
+function StepRows({ steps, indented }: { steps: Step[]; indented?: boolean }) {
+  return (
+    <ul className="space-y-1">
+      {steps.slice(0, MAX_EXPANDED).map((step) => (
+        <li key={step.id}>
+          <StepLine step={step} indented={indented} />
+        </li>
+      ))}
+      {steps.length > MAX_EXPANDED && (
+        <li className={`font-mono text-xs text-neutral-600 ${indented ? "ml-4" : ""}`}>
+          … {steps.length - MAX_EXPANDED} more
+        </li>
+      )}
+    </ul>
+  );
+}
+
+/** The collapsed line for a run of plain tool calls.
+ *
+ *  While the run is live it names the call happening *now* — that is the whole
+ *  reason to show anything at all. Once it has moved on, the individual calls
+ *  are detail and the shape of the run is the useful part, so it becomes the
+ *  same coarse tally a finished turn gets. Failures are never folded away
+ *  silently: a run with an error says so on its collapsed line. */
+function RunLabel({ steps }: { steps: Step[] }) {
+  const last = steps[steps.length - 1];
+  const running = last.status === "running";
+  const failed = steps.filter((s) => s.status === "error").length;
+  // Never folded away silently, and not only when the run has stopped: a call
+  // that failed three tools ago still matters while the next one is spinning.
+  const failures = failed > 0 && (
+    <span className="shrink-0 text-red-400">✕ {failed} failed</span>
+  );
+
+  if (running) {
+    return (
+      <span className="flex min-w-0 items-baseline gap-2">
+        <span className="block h-3 w-3 shrink-0 self-center animate-spin rounded-full border-2 border-[#4f8dff]/25 border-t-[#4f8dff]" />
+        <span className="shrink-0">{steps.length} tools ·</span>
+        <span className="shrink-0 text-[#4f8dff]">{last.tool ?? last.label}</span>
+        {last.detail && <span className="truncate text-neutral-500">{last.detail}</span>}
+        {failures}
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex min-w-0 items-baseline gap-2">
+      <span className="truncate">
+        {[`${steps.length} tools`, ...categoryParts(steps)].join(" · ")}
+      </span>
+      {failures}
+    </span>
+  );
+}
+
+/** A consecutive run of plain tool calls, as one row.
+ *
+ *  A single call renders as itself — hiding one line behind a disclosure costs
+ *  a click and saves nothing. */
+function ToolRun({ steps, indented }: { steps: Step[]; indented?: boolean }) {
+  if (steps.length === 1) return <StepLine step={steps[0]} indented={indented} />;
+  return (
+    <StepSummary label={<RunLabel steps={steps} />} indented={indented}>
+      <StepRows steps={steps} indented />
+    </StepSummary>
+  );
+}
+
 /** One sub-agent's line for a finished spawn: what it was asked, how much work
  *  it did, how long it took — the same facts `render.subagent_line` shows in
  *  the CLI. Its own steps hang behind the disclosure. */
@@ -45,21 +116,48 @@ function subagentLabel(step: Step, children: Step[]): string {
   return stats.length ? `${parts.join(": ")} · ${stats.join(" · ")}` : parts.join(": ");
 }
 
-/** Steps grouped so concurrent sub-agents read as blocks rather than an
- *  interleaved list. Grouping is by `agent_id` — an earlier version matched on
- *  the literal string "research:", which never covered `task` spawns.
+type Group = { kind: "run"; steps: Step[] } | { kind: "agent"; step: Step };
+
+/** Steps grouped so a turn reads as *what was delegated* rather than as every
+ *  call it took to get there.
+ *
+ *  Sub-agents are the structure worth seeing: each spawn keeps its own block,
+ *  grouped by `agent_id` (an earlier version matched on the literal string
+ *  "research:", which never covered `task` spawns). Everything else — the
+ *  parent's own reads, edits and shells — collapses into one row per
+ *  consecutive run. Grouping in sequence rather than partitioning keeps the
+ *  order honest: a run that happened after a spawn still renders after it.
  *
  *  A *finished* sub-agent collapses to one line whether or not the turn itself
- *  is done: its children are the part that made a research fan-out unreadable,
- *  and once it has reported back they are detail, not progress. A running one
- *  keeps showing them, because that is the only sign it is getting anywhere. */
+ *  is done: once it has reported back, its children are detail, not progress.
+ *  A running one shows a rolling row of what it is doing, because that is the
+ *  only sign it is getting anywhere. */
 function StepList({ steps }: { steps: Step[] }) {
   const topLevel = steps.filter((s) => s.parent_step_id === undefined);
   const childrenOf = (id: string) => steps.filter((s) => s.parent_step_id === id);
 
+  const groups: Group[] = [];
+  for (const step of topLevel) {
+    if (step.agent_id) {
+      groups.push({ kind: "agent", step });
+      continue;
+    }
+    const last = groups[groups.length - 1];
+    if (last?.kind === "run") last.steps.push(step);
+    else groups.push({ kind: "run", steps: [step] });
+  }
+
   return (
     <ul className="space-y-1">
-      {topLevel.map((step) => {
+      {groups.map((group) => {
+        if (group.kind === "run") {
+          return (
+            <li key={`run-${group.steps[0].id}`}>
+              <ToolRun steps={group.steps} />
+            </li>
+          );
+        }
+        const step = group.step;
         const children = step.agent_id ? childrenOf(step.agent_id) : [];
         if (children.length === 0) {
           return (
@@ -68,29 +166,19 @@ function StepList({ steps }: { steps: Step[] }) {
             </li>
           );
         }
-        const rows = (
-          <ul className="space-y-1">
-            {children.slice(0, MAX_EXPANDED).map((child) => (
-              <li key={child.id}>
-                <StepLine step={child} indented />
-              </li>
-            ))}
-            {children.length > MAX_EXPANDED && (
-              <li className="ml-4 font-mono text-xs text-neutral-600">
-                … {children.length - MAX_EXPANDED} more
-              </li>
-            )}
-          </ul>
-        );
         return (
           <li key={step.id}>
             {step.status === "running" ? (
               <>
                 <StepLine step={step} />
-                <div className="mt-1">{rows}</div>
+                <div className="mt-1">
+                  <ToolRun steps={children} indented />
+                </div>
               </>
             ) : (
-              <StepSummary label={subagentLabel(step, children)}>{rows}</StepSummary>
+              <StepSummary label={subagentLabel(step, children)}>
+                <StepRows steps={children} indented />
+              </StepSummary>
             )}
           </li>
         );

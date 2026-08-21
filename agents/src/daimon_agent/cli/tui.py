@@ -16,8 +16,12 @@ With pre-wrapped rows, `vertical_scroll` is an exact row index and the
 arithmetic cannot drift. `mouse_support` is also on, which the old version
 never enabled — its wheel handler was unreachable code.
 
-A finished line is immutable: steps are live while they run and are promoted
-into the transcript when they finish, so nothing needs revising after the fact.
+A promoted line is settled, not immutable. Steps are live while they run and
+are promoted into the transcript when they finish — but the parent agent's own
+calls are promoted as one collapsed `render.Fold` per run, which the user can
+open in place (click it, or `c-o` for the most recent). Toggling one rebuilds
+`rows` from the blocks, exactly as a resize already does, so the one-row-per-row
+equality above survives it.
 
 Imported lazily by ``main.py`` so the one-shot path stays fast.
 """
@@ -131,43 +135,101 @@ class ServerConfig:
 
 
 class Transcript:
-    """Finalized output and the viewport onto it.
+    """Settled output and the viewport onto it.
 
-    Holds both the logical lines and their wrapped rows. Everything downstream
-    counts rows, so `vertical_scroll` is an exact index into `rows` and the
-    scroll arithmetic is trivially correct — see the module docstring for what
-    happens when it isn't.
+    Holds the blocks, their logical lines, and their wrapped rows. Everything
+    downstream counts rows, so `vertical_scroll` is an exact index into `rows`
+    and the scroll arithmetic is trivially correct — see the module docstring
+    for what happens when it isn't.
+
+    A block is either a plain line or a `render.Fold`, which stands for a run
+    of tool calls and renders to one row until the user opens it. That is the
+    one thing here that changes after the fact, and it is why `rows` is derived
+    rather than authoritative: toggling a fold rebuilds them, the same way a
+    resize already does.
     """
 
     def __init__(self, width: int) -> None:
         self.width = width
-        self._lines: list[str] = []
+        self._blocks: list[str | render.Fold] = []
         self.rows: list[str] = []
+        #: The fold each row belongs to, parallel to `rows`, so a click lands
+        #: on the right block in one lookup. `None` for ordinary output.
+        self.row_owner: list[render.Fold | None] = []
         #: Stick to the bottom as new output arrives. Cleared by scrolling up,
         #: restored by scrolling back down or starting a turn.
         self.follow = True
 
-    def append(self, lines: list[str]) -> None:
-        self._lines.extend(lines)
-        if len(self._lines) > MAX_TRANSCRIPT_LINES:
-            self._lines = self._lines[-MAX_TRANSCRIPT_LINES:]
-            self.rows = render.wrap_all(self._lines, self.width)
+    @staticmethod
+    def _cost(block: str | render.Fold) -> int:
+        """A block's charge against the history cap.
+
+        Counted open, whatever it currently shows: a fold that got cheaper by
+        closing would let the budget move under the user's feet, evicting old
+        output as a side effect of a keypress."""
+        return 1 + len(block.detail) if isinstance(block, render.Fold) else 1
+
+    def _wrap(self, blocks: list[str | render.Fold]) -> None:
+        """Append `blocks` to `rows`/`row_owner` without touching what's there."""
+        for block in blocks:
+            lines = block.lines() if isinstance(block, render.Fold) else [block]
+            owner = block if isinstance(block, render.Fold) else None
+            for line in lines:
+                wrapped = render.wrap_ansi(line, self.width)
+                self.rows.extend(wrapped)
+                self.row_owner.extend([owner] * len(wrapped))
+
+    def _rebuild(self) -> None:
+        """Recompute every row from the blocks. The blocks are the source of
+        truth; rows and their owners are derived, so anything that changes a
+        block's shape comes through here."""
+        self.rows = []
+        self.row_owner = []
+        self._wrap(self._blocks)
+
+    def append(self, blocks: list) -> None:
+        self._blocks.extend(blocks)
+        total = sum(self._cost(b) for b in self._blocks)
+        if total > MAX_TRANSCRIPT_LINES:
+            while total > MAX_TRANSCRIPT_LINES and self._blocks:
+                total -= self._cost(self._blocks.pop(0))
+            self._rebuild()
             return
-        for line in lines:
-            self.rows.extend(render.wrap_ansi(line, self.width))
+        self._wrap(blocks)
+
+    def toggle(self, fold: render.Fold) -> int:
+        """Open or close a fold. Returns the change in row count, which the
+        caller needs to keep the clicked row where the user left it."""
+        before = len(self.rows)
+        fold.expanded = not fold.expanded
+        self._rebuild()
+        return len(self.rows) - before
+
+    def fold_at(self, row: int) -> "render.Fold | None":
+        """The fold owning a rendered row, or None for ordinary output."""
+        if 0 <= row < len(self.row_owner):
+            return self.row_owner[row]
+        return None
+
+    def last_fold(self) -> "render.Fold | None":
+        for block in reversed(self._blocks):
+            if isinstance(block, render.Fold):
+                return block
+        return None
 
     def clear(self) -> None:
-        self._lines.clear()
+        self._blocks.clear()
         self.rows.clear()
+        self.row_owner.clear()
         self.follow = True
 
     def set_width(self, width: int) -> None:
-        """Re-wrap on resize. The stored logical lines are the source of truth;
-        rows are derived, so a resize just recomputes them."""
+        """Re-wrap on resize. The stored blocks are the source of truth; rows
+        are derived, so a resize just recomputes them."""
         if width == self.width:
             return
         self.width = width
-        self.rows = render.wrap_all(self._lines, width)
+        self._rebuild()
 
     def text(self) -> str:
         return "\n".join(self.rows)
@@ -371,11 +433,62 @@ async def run_tui(
         ),
     )
 
+    def toggle_fold(fold) -> None:
+        """Open or close a collapsed run, keeping the view where it was.
+
+        Expanding inserts rows strictly *below* the fold's own row, so the row
+        the user clicked does not move and needs no compensation. Collapsing
+        removes rows, which can leave `vertical_scroll` past the new end — that
+        is the only case with arithmetic.
+        """
+        transcript.toggle(fold)
+        if transcript.follow:
+            scroll_to_bottom()
+        else:
+            info = transcript_window.render_info
+            height = info.window_height if info else 20
+            # `render_info` holds the *clamped* scroll; the window's own
+            # attribute may still carry `scroll_to_bottom`'s deliberate
+            # overshoot, which would read as a wild offset here.
+            current = (
+                info.vertical_scroll if info else transcript_window.vertical_scroll
+            )
+            transcript_window.vertical_scroll = min(
+                current, max(len(transcript.rows) - height, 0)
+            )
+        app.invalidate()
+
+    def _row_at(mouse_event) -> int | None:
+        """Screen y → index into `transcript.rows`.
+
+        The window's mouse handler receives *absolute screen* coordinates —
+        not window-relative, and not adjusted for scrolling. `render_info`
+        holds the map from drawn line to content row, and it covers blank rows,
+        which is why this goes through the window rather than the control: the
+        control's own hit-test walks backwards looking for a character and
+        reports row 0 for a row that has none.
+        """
+        info = transcript_window.render_info
+        if info is None:
+            return None
+        visible = mouse_event.position.y - getattr(info, "_y_offset", 0)
+        rowcol = info.visible_line_to_row_col.get(visible)
+        return rowcol[0] if rowcol else None
+
     # The built-in wheel handler moves `vertical_scroll` but knows nothing
     # about following the bottom, so wrap it to keep the two in agreement.
     _inner_mouse_handler = transcript_window._mouse_handler
 
     def _mouse(mouse_event):
+        # On release rather than press: a drag-selection emits down/move/up,
+        # and acting on the press would fight the terminal's text selection.
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            row = _row_at(mouse_event)
+            fold = transcript.fold_at(row) if row is not None else None
+            if fold is not None:
+                toggle_fold(fold)
+                return None  # None repaints; NotImplemented would not
+            return NotImplemented
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
             transcript.follow = False
         result = _inner_mouse_handler(mouse_event)
@@ -388,9 +501,10 @@ async def run_tui(
 
     transcript_window._mouse_handler = _mouse
 
-    def emit(lines: list[str]) -> None:
-        if lines:
-            transcript.append(lines)
+    def emit(blocks: list) -> None:
+        """Append to the transcript. Takes plain lines and `render.Fold`s."""
+        if blocks:
+            transcript.append(blocks)
             if transcript.follow:
                 scroll_to_bottom()
             app.invalidate()
@@ -912,6 +1026,23 @@ async def run_tui(
     @kb.add("s-down")
     def _line_down(event) -> None:
         scroll_by(1)
+
+    @kb.add("c-o", filter=~picking)
+    def _toggle_last_fold(event) -> None:
+        """Open or close the most recent collapsed run.
+
+        The transcript has no cursor to point at a particular fold, and adding
+        a selection model to reach one is out of proportion — but "what did it
+        just do?" is the question that actually gets asked, and the last fold
+        is its answer. Any other fold is a click away.
+
+        `c-o` is bound by prompt_toolkit's defaults (a no-op in `basic`,
+        `operate-and-get-next` in `emacs`); an application binding is appended
+        after both and dispatched first, so this wins.
+        """
+        fold = transcript.last_fold()
+        if fold is not None:
+            toggle_fold(fold)
 
     @kb.add("tab")
     def _tab(event) -> None:

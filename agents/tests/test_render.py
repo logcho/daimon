@@ -165,16 +165,94 @@ def _step(**over) -> dict:
     return event
 
 
-def test_running_steps_stay_live_and_finished_ones_are_promoted() -> None:
-    """The core rule: a line is live while it's happening and permanent once
-    it isn't. Nothing in scrollback ever needs revising."""
+def test_a_finished_step_stays_live_until_its_run_is_flushed() -> None:
+    """The core rule, as amended: a call is live while it's happening, and
+    afterwards it joins the open *run* rather than earning its own permanent
+    row. It never leaves the screen in between — the rolling row counts the
+    whole run, so the step is visible before and after it finishes."""
     state = LiveState()
     assert state.consume(_step()) == []  # nothing promoted yet
     assert any("read_file" in line for line in state.lines())
 
-    promoted = state.consume(_step(status="done", elapsed_ms=420))
+    assert state.consume(_step(status="done", elapsed_ms=420)) == []
+    assert not state.steps  # no longer in flight...
+    assert any("read_file" in line for line in state.lines())  # ...still on screen
+
+    promoted = state.end_turn()
     assert len(promoted) == 1 and "read_file" in promoted[0]
-    assert not any("read_file" in line for line in state.lines())
+    assert state.lines() == []
+
+
+def test_a_run_of_one_promotes_a_plain_line_not_a_fold() -> None:
+    """Hiding a single call behind a chevron costs a keypress and saves
+    nothing."""
+    state = LiveState()
+    state.consume(_step())
+    state.consume(_step(status="done", elapsed_ms=420))
+    promoted = state.end_turn()
+    assert len(promoted) == 1 and isinstance(promoted[0], str)
+
+
+def test_a_run_of_several_promotes_one_fold_holding_every_call() -> None:
+    state = LiveState()
+    for i in range(4):
+        state.consume(_step(id=f"s{i}", detail=f"file{i}.py"))
+        state.consume(_step(id=f"s{i}", status="done", detail=f"file{i}.py",
+                            elapsed_ms=150))
+    promoted = state.end_turn()
+    assert len(promoted) == 1
+    fold = promoted[0]
+    assert isinstance(fold, render.Fold)
+    # Collapsed it is one line carrying the shape of the run; opened it is that
+    # line plus every call, with the paths that make a transcript worth reading.
+    assert fold.lines() == [fold.closed]
+    assert "4 tools" in fold.closed and "4 read" in fold.closed
+    fold.expanded = True
+    assert len(fold.lines()) == 5
+    assert all(f"file{i}.py" in "".join(fold.detail) for i in range(4))
+
+
+def test_a_failed_call_is_never_folded_away_silently() -> None:
+    state = LiveState()
+    state.consume(_step(id="a", detail="ok.py"))
+    state.consume(_step(id="a", status="done", detail="ok.py", elapsed_ms=150))
+    state.consume(_step(id="b", detail="nope.py"))
+    state.consume(_step(id="b", status="error", detail="nope.py"))
+    # Visible on the live row while the run is still open...
+    assert "1 failed" in "\n".join(state.lines())
+    # ...and on the collapsed row once it isn't.
+    assert "1 failed" in state.end_turn()[0].closed
+
+
+def test_a_subagent_reporting_back_flushes_the_parent_run_first() -> None:
+    """The transcript is ordered: the parent's own calls happened before the
+    sub-agent answered, so they have to land first."""
+    state = LiveState()
+    for i in range(2):
+        state.consume(_step(id=f"p{i}"))
+        state.consume(_step(id=f"p{i}", status="done", elapsed_ms=150))
+    state.consume(_step(id="sub-1", label="research: q", status="running",
+                        tool=None, agent_id="sub-1", agent_label="research"))
+    state.consume(_step(id="c", parent_step_id="sub-1"))
+    state.consume(_step(id="c", parent_step_id="sub-1", status="done",
+                        elapsed_ms=150))
+    promoted = state.consume(_step(id="sub-1", label="research", status="done",
+                                   tool="research", agent_id="sub-1",
+                                   agent_label="research", elapsed_ms=9000))
+    assert len(promoted) == 2
+    assert "2 tools" in promoted[0].closed          # the parent's run
+    assert "research" in promoted[1].closed         # then the sub-agent
+
+
+def test_an_open_run_survives_to_the_transcript_via_every_exit() -> None:
+    """Whatever ends the turn, the run must not be dropped on the floor."""
+    for close in ("end_turn", "cancel"):
+        state = LiveState()
+        for i in range(2):
+            state.consume(_step(id=f"s{i}"))
+            state.consume(_step(id=f"s{i}", status="done", elapsed_ms=150))
+        promoted = getattr(state, close)()
+        assert any(isinstance(p, render.Fold) for p in promoted)
 
 
 def test_thinking_opens_and_closes_the_busy_state() -> None:
@@ -265,7 +343,7 @@ def test_concurrent_subagents_get_their_own_blocks() -> None:
         id="sub-1", label="research", status="done", tool="research",
         agent_id="sub-1", agent_label="research", elapsed_ms=18200,
     ))
-    assert len(promoted) == 1 and "research" in promoted[0]
+    assert len(promoted) == 1 and "research" in promoted[0].closed
     assert "sub-1" not in state.subagents
 
 

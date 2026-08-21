@@ -5,10 +5,11 @@ prompt_toolkit, no I/O — which is what makes the display testable at all. The
 TUI decides *where* a line goes (permanent scrollback vs. the live region);
 this module only decides what it says.
 
-Two vocabularies share the file. `Transcript` lines are finalized — printed
-once into the terminal's own scrollback, never revised. Live lines are redrawn
-every frame until the thing they describe finishes, at which point the TUI
-promotes the final version into the transcript and forgets about it.
+Two vocabularies share the file. Live lines are redrawn every frame until the
+thing they describe finishes, at which point the TUI promotes a final version
+into the transcript. Transcript lines are settled rather than immutable: the
+TUI owns that buffer and re-renders it every frame, which is what lets a
+collapsed run (`run_line`) expand in place long after it was promoted.
 """
 
 from __future__ import annotations
@@ -129,6 +130,146 @@ def step_line(
     return line + tail
 
 
+#: Tool → the category it counts toward in a collapsed run's summary.
+#:
+#: Kept deliberately coarse. "9 read · 3 edit · 2 shell" tells you the shape of
+#: what happened; a breakdown by individual tool name would just be the step
+#: list again with the useful part (what each one was called *with*) removed.
+#:
+#: Mirrors `CATEGORY` in `app/src/components/StepSummary.tsx` — the two clients
+#: show the same turn and should describe it the same way. Add a tool to both.
+CATEGORY = {
+    "read_file": "read",
+    "grep_files": "read",
+    "glob_files": "read",
+    "list_directory": "read",
+    "read_note": "read",
+    "list_notes": "read",
+    "read_skill": "read",
+    "list_skills": "read",
+    "recall": "read",
+
+    "write_file": "edit",
+    "edit_file": "edit",
+    "delete_file": "edit",
+    "move_file": "edit",
+    "mkdir": "edit",
+    "create_note": "edit",
+    "append_to_note": "edit",
+    "move_note": "edit",
+    "save_skill": "edit",
+
+    "run_shell": "shell",
+    "kernel_execute": "shell",
+    "run_tests": "shell",
+    "check_code": "shell",
+    "debug": "shell",
+
+    "web_search": "web",
+    "web_fetch": "web",
+    "open_url": "web",
+    "read_page": "web",
+    "extract_text": "web",
+    "find_skills": "web",
+}
+
+#: The order categories appear in, so two runs are comparable at a glance.
+ORDER = ["read", "edit", "shell", "web"]
+
+#: Most rows shown inside an expanded fold. Past a certain length nobody is
+#: reading anyway, and every row costs a re-wrap.
+MAX_EXPANDED = 30
+
+
+def category_parts(names: list[str]) -> list[str]:
+    """The category tally as display parts — `["9 read", "3 edit"]`, in ORDER."""
+    counts: dict[str, int] = {}
+    for name in names:
+        category = CATEGORY.get(name)
+        if category:
+            counts[category] = counts.get(category, 0) + 1
+    return [f"{counts[c]} {c}" for c in ORDER if c in counts]
+
+
+@dataclass
+class Fold:
+    """A promoted block that shows one line until the user opens it.
+
+    Pure data: the two summary variants are pre-rendered, so toggling is a flag
+    flip and `lines()` never has to re-derive anything. `tui.Transcript` stores
+    these alongside plain strings and rebuilds its wrapped rows when the flag
+    changes.
+    """
+
+    closed: str
+    open: str
+    detail: list[str] = field(default_factory=list)
+    expanded: bool = False
+
+    def lines(self) -> list[str]:
+        return [self.open, *self.detail] if self.expanded else [self.closed]
+
+
+def run_line(
+    count: int,
+    *,
+    categories: list[str] | None = None,
+    failed: int = 0,
+    elapsed_ms: int | None = None,
+    expanded: bool = False,
+    indent: int = 2,
+    width: int = 80,
+) -> str:
+    """The collapsed row standing in for a run of tool calls.
+
+    `  ▸ 12 tools · 9 read · 3 edit  (4.1s)`
+
+    A run is the parent agent's own work between two things worth seeing
+    separately — a sub-agent, a line of the answer, the end of the turn. Twelve
+    `read_file` rows in permanent scrollback say nothing that this one doesn't;
+    the paths are still there, one keypress away.
+
+    A failure is never folded away silently: a run that contains one says so
+    here, where the row is visible without expanding it.
+    """
+    chevron = f"{DIM}{'▾' if expanded else '▸'}{RESET}"
+    parts = [f"{count} tool{'s' if count != 1 else ''}", *(categories or [])]
+    line = f"{' ' * indent}{chevron} {DIM}{' · '.join(parts)}{RESET}"
+    if failed:
+        line += f"  {RED}✗ {failed} failed{RESET}"
+    if elapsed_ms is not None and elapsed_ms >= 100:
+        line += f"  {DIM}({fmt_duration(elapsed_ms / 1000)}){RESET}"
+    return line
+
+
+def run_active_line(
+    count: int,
+    name: str | None = None,
+    detail: str | None = None,
+    *,
+    failed: int = 0,
+    indent: int = 2,
+    width: int = 80,
+) -> str:
+    """The live rolling row: `  → 3 tools · read_file  app/src/App.tsx`.
+
+    Counts the whole run so far, not just what is in flight, and names the most
+    recent call. It stands in for finished calls too — they leave the live
+    region before the run is promoted, and without this they would briefly be
+    nowhere at all.
+    """
+    head = f"{count} tool{'s' if count != 1 else ''}"
+    line = f"{' ' * indent}{_MARKS['running']} {DIM}{head}{RESET}"
+    if name:
+        line += f" {DIM}·{RESET} {MAGENTA}{name}{RESET}"
+        if detail:
+            budget = max(width - indent - len(head) - len(name) - 10, 12)
+            line += f"  {DIM}{truncate(detail, budget)}{RESET}"
+    if failed:
+        line += f"  {RED}✗ {failed} failed{RESET}"
+    return line
+
+
 def subagent_line(
     label: str,
     query: str,
@@ -137,10 +278,18 @@ def subagent_line(
     tools: int = 0,
     tokens: int = 0,
     elapsed_ms: int | None = None,
+    expanded: bool | None = None,
     width: int = 80,
 ) -> str:
-    """A sub-agent's own line, indented under the spawn."""
+    """A sub-agent's own line, indented under the spawn.
+
+    `expanded` is None for a line that cannot be opened — the running one in
+    the live region — and a bool for the promoted line, which carries a chevron
+    alongside its status mark. The mark stays: a sub-agent that failed should
+    say so whether or not its calls are showing.
+    """
     mark = _MARKS.get(status, _MARKS["pending"])
+    chevron = "" if expanded is None else f"{DIM}{'▾' if expanded else '▸'}{RESET} "
     stats: list[str] = []
     if tools:
         stats.append(f"{tools} tool{'s' if tools != 1 else ''}")
@@ -151,7 +300,8 @@ def subagent_line(
     suffix = f"  {DIM}{' · '.join(stats)}{RESET}" if stats else ""
     budget = max(width - 24 - len(_strip_ansi(suffix)), 16)
     return (
-        f"    {mark} {CYAN}{label}{RESET} {DIM}{truncate(query, budget)}{RESET}{suffix}"
+        f"    {chevron}{mark} {CYAN}{label}{RESET} "
+        f"{DIM}{truncate(query, budget)}{RESET}{suffix}"
     )
 
 

@@ -74,6 +74,8 @@ def _cmd_help(text: str, session_name: str | None) -> list[str]:
         ("Esc", "cancel the running turn"),
         ("Ctrl-C", "cancel, or exit when idle"),
         ("Ctrl-D", "exit"),
+        ("click", "expand a collapsed run of tool calls"),
+        ("Ctrl-O", "expand the most recent run"),
         ("wheel", "scroll the transcript"),
         ("PgUp PgDn", "scroll a page"),
         ("Shift+↑↓", "scroll a line"),
