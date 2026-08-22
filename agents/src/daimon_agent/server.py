@@ -54,6 +54,7 @@ from .skills.registry import RegistryError, SkillRegistry, install_bundle
 from .tools import build_tools
 from .tools.files import forget_reads
 from .tools.repl import close_all_repls, close_repl
+from .terminals import TerminalManager
 from .tools.todo import clear_todos
 from .tools.search import aclose_search_provider
 from .tools.web import aclose_web_fetcher
@@ -324,6 +325,9 @@ async def create_app(
     # socket used to be the only way to stop a turn, and that stops working the
     # moment more than one client is reading it.
     app["turns"] = {}
+    # Terminals live here now rather than in the desktop app, so they outlive
+    # the window that opened them and more than one client can watch a shell.
+    app["terminals"] = TerminalManager()
 
     async def release_session(session_id: str) -> None:
         """Drop a session's graph and everything keyed to its id."""
@@ -427,7 +431,7 @@ async def create_app(
                 settings.idle_timeout_s,
                 attached=lambda: sum(
                     c.subscriber_count for c in app["bus"].channels()
-                ),
+                ) + app["terminals"].live_count,
             )
         )
 
@@ -453,6 +457,8 @@ async def create_app(
                 await drain
         # Flushes what the cancelled drain left behind, then closes the file.
         app["eventlog"].close()
+        # Quitting must not leave shells (and whatever they started) running.
+        app["terminals"].close_all()
         await close_checkpointer(app["checkpointer"])
         await aclose_browser()
         await aclose_web_fetcher()

@@ -211,3 +211,207 @@ async def test_todos_come_with_the_snapshot(client: TestClient) -> None:
         _ack, frames = await _call(ws, "attach", session="s")
         (snapshot,) = [f for f in frames if f.get("control") == "snapshot"]
         assert snapshot["todos"] == items
+
+
+# --- terminals ---------------------------------------------------------------
+
+async def _read_until(ws, predicate, timeout: float = 15.0):
+    """Collect frames until one satisfies `predicate`, returning them all."""
+    frames = []
+
+    async def poll():
+        while True:
+            frame = await ws.receive_json()
+            frames.append(frame)
+            if predicate(frame):
+                return
+
+    await asyncio.wait_for(poll(), timeout=timeout)
+    return frames
+
+
+def _term_text(frames) -> bytes:
+    import base64
+
+    return b"".join(
+        base64.b64decode(f["data"]) for f in frames if f.get("kind") == "term"
+    )
+
+
+async def _shell_ready(ws, term_id: str) -> None:
+    """A login shell starts its line editor asynchronously; bytes sent before
+    then are swallowed. Probe until one comes back."""
+    while True:
+        await ws.send_json({"op": "term.input", "op_id": "probe",
+                            "id": term_id, "data": "printf 'WS-%s\\n' READY\n"})
+        try:
+            frames = await _read_until(
+                ws, lambda f: b"WS-READY" in _term_text([f]), timeout=1.5
+            )
+            return
+        except asyncio.TimeoutError:
+            continue
+
+
+async def test_a_terminal_can_be_opened_and_typed_into(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.open", cols=100, rows=40)
+        assert ack["ok"] is True
+        term_id = ack["terminal"]["id"]
+        assert ack["terminal"]["pid"] > 0
+
+        await _call(ws, "term.attach", id=term_id, cols=100, rows=40)
+        await _shell_ready(ws, term_id)
+
+        await ws.send_json({"op": "term.input", "op_id": "x", "id": term_id,
+                            "data": "printf 'FROM-%s\\n' SOCKET\n"})
+        frames = await _read_until(ws, lambda f: b"FROM-SOCKET" in _term_text([f]))
+        assert b"FROM-SOCKET" in _term_text(frames)
+
+
+async def test_attaching_to_a_terminal_replays_its_scrollback(client: TestClient) -> None:
+    """The reason terminals moved here: a client arriving later used to get a
+    blank screen, because the only buffer was the webview's."""
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.open")
+        term_id = ack["terminal"]["id"]
+        await _call(ws, "term.attach", id=term_id)
+        await _shell_ready(ws, term_id)
+        await ws.send_json({"op": "term.input", "op_id": "x", "id": term_id,
+                            "data": "printf 'SCROLL-%s\\n' BACK\n"})
+        await _read_until(ws, lambda f: b"SCROLL-BACK" in _term_text([f]))
+
+    # A brand-new socket, as a phone opening the app would be.
+    async with client.ws_connect("/bus/ws") as ws2:
+        _ack, frames = await _call(ws2, "term.attach", id=term_id)
+        (snapshot,) = [f for f in frames if f.get("control") == "term_snapshot"]
+        import base64
+
+        assert b"SCROLL-BACK" in base64.b64decode(snapshot["data"])
+
+
+async def test_two_sockets_share_one_shell(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as a, client.ws_connect("/bus/ws") as b:
+        ack, _ = await _call(a, "term.open")
+        term_id = ack["terminal"]["id"]
+        await _call(a, "term.attach", id=term_id)
+        await _call(b, "term.attach", id=term_id)
+        await _shell_ready(a, term_id)
+
+        # Typed on one socket, seen on the other.
+        await a.send_json({"op": "term.input", "op_id": "x", "id": term_id,
+                           "data": "printf 'SHARED-%s\\n' SCREEN\n"})
+        frames = await _read_until(b, lambda f: b"SHARED-SCREEN" in _term_text([f]))
+        assert b"SHARED-SCREEN" in _term_text(frames)
+
+
+async def test_the_pty_takes_the_smallest_attached_size(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as desktop, client.ws_connect("/bus/ws") as phone:
+        ack, _ = await _call(desktop, "term.open", cols=200, rows=50)
+        term_id = ack["terminal"]["id"]
+        await _call(desktop, "term.attach", id=term_id, cols=200, rows=50)
+
+        ack, _ = await _call(phone, "term.attach", id=term_id, cols=60, rows=30)
+        assert (ack["terminal"]["cols"], ack["terminal"]["rows"]) == (60, 30)
+
+
+async def test_a_terminal_survives_the_socket_that_opened_it(client: TestClient) -> None:
+    """The other half of moving terminals off the app: closing the window is
+    not the same as ending the shell."""
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.open")
+        term_id = ack["terminal"]["id"]
+        await _call(ws, "term.attach", id=term_id)
+
+    assert client.app["terminals"].get(term_id) is not None
+    assert client.app["terminals"].live_count == 1
+
+    async with client.ws_connect("/bus/ws") as ws2:
+        ack, _ = await _call(ws2, "term.list")
+        assert [t["id"] for t in ack["terminals"]] == [term_id]
+
+
+async def test_closing_a_socket_detaches_but_does_not_close_terminals(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.open")
+        term_id = ack["terminal"]["id"]
+        await _call(ws, "term.attach", id=term_id)
+        assert client.app["terminals"].get(term_id).describe()["clients"] == 1
+
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if client.app["terminals"].get(term_id).describe()["clients"] == 0:
+            break
+    assert client.app["terminals"].get(term_id).describe()["clients"] == 0
+
+
+async def test_closing_a_terminal_ends_it(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.open")
+        term_id = ack["terminal"]["id"]
+        ack, _ = await _call(ws, "term.close", id=term_id)
+        assert ack["closed"] is True
+        assert client.app["terminals"].get(term_id) is None
+
+        ack, _ = await _call(ws, "term.close", id=term_id)
+        assert ack["closed"] is False  # closing twice is not an error
+
+
+async def test_the_shell_exiting_is_announced(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.open")
+        term_id = ack["terminal"]["id"]
+        await _call(ws, "term.attach", id=term_id)
+        await _shell_ready(ws, term_id)
+
+        await ws.send_json({"op": "term.input", "op_id": "x", "id": term_id, "data": "exit 7\n"})
+        frames = await _read_until(ws, lambda f: f.get("control") == "term_exited")
+        (exited,) = [f for f in frames if f.get("control") == "term_exited"]
+        assert (exited["id"], exited["code"]) == (term_id, 7)
+
+
+async def test_input_to_an_unknown_terminal_is_refused_not_fatal(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.input", id="nope", data="hi")
+        assert ack["ok"] is False
+        ack, _ = await _call(ws, "ping")
+        assert ack["ok"] is True
+
+
+async def test_resizing_a_terminal_that_is_not_there_yet_is_not_an_error(client: TestClient) -> None:
+    """A ResizeObserver can fire before the spawn completes; that ordinary
+    startup race must not surface as a visible failure."""
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.resize", id="not-yet", cols=80, rows=24)
+        assert ack["ok"] is True
+
+
+async def test_opening_a_terminal_with_a_chosen_id_is_idempotent(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        first, _ = await _call(ws, "term.open", id="tab-1")
+        second, _ = await _call(ws, "term.open", id="tab-1")
+        assert first["terminal"]["pid"] == second["terminal"]["pid"]
+        assert len(client.app["terminals"].list()) == 1
+
+
+async def test_binary_input_can_be_sent_base64(client: TestClient) -> None:
+    """Control sequences are bytes, not text — Ctrl-C is 0x03."""
+    import base64
+
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "term.open")
+        term_id = ack["terminal"]["id"]
+        await _call(ws, "term.attach", id=term_id)
+        await _shell_ready(ws, term_id)
+
+        await ws.send_json({"op": "term.input", "op_id": "s", "id": term_id,
+                            "data": "sleep 30\n"})
+        await asyncio.sleep(0.6)
+        await ws.send_json({"op": "term.input", "op_id": "c", "id": term_id,
+                            "data": base64.b64encode(b"\x03").decode(), "encoding": "base64"})
+        # The proof the interrupt landed: the shell takes a new command. (Not
+        # "the rest of the line runs" — Ctrl-C abandons the whole line.)
+        await ws.send_json({"op": "term.input", "op_id": "a", "id": term_id,
+                            "data": "printf 'AFTER-%s\\n' INT\n"})
+        frames = await _read_until(ws, lambda f: b"AFTER-INT" in _term_text([f]))
+        assert b"AFTER-INT" in _term_text(frames)
