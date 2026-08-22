@@ -4,6 +4,8 @@ import { TodoList } from "../components/TodoList";
 import { applyEvent, applyTodoEvent } from "../sessionEvents";
 import type { AgentEvent, ChatMessage, TodoItem } from "../types";
 import type { BusClient } from "../lib/busClient";
+import { AskSheet, type AskPrompt } from "./AskSheet";
+import { Notes } from "./Notes";
 import { TerminalView } from "./TerminalView";
 import {
   connect,
@@ -18,7 +20,8 @@ type Screen =
   | { view: "workspaces" }
   | { view: "list"; workspace: WorkspaceInfo }
   | { view: "session"; workspace: WorkspaceInfo; sessionId: string; title: string }
-  | { view: "terminal"; workspace: WorkspaceInfo; id: string };
+  | { view: "terminal"; workspace: WorkspaceInfo; id: string }
+  | { view: "notes"; workspace: WorkspaceInfo };
 
 export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [screen, setScreen] = useState<Screen>({ view: "workspaces" });
@@ -27,6 +30,8 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [todos, setTodos] = useState<TodoItem[]>([]);
+  const [ask, setAsk] = useState<AskPrompt | null>(null);
+  const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,6 +55,26 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
         const current = screenRef.current;
         if (current.view !== "session" || current.sessionId !== session) return;
         const agentEvent = event as AgentEvent;
+        const type = (event as { type: string }).type;
+
+        // `ask` and `ask_resolved` are session state, not message state — the
+        // same split `applyTodoEvent` makes, and the same one cli/live.py
+        // makes with LiveState.ask. A question is a thing the session is
+        // waiting on, not a line in the transcript.
+        if (type === "ask") {
+          setAsk(event as AskPrompt);
+          setBusy(false);
+          return;
+        }
+        if (type === "ask_resolved") {
+          // Somebody answered — possibly on the laptop. Take the prompt down
+          // rather than letting it sit there answering an already-resumed turn.
+          setAsk(null);
+          setBusy(true);
+          return;
+        }
+        if (type === "done" || type === "error") setBusy(false);
+
         setMessages((prev) => applyEvent(prev, agentEvent));
         setTodos((prev) => applyTodoEvent(prev, agentEvent));
       },
@@ -61,6 +86,11 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           const events = (frame.events ?? []) as AgentEvent[];
           setMessages(events.reduce<ChatMessage[]>(foldSnapshot, []));
           setTodos((frame.todos ?? []) as TodoItem[]);
+          // A session parked on a question renders the prompt immediately.
+          // The event that carried it may have been hours ago; the channel
+          // keeps it precisely so a client arriving late can still answer.
+          setAsk((frame.pending_ask as AskPrompt | null) ?? null);
+          setBusy(Boolean(frame.busy));
         } else if (frame.control === "term_snapshot") {
           termSinks.current.get(String(frame.id))?.(decodeSnapshot(frame.data));
         } else if (frame.control === "workspace_lost") {
@@ -127,6 +157,8 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
   async function openSession(workspace: WorkspaceInfo, session: SessionInfo) {
     setMessages([]);
     setTodos([]);
+    setAsk(null);
+    setBusy(session.busy);
     setScreen({
       view: "session",
       workspace,
@@ -183,6 +215,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           onTerminal={(t) => setScreen({ view: "terminal", workspace: screen.workspace, id: t.id })}
           onNewTerminal={() => newTerminal(screen.workspace)}
           onRefresh={() => refreshLists(screen.workspace)}
+          onNotes={() => setScreen({ view: "notes", workspace: screen.workspace })}
         />
       )}
 
@@ -190,6 +223,14 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
         <SessionView
           messages={messages}
           todos={todos}
+          busy={busy}
+          onStop={() => {
+            void busRef.current?.send("interrupt", {
+              workspace: screen.workspace.key,
+              session: screen.sessionId,
+              by: "phone",
+            });
+          }}
           onSend={(text) => {
             const bus = busRef.current;
             if (!bus) return;
@@ -198,6 +239,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
               { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false },
               { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: true, startedAt: Date.now() },
             ]);
+            setBusy(true);
             void bus.send("prompt", {
               workspace: screen.workspace.key,
               session: screen.sessionId,
@@ -205,6 +247,28 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
             });
           }}
         />
+      )}
+
+      {screen.view === "session" && ask && (
+        <AskSheet
+          ask={ask}
+          onAnswer={(answer) => {
+            setAsk(null);
+            setBusy(true);
+            void busRef.current?.send("answer", {
+              workspace: screen.workspace.key,
+              session: screen.sessionId,
+              ask_id: ask.id,
+              answer,
+              by: "phone",
+            });
+          }}
+          onDismiss={() => setAsk(null)}
+        />
+      )}
+
+      {screen.view === "notes" && busRef.current && (
+        <Notes bus={busRef.current} workspace={screen.workspace.key} />
       )}
 
       {screen.view === "terminal" && busRef.current && (
@@ -236,7 +300,8 @@ function Header({
     screen.view === "workspaces" ? "Daimon"
       : screen.view === "list" ? screen.workspace.name
         : screen.view === "session" ? screen.title
-          : "terminal";
+          : screen.view === "notes" ? "notes"
+            : "terminal";
 
   return (
     <header
@@ -247,7 +312,8 @@ function Header({
         <button
           onClick={() => {
             if (screen.view === "session") onLeave(screen.workspace, screen.sessionId);
-            else if (screen.view === "terminal") onBack({ view: "list", workspace: screen.workspace });
+            else if (screen.view === "terminal" || screen.view === "notes")
+              onBack({ view: "list", workspace: screen.workspace });
             else onBack({ view: "workspaces" });
           }}
           className="rounded-lg px-2 py-1 text-sm text-neutral-400 active:text-neutral-100"
@@ -304,6 +370,7 @@ function SessionAndTerminalList({
   onTerminal,
   onNewTerminal,
   onRefresh,
+  onNotes,
 }: {
   sessions: SessionInfo[];
   terminals: TerminalInfo[];
@@ -311,9 +378,16 @@ function SessionAndTerminalList({
   onTerminal: (t: TerminalInfo) => void;
   onNewTerminal: () => void;
   onRefresh: () => void;
+  onNotes: () => void;
 }) {
   return (
-    <div className="flex-1 px-3 py-3">
+    <div className="flex-1 overflow-y-auto px-3 py-3">
+      <button
+        onClick={onNotes}
+        className="mb-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm active:bg-white/10"
+      >
+        notes ›
+      </button>
       <div className="mb-2 flex items-center justify-between px-1">
         <h2 className="text-xs uppercase tracking-wide text-neutral-500">terminals</h2>
         <button onClick={onNewTerminal} className="text-xs text-[#4f8dff]">+ new</button>
@@ -372,11 +446,15 @@ function SessionAndTerminalList({
 function SessionView({
   messages,
   todos,
+  busy,
   onSend,
+  onStop,
 }: {
   messages: ChatMessage[];
   todos: TodoItem[];
+  busy: boolean;
   onSend: (text: string) => void;
+  onStop: () => void;
 }) {
   const [draft, setDraft] = useState("");
   return (
@@ -406,13 +484,23 @@ function SessionView({
           placeholder="message"
           className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm outline-none focus:border-[#4f8dff]/60"
         />
-        <button
-          type="submit"
-          disabled={!draft.trim()}
-          className="rounded-2xl bg-[#4f8dff] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40"
-        >
-          send
-        </button>
+        {busy ? (
+          <button
+            type="button"
+            onClick={onStop}
+            className="rounded-2xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-medium text-neutral-200"
+          >
+            stop
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!draft.trim()}
+            className="rounded-2xl bg-[#4f8dff] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40"
+          >
+            send
+          </button>
+        )}
       </form>
     </div>
   );

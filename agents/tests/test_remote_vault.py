@@ -1,0 +1,105 @@
+"""Reading and writing notes from another device.
+
+The confinement is the point. A note name from a phone is attacker-controlled
+input in a way it never was from a local UI, and it goes through exactly the
+same resolve-then-check as the HTTP routes — one copy, so the two cannot drift
+into one being weaker.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+
+from daimon_agent.server import create_app
+from test_server import fake_graph_builder
+
+
+@pytest.fixture
+async def client(settings):
+    app = await create_app(settings, graph_builder=fake_graph_builder)
+    async with TestClient(TestServer(app)) as client:
+        yield client
+
+
+async def _call(ws, op: str, **fields) -> dict:
+    await ws.send_json({"op": op, "op_id": op, **fields})
+    while True:
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        if frame.get("kind") == "ack" and frame.get("op_id") == op:
+            return frame
+
+
+async def test_notes_can_be_listed_and_read(client: TestClient) -> None:
+    root = client.app["settings"].vault_dir
+    (root / "notes").mkdir(parents=True, exist_ok=True)
+    (root / "notes" / "kickoff.md").write_text("# Kickoff\n\nthe plan")
+
+    async with client.ws_connect("/bus/ws") as ws:
+        listed = await _call(ws, "vault.list")
+        assert [n["name"] for n in listed["notes"]] == ["notes/kickoff.md"]
+
+        read = await _call(ws, "vault.read", name="notes/kickoff.md")
+        assert read["content"] == "# Kickoff\n\nthe plan"
+
+
+async def test_a_note_can_be_written_from_a_phone(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        written = await _call(ws, "vault.write", name="thoughts/idea.md", content="jotted down")
+        assert written["ok"] is True
+
+    assert (client.app["settings"].vault_dir / "thoughts" / "idea.md").read_text() == "jotted down"
+
+
+async def test_writing_a_note_keeps_recall_in_step(client: TestClient) -> None:
+    """A note the agent cannot find again is half-saved."""
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "vault.write", name="findme.md", content="the tuna casserole recipe")
+
+    assert client.app["memory"].search_notes("casserole")
+
+
+async def test_a_name_cannot_walk_out_of_the_vault(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        for name in ["../escaped.md", "../../etc/passwd.md", "notes/../../escaped.md"]:
+            ack = await _call(ws, "vault.write", name=name, content="should not land")
+            assert ack["ok"] is False, name
+            assert "outside the vault" in ack["error"], name
+
+        ack = await _call(ws, "vault.read", name="../../etc/passwd")
+        assert ack["ok"] is False
+
+    assert not (client.app["settings"].vault_dir.parent / "escaped.md").exists()
+
+
+async def test_only_markdown_can_be_written(client: TestClient) -> None:
+    """The listing is rglob("*.md"), so anything else is written once and then
+    invisible forever."""
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "vault.write", name="script.sh", content="rm -rf /")
+        assert ack["ok"] is False
+        assert "must end in .md" in ack["error"]
+
+
+async def test_internal_paths_are_not_listed_as_notes(client: TestClient) -> None:
+    """`.daimon/memory` holds this workspace's own databases, and skills have
+    their own view."""
+    root = client.app["settings"].vault_dir
+    (root / ".daimon").mkdir(parents=True, exist_ok=True)
+    (root / ".daimon" / "plumbing.md").write_text("internal")
+    (root / "skills" / "thing").mkdir(parents=True, exist_ok=True)
+    (root / "skills" / "thing" / "SKILL.md").write_text("a skill")
+    (root / "real.md").write_text("a note")
+
+    async with client.ws_connect("/bus/ws") as ws:
+        listed = await _call(ws, "vault.list")
+    assert [n["name"] for n in listed["notes"]] == ["real.md"]
+
+
+async def test_reading_a_note_that_is_not_there_says_so(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "vault.read", name="nope.md")
+        assert ack["ok"] is False
+        assert "no such note" in ack["error"]

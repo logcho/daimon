@@ -38,7 +38,7 @@ from .client import workspace_run_dir
 from .config import Settings
 from .envfile import patch_env_file
 from .eventlog import FLUSH_INTERVAL_S, EventLog
-from .events import TERMINAL_TYPES, error_event, user_event
+from .events import TERMINAL_TYPES, ask_resolved_event, error_event, user_event
 from .graph import build_graph, close_checkpointer, make_sqlite_checkpointer
 from .memory import MemoryStore
 from .model import ModelRouter
@@ -57,6 +57,7 @@ from .tools.files import forget_reads
 from .tools.repl import close_all_repls, close_repl
 from .terminals import TerminalManager
 from .tools.todo import clear_todos
+from .vault import is_internal, vault_file
 from .tools.search import aclose_search_provider
 from .tools.web import aclose_web_fetcher
 
@@ -766,6 +767,34 @@ async def create_app(
         if "answer" not in body:
             return web.Response(status=400, text="answer is required")
         answer = body["answer"]
+
+        # Claim the question before answering it. Clients have always sent
+        # `ask_id` and this handler has always ignored it, which was harmless
+        # while exactly one client could see a question — and is not, now that
+        # a laptop and a phone can both be looking at the same parked session.
+        # Taking it is a compare-and-swap: whoever gets there first answers,
+        # the loser is told so rather than resuming the same turn twice.
+        ask_id = body.get("ask_id")
+        channel = app["bus"].channel(session_id)
+        pending = channel.pending_ask
+        if ask_id is not None and pending is not None and pending.get("id") != ask_id:
+            return web.json_response(
+                {"error": "already answered", "ask_id": pending.get("id")}, status=409
+            )
+        if ask_id is not None and pending is None and channel.answered_ask_id == ask_id:
+            return web.json_response({"error": "already answered"}, status=409)
+        claimed = channel.clear_pending_ask()
+        if claimed is not None:
+            # Everyone else watching this session should stop showing the
+            # prompt, and see who dealt with it.
+            app["bus"].publisher(session_id)(
+                ask_resolved_event(
+                    str(claimed.get("id") or ""),
+                    answer,
+                    by=str(body.get("by") or "") or None,
+                )
+            )
+
         graph = await graph_for(session_id)
 
         async def run(emit) -> Any:
@@ -781,6 +810,68 @@ async def create_app(
             )
 
         return await _stream_turn_response(request, session_id, run)
+
+    async def interrupt_session(session_id: str, by: str | None = None) -> dict:
+        """Stop a turn on purpose.
+
+        Closing the connection used to be the only way, and that stopped being
+        workable the moment more than one client could read a turn: a phone
+        hanging up must not end work the laptop is watching, so a disconnect no
+        longer cancels anything unless it was the last reader. Stopping has to
+        be something you *say*.
+
+        A turn parked on a question is two steps, deliberately. The first
+        answers it with nothing — `_format_answer` renders "The user did not
+        answer." and the graph unwinds through its normal path — because
+        cancelling a suspended LangGraph thread mid-node is how you corrupt the
+        checkpoint it is suspended in. A second interrupt then cancels the turn
+        that resumed.
+        """
+        channel = app["bus"].peek(session_id)
+        if channel is not None and channel.pending_ask is not None:
+            claimed = channel.clear_pending_ask()
+            app["bus"].publisher(session_id)(
+                ask_resolved_event(str(claimed.get("id") or ""), None, by=by)
+            )
+            graph = await graph_for(session_id)
+
+            async def run(emit) -> Any:
+                return await resume_turn(
+                    None, session_id, app["settings"], emit,
+                    graph=graph, memory=app["memory"], router=app["router"],
+                    live_frames=_frame_task,
+                )
+
+            asyncio.ensure_future(run_turn_detached(session_id, run))
+            return {"ok": True, "was": "waiting"}
+
+        work = app["turns"].get(session_id)
+        if work is None or work.done():
+            # Not an error: "stop" on something already stopped is the state
+            # the caller asked for.
+            return {"ok": True, "was": "idle"}
+
+        # The terminal event is published here rather than by the cancelled
+        # turn, because this is the only place that knows the turn was stopped
+        # on purpose and by whom.
+        who = f" by {by}" if by else ""
+        app["bus"].publisher(session_id)(error_event(f"turn cancelled{who}"))
+        work.cancel()
+        return {"ok": True, "was": "running"}
+
+    app["interrupt_session"] = interrupt_session
+
+    async def interrupt_handler(request: web.Request) -> web.Response:
+        """POST /interrupt — see `interrupt_session`."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        session_id = str(body.get("session_id") or request.query.get("session_id") or "")
+        if not session_id:
+            return web.Response(status=400, text="session id is required")
+        result = await interrupt_session(session_id, str(body.get("by") or "") or None)
+        return web.json_response(result)
 
     async def session_delete_handler(request: web.Request) -> web.Response:
         """DELETE /sessions/{session_id} — forget a conversation.
@@ -980,30 +1071,6 @@ async def create_app(
     # it showed a stale set of notes — which would have made "delete" delete
     # the wrong files.
 
-    def _vault_file(settings_obj: Settings, relative: str) -> Path:
-        """Resolve a client-supplied path inside the vault, or raise.
-
-        Same discipline as `workspace.Confinement`: resolve first, then check
-        containment, so `..` and symlinks can't walk out. Used for folders as
-        well as notes — this is pure path resolution; whether the target has to
-        be a `.md` file is the caller's rule.
-        """
-        root = Path(settings_obj.vault_dir).resolve()
-        target = (root / relative).resolve()
-        if target != root and root not in target.parents:
-            raise ValueError("path is outside the vault")
-        return target
-
-    def _is_internal(relative: Path) -> bool:
-        """Paths the vault views must not show.
-
-        `skills` has its own view, and dot-directories are plumbing rather
-        than notes — `.daimon/memory` holds this workspace's own databases and
-        would otherwise show up in the tree as a folder the user can't
-        meaningfully use but can delete.
-        """
-        return any(part == "skills" or part.startswith(".") for part in relative.parts)
-
     async def vault_list_handler(request: web.Request) -> web.Response:
         """GET /vault — every note, newest first.
 
@@ -1015,7 +1082,7 @@ async def create_app(
             return web.json_response([])
         notes = []
         for path in root.rglob("*.md"):
-            if _is_internal(path.relative_to(root)):
+            if is_internal(path.relative_to(root)):
                 continue  # skills have their own view; dot-dirs are plumbing
             stat = path.stat()
             notes.append({
@@ -1040,7 +1107,7 @@ async def create_app(
         folders = sorted(
             str(path.relative_to(root))
             for path in root.rglob("*")
-            if path.is_dir() and not _is_internal(path.relative_to(root))
+            if path.is_dir() and not is_internal(path.relative_to(root))
         )
         return web.json_response(folders)
 
@@ -1054,7 +1121,7 @@ async def create_app(
         if not isinstance(path_str, str) or not path_str.strip():
             return web.json_response({"error": "path must be a non-empty string"}, status=400)
         try:
-            target = _vault_file(request.app["settings"], path_str.strip())
+            target = vault_file(request.app["settings"], path_str.strip())
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         if target.is_file():
@@ -1075,7 +1142,7 @@ async def create_app(
         """
         name = request.match_info.get("path", "")
         try:
-            target = _vault_file(request.app["settings"], name)
+            target = vault_file(request.app["settings"], name)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         root = Path(request.app["settings"].vault_dir).resolve()
@@ -1118,8 +1185,8 @@ async def create_app(
         if not isinstance(src_name, str) or not isinstance(dst_name, str):
             return web.json_response({"error": "from and to must be strings"}, status=400)
         try:
-            src = _vault_file(request.app["settings"], src_name)
-            dst = _vault_file(request.app["settings"], dst_name)
+            src = vault_file(request.app["settings"], src_name)
+            dst = vault_file(request.app["settings"], dst_name)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         root = Path(request.app["settings"].vault_dir).resolve()
@@ -1175,7 +1242,7 @@ async def create_app(
 
     async def vault_read_handler(request: web.Request) -> web.Response:
         try:
-            path = _vault_file(request.app["settings"], request.match_info.get("name", ""))
+            path = vault_file(request.app["settings"], request.match_info.get("name", ""))
         except ValueError as exc:
             return web.Response(status=400, text=str(exc))
         if not path.is_file():
@@ -1203,7 +1270,7 @@ async def create_app(
         if not isinstance(content, str):
             return web.json_response({"error": "content must be a string"}, status=400)
         try:
-            path = _vault_file(request.app["settings"], name)
+            path = vault_file(request.app["settings"], name)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         # Only markdown: the listing is `rglob("*.md")`, so anything else
@@ -1239,7 +1306,7 @@ async def create_app(
         """
         name = request.match_info.get("name", "")
         try:
-            path = _vault_file(request.app["settings"], name)
+            path = vault_file(request.app["settings"], name)
         except ValueError as exc:
             return web.Response(status=400, text=str(exc))
         if not path.is_file():
@@ -1457,6 +1524,7 @@ async def create_app(
     app.router.add_post("/task", task)
     app.router.add_post("/resume", resume)
     app.router.add_delete("/sessions/{session_id}", session_delete_handler)
+    app.router.add_post("/interrupt", interrupt_handler)
     return app
 
 

@@ -31,12 +31,15 @@ import asyncio
 import base64
 import contextlib
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from aiohttp import WSMsgType, web
 
-from .events import user_event
-from .run import run_turn
+from .events import ask_resolved_event, user_event
+from .run import resume_turn, run_turn
+from .vault import is_internal, vault_file
 
 PROTOCOL_VERSION = 1
 
@@ -241,6 +244,112 @@ def make_bus_ws_handler(app: web.Application):
             asyncio.ensure_future(app["run_turn_detached"](session_id, run))
             return {"ok": True}
 
+        async def do_answer(op: dict) -> dict:
+            """Answer a question the agent parked on. The turn resumes from
+            exactly where it suspended — the checkpointer held the state, which
+            is why this works hours later and from a different device than the
+            one that saw the question."""
+            session_id = str(op.get("session") or "")
+            if not session_id or "answer" not in op:
+                return {"ok": False, "error": "session and answer are required"}
+
+            channel = app["bus"].channel(session_id)
+            ask_id = op.get("ask_id")
+            pending = channel.pending_ask
+            if ask_id is not None and pending is not None and pending.get("id") != ask_id:
+                return {"ok": False, "error": "already answered"}
+            if ask_id is not None and pending is None and channel.answered_ask_id == ask_id:
+                return {"ok": False, "error": "already answered"}
+            claimed = channel.clear_pending_ask()
+            if claimed is None:
+                return {"ok": False, "error": "nothing is waiting on an answer"}
+
+            by = str(op.get("by") or "") or None
+            publish = app["bus"].publisher(session_id)
+            publish(ask_resolved_event(str(claimed.get("id") or ""), op["answer"], by=by))
+
+            graph = await app["graph_for"](session_id)
+
+            async def run(emit) -> Any:
+                return await resume_turn(
+                    op["answer"], session_id, app["settings"], emit,
+                    graph=graph, memory=app["memory"], router=app["router"],
+                    live_frames=app["frame_task"],
+                )
+
+            asyncio.ensure_future(app["run_turn_detached"](session_id, run))
+            return {"ok": True}
+
+        async def do_interrupt(op: dict) -> dict:
+            session_id = str(op.get("session") or "")
+            if not session_id:
+                return {"ok": False, "error": "session is required"}
+            return await app["interrupt_session"](session_id, str(op.get("by") or "") or None)
+
+        # --- notes ----------------------------------------------------------
+        #
+        # Reads and writes go through `_vault_file`, the same resolve-then-check
+        # containment the HTTP routes use, so a client-supplied name cannot walk
+        # out of the vault with `..` or a symlink. Deliberately not gated behind
+        # a flag the way terminals are: the vault is one confined directory of
+        # markdown, not a shell on the host.
+
+        async def do_vault_list(_op: dict) -> dict:
+            root = Path(app["settings"].vault_dir)
+            if not root.is_dir():
+                return {"ok": True, "notes": []}
+            notes = []
+            for path in root.rglob("*.md"):
+                if is_internal(path.relative_to(root)):
+                    continue
+                stat = path.stat()
+                notes.append({
+                    "name": str(path.relative_to(root)),
+                    "sizeBytes": stat.st_size,
+                    "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+                })
+            notes.sort(key=lambda n: n["modifiedAt"], reverse=True)
+            return {"ok": True, "notes": notes}
+
+        async def do_vault_read(op: dict) -> dict:
+            name = str(op.get("name") or "")
+            try:
+                path = vault_file(app["settings"], name)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            if not path.is_file():
+                return {"ok": False, "error": "no such note"}
+            return {"ok": True, "name": name,
+                    "content": path.read_text(encoding="utf-8", errors="replace")}
+
+        async def do_vault_write(op: dict) -> dict:
+            name = str(op.get("name") or "")
+            content = op.get("content")
+            if not isinstance(content, str):
+                return {"ok": False, "error": "content must be a string"}
+            try:
+                path = vault_file(app["settings"], name)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            # Only markdown: the listing is rglob("*.md"), so anything else
+            # would be written and then never shown again.
+            if path.suffix.lower() != ".md":
+                return {"ok": False, "error": "note names must end in .md"}
+            if path.is_dir():
+                return {"ok": False, "error": "that name is a directory"}
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            except OSError as exc:
+                return {"ok": False, "error": str(exc)}
+            memory_store = app["memory"]
+            if memory_store is not None:
+                # Best-effort, as the HTTP path is: a failed reindex costs
+                # recall accuracy, not the user's note.
+                with contextlib.suppress(Exception):
+                    memory_store.index_note(name, content)
+            return {"ok": True, "name": name}
+
         # --- terminals ------------------------------------------------------
 
         def on_terminal(kind: str, term_id: str, payload: Any) -> None:
@@ -324,6 +433,11 @@ def make_bus_ws_handler(app: web.Application):
             "detach": do_detach,
             "sessions": do_sessions,
             "prompt": do_prompt,
+            "answer": do_answer,
+            "interrupt": do_interrupt,
+            "vault.list": do_vault_list,
+            "vault.read": do_vault_read,
+            "vault.write": do_vault_write,
             "term.open": do_term_open,
             "term.list": do_term_list,
             "term.attach": do_term_attach,

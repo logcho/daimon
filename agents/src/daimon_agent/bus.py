@@ -109,6 +109,10 @@ class SessionChannel:
         #: Last todo snapshot. The `todo` event carries the whole list every
         #: time, so keeping the latest is enough to bring a new client current.
         self.todos: list[dict] = []
+        #: The last ask that was answered. Kept so a client retrying a resume
+        #: it already won — a flaky phone, a double tap — is told "already
+        #: answered" rather than being allowed to resume the turn twice.
+        self.answered_ask_id: str | None = None
         self.last_event_at = time.monotonic()
 
     # --- publishing ---------------------------------------------------------
@@ -142,6 +146,8 @@ class SessionChannel:
         """Take the parked ask, if there is one. Used by /resume to make
         answering a compare-and-swap: two clients race, one wins."""
         ask, self.pending_ask = self.pending_ask, None
+        if ask is not None:
+            self.answered_ask_id = str(ask.get("id") or "") or None
         return ask
 
     # --- subscribing --------------------------------------------------------
