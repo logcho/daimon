@@ -6,11 +6,11 @@ import type { AgentEvent, ChatMessage, TodoItem } from "../types";
 import type { BusClient } from "../lib/busClient";
 import { AskSheet, type AskPrompt } from "./AskSheet";
 import { Notes } from "./Notes";
+import { Settings } from "./Settings";
 import { TerminalView } from "./TerminalView";
 import {
   connect,
   fetchWorkspaces,
-  forgetToken,
   type SessionInfo,
   type TerminalInfo,
   type WorkspaceInfo,
@@ -21,7 +21,8 @@ type Screen =
   | { view: "list"; workspace: WorkspaceInfo }
   | { view: "session"; workspace: WorkspaceInfo; sessionId: string; title: string }
   | { view: "terminal"; workspace: WorkspaceInfo; id: string }
-  | { view: "notes"; workspace: WorkspaceInfo };
+  | { view: "notes"; workspace: WorkspaceInfo }
+  | { view: "settings"; workspace: WorkspaceInfo };
 
 export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [screen, setScreen] = useState<Screen>({ view: "workspaces" });
@@ -201,10 +202,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
       )}
 
       {screen.view === "workspaces" && (
-        <WorkspaceList workspaces={workspaces} onOpen={openWorkspace} onSignOut={() => {
-          forgetToken();
-          onUnauthorized();
-        }} />
+        <WorkspaceList workspaces={workspaces} onOpen={openWorkspace} />
       )}
 
       {screen.view === "list" && (
@@ -216,6 +214,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           onNewTerminal={() => newTerminal(screen.workspace)}
           onRefresh={() => refreshLists(screen.workspace)}
           onNotes={() => setScreen({ view: "notes", workspace: screen.workspace })}
+          onSettings={() => setScreen({ view: "settings", workspace: screen.workspace })}
         />
       )}
 
@@ -271,6 +270,14 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
         <Notes bus={busRef.current} workspace={screen.workspace.key} />
       )}
 
+      {screen.view === "settings" && busRef.current && (
+        <Settings
+          bus={busRef.current}
+          workspace={screen.workspace.key}
+          onSignOut={onUnauthorized}
+        />
+      )}
+
       {screen.view === "terminal" && busRef.current && (
         <TerminalView
           bus={busRef.current}
@@ -301,7 +308,8 @@ function Header({
       : screen.view === "list" ? screen.workspace.name
         : screen.view === "session" ? screen.title
           : screen.view === "notes" ? "notes"
-            : "terminal";
+            : screen.view === "settings" ? "settings"
+              : "terminal";
 
   return (
     <header
@@ -312,7 +320,7 @@ function Header({
         <button
           onClick={() => {
             if (screen.view === "session") onLeave(screen.workspace, screen.sessionId);
-            else if (screen.view === "terminal" || screen.view === "notes")
+            else if (screen.view === "terminal" || screen.view === "notes" || screen.view === "settings")
               onBack({ view: "list", workspace: screen.workspace });
             else onBack({ view: "workspaces" });
           }}
@@ -333,11 +341,9 @@ function Header({
 function WorkspaceList({
   workspaces,
   onOpen,
-  onSignOut,
 }: {
   workspaces: WorkspaceInfo[];
   onOpen: (w: WorkspaceInfo) => void;
-  onSignOut: () => void;
 }) {
   return (
     <div className="flex-1 px-3 py-3">
@@ -356,9 +362,6 @@ function WorkspaceList({
           <div className="truncate text-xs text-neutral-500">{workspace.path}</div>
         </button>
       ))}
-      <button onClick={onSignOut} className="mt-6 w-full py-3 text-xs text-neutral-600">
-        forget this device
-      </button>
     </div>
   );
 }
@@ -371,6 +374,7 @@ function SessionAndTerminalList({
   onNewTerminal,
   onRefresh,
   onNotes,
+  onSettings,
 }: {
   sessions: SessionInfo[];
   terminals: TerminalInfo[];
@@ -379,15 +383,24 @@ function SessionAndTerminalList({
   onNewTerminal: () => void;
   onRefresh: () => void;
   onNotes: () => void;
+  onSettings: () => void;
 }) {
   return (
     <div className="flex-1 overflow-y-auto px-3 py-3">
-      <button
-        onClick={onNotes}
-        className="mb-4 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm active:bg-white/10"
-      >
-        notes ›
-      </button>
+      <div className="mb-4 flex gap-2">
+        <button
+          onClick={onNotes}
+          className="flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm active:bg-white/10"
+        >
+          notes ›
+        </button>
+        <button
+          onClick={onSettings}
+          className="flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm active:bg-white/10"
+        >
+          settings ›
+        </button>
+      </div>
       <div className="mb-2 flex items-center justify-between px-1">
         <h2 className="text-xs uppercase tracking-wide text-neutral-500">terminals</h2>
         <button onClick={onNewTerminal} className="text-xs text-[#4f8dff]">+ new</button>

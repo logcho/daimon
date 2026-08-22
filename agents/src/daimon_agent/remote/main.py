@@ -14,6 +14,7 @@ from aiohttp import web
 
 from .auth import CODE_TTL_S, CODE_TTL_TUNNEL_S
 from .gateway import Gateway, create_gateway_app, default_state_dir
+from .tunnel import Tunnel
 
 DEFAULT_PORT = 4712
 
@@ -38,11 +39,15 @@ def _tailscale_hostname() -> str | None:
     return name.rstrip(".") or None
 
 
-def _print_banner(args, port: int, code: str | None) -> None:
+def _print_banner(args, port: int, code: str | None, tunnel_url: str | None = None) -> None:
     print(f"\n  daimon remote — gateway on http://127.0.0.1:{port}", file=sys.stderr)
 
     if args.tunnel:
-        print("  reachable through the tunnel you started", file=sys.stderr)
+        if tunnel_url:
+            print(f"  public tunnel:  {tunnel_url}", file=sys.stderr)
+            print("  ⚠  that URL is reachable by anyone who has it.", file=sys.stderr)
+        else:
+            print("  tunnel unavailable — still reachable on http://127.0.0.1", file=sys.stderr)
     elif args.lan:
         print(f"  bound to {args.host} — reachable on your LAN", file=sys.stderr)
     else:
@@ -86,8 +91,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tunnel", action="store_true",
-        help="you are fronting this with a public tunnel. Shortens the pairing "
-             "window, since the endpoint is world-reachable.",
+        help="open a public cloudflared tunnel. The least safe mode: the URL is "
+             "reachable by anyone who has it, so the token is the only gate. "
+             "Shortens the pairing window accordingly.",
     )
     parser.add_argument(
         "--terminals", action="store_true",
@@ -137,7 +143,24 @@ def main(argv: list[str] | None = None) -> int:
     code = gateway.pairing.start() if should_pair else None
 
     app = create_gateway_app(gateway)
-    _print_banner(args, args.port, code)
+    tunnel = Tunnel() if args.tunnel else None
+
+    async def open_tunnel(_app) -> None:
+        if tunnel is not None:
+            await tunnel.start(args.port)
+            _print_banner(args, args.port, code, tunnel.url)
+
+    async def close_tunnel(_app) -> None:
+        if tunnel is not None:
+            await tunnel.stop()
+
+    if tunnel is not None:
+        # The banner waits for the URL, so it can print it.
+        app.on_startup.append(open_tunnel)
+        app.on_cleanup.append(close_tunnel)
+    else:
+        _print_banner(args, args.port, code)
+
     web.run_app(app, host=args.host, port=args.port, print=None)
     return 0
 

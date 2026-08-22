@@ -60,9 +60,13 @@ def test_the_gateway_exposes_exactly_these_routes(gateway: Gateway) -> None:
         ("POST", "/ticket"),
         ("GET", "/workspaces"),
         ("GET", "/devices"),
+        ("GET", "/push/key"),
+        ("POST", "/push/subscribe"),
+        ("POST", "/push/unsubscribe"),
         ("DELETE", "/devices/{device_id}"),
         ("GET", "/ws"),
         ("GET", "/manifest.webmanifest"),
+        ("GET", "/sw.js"),
         ("GET", "/assets"),
     }
 
@@ -73,6 +77,8 @@ async def test_every_route_but_the_public_ones_needs_a_credential(client: TestCl
         ("get", "/devices"),
         ("post", "/ticket"),
         ("delete", "/devices/abc"),
+        ("get", "/push/key"),
+        ("post", "/push/subscribe"),
     ]:
         resp = await getattr(client, method)(path)
         assert resp.status == 401, f"{method.upper()} {path} was not gated"

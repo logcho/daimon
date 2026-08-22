@@ -25,6 +25,11 @@ dependencies = [
 # install never pays for it: `uv sync --extra anthropic` to enable
 # `DAIMON_MODEL=anthropic:claude-sonnet-5`.
 anthropic = ["langchain-anthropic>=1.0"]
+# Web Push, for "the agent is asking you something" reaching a phone that is
+# not looking at the page. Optional and imported lazily: it pulls in a crypto
+# stack (VAPID signing, aes128gcm payload encryption) that an install which
+# never leaves the machine has no use for. `uv sync --extra push`.
+push = ["pywebpush>=2"]
 
 [project.scripts]
 daimon-agent = "daimon_agent.server:main"

@@ -189,3 +189,16 @@ def test_replay_is_capped_and_returns_the_most_recent(log: EventLog) -> None:
     replayed = log.replay("s", limit=10)
     assert len(replayed) == 10
     assert [e["id"] for e in replayed] == [str(i) for i in range(90, 100)]
+
+
+def test_one_unserializable_event_does_not_lose_the_batch(log: EventLog) -> None:
+    """flush() runs from shutdown as well as the drain task, where raising
+    would abort cleanup and leave everything after it undone."""
+    from pathlib import Path as _Path
+
+    log.record("s", 1, user_event("this one is fine"))
+    log.record("s", 2, {"type": "step", "id": _Path("/not/json")})
+    log.record("s", 3, done_event("so is this"))
+
+    assert log.flush() == 2
+    assert [e["type"] for e in log.replay("s")] == ["user", "done"]

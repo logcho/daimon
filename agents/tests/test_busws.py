@@ -536,3 +536,84 @@ async def test_a_turn_started_over_the_socket_outlives_the_socket(client: TestCl
 
     await asyncio.wait_for(drain(), timeout=15)
     assert events[-1]["result"] == "finished anyway"
+
+
+# --- watching every session --------------------------------------------------
+
+async def test_watching_reports_asks_on_sessions_never_attached_to(client: TestClient) -> None:
+    """Attach cannot answer this: to attach you must already know the session
+    id, and the question is whether *anything* started waiting on you."""
+    from daimon_agent.events import ask_event
+
+    async with client.ws_connect("/bus/ws") as ws:
+        ack, _ = await _call(ws, "watch")
+        assert ack["ok"] is True
+
+        client.app["bus"].publisher("never-seen")(ask_event("a1", "question", "which?", []))
+
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        assert frame["control"] == "watch"
+        assert frame["session"] == "never-seen"
+        assert frame["event"]["id"] == "a1"
+
+
+async def test_watching_ignores_the_noise(client: TestClient) -> None:
+    """Knowing something happened is the point; mirroring a transcript nobody
+    is reading is not."""
+    from daimon_agent.events import assistant_delta_event, done_event, step_event
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "watch")
+        emit = client.app["bus"].publisher("noisy")
+        emit(step_event("1", "t", "running"))
+        emit(assistant_delta_event("chatter"))
+        emit(done_event("finished"))
+
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        assert frame["event"]["type"] == "done"  # the step and delta were skipped
+
+
+async def test_a_watcher_does_not_keep_the_server_alive(client: TestClient) -> None:
+    """A gateway holding this open so it can notify you must not stop every
+    workspace on the machine from ever idling out."""
+    from daimon_agent.events import ask_event
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "watch")
+        client.app["bus"].publisher("s")(ask_event("a1", "question", "q", []))
+        await asyncio.wait_for(ws.receive_json(), timeout=5)
+
+        # Watching is an observer on the bus, not a subscriber on a channel —
+        # which is precisely why it cannot count as somebody looking.
+        assert client.app["bus"]._observers
+        assert sum(c.subscriber_count for c in client.app["bus"].channels()) == 0
+
+
+async def test_closing_the_socket_stops_watching(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "watch")
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if not client.app["bus"]._observers:
+            break
+    assert not client.app["bus"]._observers
+
+
+async def test_an_unserializable_reply_is_answered_not_silence(client: TestClient) -> None:
+    """An op returning something json cannot represent used to kill the
+    writer: the socket went quiet with no ack and no close, and the client
+    waited forever for an answer that was never coming."""
+    from pathlib import Path as _Path
+
+    async with client.ws_connect("/bus/ws") as ws:
+        # Reach in and make one op misbehave the way a dataclass or a Path
+        # returned by accident would.
+        await ws.send_json({"op": "attach", "op_id": "warm", "session": "s"})
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
+            if frame.get("kind") == "ack":
+                break
+
+        client.app["bus"].publisher("s")({"type": "step", "id": _Path("/not/json")})
+        ack, _ = await _call(ws, "ping")
+        assert ack["ok"] is True  # the socket still works

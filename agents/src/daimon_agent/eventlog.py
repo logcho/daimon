@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
 import time
 from collections import deque
@@ -131,7 +132,18 @@ class EventLog:
             return 0
         merged = _coalesce(batch)
         now = time.time()
-        rows = [(sid, seq, now, json.dumps(ev, ensure_ascii=False)) for sid, seq, ev in merged]
+        rows = []
+        for sid, seq, ev in merged:
+            try:
+                rows.append((sid, seq, now, json.dumps(ev, ensure_ascii=False)))
+            except (TypeError, ValueError) as exc:
+                # One malformed event must not take the whole batch — and this
+                # runs from shutdown as well as the drain task, where raising
+                # would abort cleanup and leave everything after it undone.
+                print(f"[daimon-agent] event log skipped an unserializable event: {exc}",
+                      file=sys.stderr)
+        if not rows:
+            return 0
         finished = {sid for sid, _, ev in merged if ev.get("type") in ("done", "error")}
         with self._lock:
             self._conn.executemany(

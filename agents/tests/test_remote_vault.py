@@ -9,6 +9,7 @@ into one being weaker.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -103,3 +104,44 @@ async def test_reading_a_note_that_is_not_there_says_so(client: TestClient) -> N
         ack = await _call(ws, "vault.read", name="nope.md")
         assert ack["ok"] is False
         assert "no such note" in ack["error"]
+
+
+# --- skills and config -------------------------------------------------------
+
+async def test_skills_can_be_listed_and_read(client: TestClient) -> None:
+    # The global library, not the legacy vault-relative one.
+    root = client.app["settings"].resolved_skills_dir / "deploying"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "SKILL.md").write_text(
+        "---\nname: deploying\ndescription: how we ship\n---\n\nthe steps"
+    )
+
+    async with client.ws_connect("/bus/ws") as ws:
+        listed = await _call(ws, "skills")
+        assert "deploying" in [s["name"] for s in listed["skills"]]
+
+        read = await _call(ws, "skill.read", name="deploying")
+        assert "the steps" in read["content"]
+
+
+async def test_reading_a_skill_that_is_not_there_says_so(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "skill.read", name="imaginary")
+        assert ack["ok"] is False
+
+
+async def test_config_never_carries_the_api_keys(client: TestClient) -> None:
+    """The HTTP route returns booleans rather than values, and going out over
+    a network does not make that looser."""
+    from dataclasses import replace
+
+    client.app["settings"] = replace(
+        client.app["settings"], api_key="sk-secret-value-do-not-leak"
+    )
+
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "config")
+
+    blob = json.dumps(ack)
+    assert "sk-secret-value-do-not-leak" not in blob
+    assert ack["config"]["api_key_configured"] is True

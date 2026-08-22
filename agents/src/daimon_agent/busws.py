@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,7 @@ def make_bus_ws_handler(app: web.Application):
         reg = app["turn_registry"]
         attachments: dict[str, _Attachment] = {}
         watched_terminals: set[str] = set()
+        watching: Any = None  # unsubscribe for the all-sessions observer
         # One outbound queue and one writer: aiohttp forbids concurrent sends,
         # and session pumps and terminal callbacks both produce frames. The
         # queue is also what lets a synchronous PTY read callback hand work to
@@ -104,8 +106,21 @@ def make_bus_ws_handler(app: web.Application):
                 frame = await outbox.get()
                 if frame is None:
                     return
-                with contextlib.suppress(ConnectionResetError, RuntimeError):
+                try:
                     await ws.send_json(frame)
+                except (ConnectionResetError, RuntimeError):
+                    return  # the client is gone; the finally block cleans up
+                except TypeError as exc:
+                    # An op returned something json cannot represent. Letting
+                    # this kill the writer means the socket goes silent with no
+                    # ack and no close — the client waits forever for an answer
+                    # that was never going to arrive. Say so instead.
+                    print(f"[daimon-agent] unserializable frame dropped: {exc}", file=sys.stderr)
+                    with contextlib.suppress(Exception):
+                        await ws.send_json(_frame(
+                            "ack", op_id=frame.get("op_id"), ok=False,
+                            error="the server produced a response it could not send",
+                        ))
 
         async def flush(frame: dict) -> None:
             """Queue a frame and wait for the writer to drain — used for acks,
@@ -286,6 +301,37 @@ def make_bus_ws_handler(app: web.Application):
                 return {"ok": False, "error": "session is required"}
             return await app["interrupt_session"](session_id, str(op.get("by") or "") or None)
 
+        # --- watching everything ---------------------------------------------
+
+        async def do_watch(_op: dict) -> dict:
+            """Report noteworthy events on *every* session, without attaching
+            to any of them.
+
+            This exists for notifications, and it cannot be built out of
+            `attach`: to attach you must already know the session id, and the
+            whole question is "did anything, anywhere, start waiting on me?"
+            Only asks and turn endings are forwarded — the point is to know
+            something happened, not to mirror a transcript nobody is reading.
+
+            The subscription is passive, so it does not count as somebody
+            watching. Otherwise a gateway keeping this open so it can notify
+            you would stop every workspace server on the machine from ever
+            idling out.
+            """
+            nonlocal watching
+            if watching is not None:
+                return {"ok": True}  # idempotent
+
+            def observe(session_id: str, seq: int, event: dict) -> None:
+                etype = event.get("type")
+                if etype not in ("ask", "ask_resolved", "done", "error"):
+                    return
+                send(_frame("control", control="watch", session=session_id,
+                            seq=seq, event=event))
+
+            watching = bus.observe(observe)
+            return {"ok": True}
+
         # --- notes ----------------------------------------------------------
         #
         # Reads and writes go through `_vault_file`, the same resolve-then-check
@@ -349,6 +395,43 @@ def make_bus_ws_handler(app: web.Application):
                 with contextlib.suppress(Exception):
                     memory_store.index_note(name, content)
             return {"ok": True, "name": name}
+
+        # --- skills and config (read-mostly) ----------------------------------
+
+        async def do_skills(_op: dict) -> dict:
+            # `discover_skills` returns dataclasses, and the body of every
+            # skill with them — neither of which belongs on the wire. A client
+            # renders name, description and which library it came from; the
+            # body is what `skill.read` is for.
+            app["skills"] = app["discover_skills"]()
+            return {"ok": True, "skills": [
+                {"name": s.name, "description": s.description, "source": s.source}
+                for s in app["skills"]
+            ]}
+
+        async def do_skill_read(op: dict) -> dict:
+            name = str(op.get("name") or "")
+            for skill in app["discover_skills"]():
+                if skill.name == name:
+                    return {"ok": True, "name": name, "source": skill.source,
+                            "content": skill.content}
+            return {"ok": False, "error": "no such skill"}
+
+        async def do_config(_op: dict) -> dict:
+            """What the agent is configured with — never the keys themselves.
+
+            The HTTP route returns booleans rather than values for exactly this
+            reason, and going out over a network does not make that looser.
+            """
+            settings = app["settings"]
+            return {"ok": True, "config": {
+                "model": settings.model,
+                "flash_model": settings.flash_model,
+                "provider": settings.provider,
+                "workspace": str(settings.resolved_workspace_dir),
+                "vault": str(settings.vault_dir),
+                "api_key_configured": bool(settings.api_key or settings.anthropic_api_key),
+            }}
 
         # --- terminals ------------------------------------------------------
 
@@ -435,6 +518,10 @@ def make_bus_ws_handler(app: web.Application):
             "prompt": do_prompt,
             "answer": do_answer,
             "interrupt": do_interrupt,
+            "watch": do_watch,
+            "skills": do_skills,
+            "skill.read": do_skill_read,
+            "config": do_config,
             "vault.list": do_vault_list,
             "vault.read": do_vault_read,
             "vault.write": do_vault_write,
@@ -481,6 +568,9 @@ def make_bus_ws_handler(app: web.Application):
             for att in list(attachments.values()):
                 await _drop(att)
             attachments.clear()
+            if watching is not None:
+                watching()
+                watching = None
             for term_id in watched_terminals:
                 term = terminals.get(term_id)
                 if term is not None:

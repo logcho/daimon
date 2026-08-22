@@ -33,13 +33,19 @@ from aiohttp import WSMsgType, web
 
 from .auth import Pairing, TokenStore, Tickets
 from .discovery import Workspace, discover
+from .push import PushStore, Subscription
 
 PROTOCOL_VERSION = 1
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 #: Reachable without a credential. Everything else needs one.
-PUBLIC_PATHS = {"/", "/health", "/pair", "/manifest.webmanifest", "/favicon.ico"}
+PUBLIC_PATHS = {"/", "/health", "/pair", "/manifest.webmanifest", "/favicon.ico", "/sw.js"}
+
+#: How long to wait before re-checking which workspaces are running, when
+#: notifications are on. Long: this exists to notice a server that started
+#: since we last looked, not to poll for anything.
+WATCH_REDISCOVER_S = 30.0
 
 #: Ops the gateway answers itself; everything else is forwarded to a workspace.
 LOCAL_OPS = {"workspaces", "ping"}
@@ -70,6 +76,7 @@ class Gateway:
     ) -> None:
         state_dir = state_dir or default_state_dir()
         self.tokens = TokenStore(state_dir / "tokens.json")
+        self.push = PushStore(state_dir)
         self.pairing = Pairing()
         self.tickets = Tickets()
         self.bind_host = bind_host
@@ -123,8 +130,16 @@ def create_gateway_app(gateway: Gateway) -> web.Application:
 
     async def startup(app: web.Application) -> None:
         app["http"] = aiohttp.ClientSession()
+        app["watcher"] = None
+        app["ensure_watcher"] = lambda: _ensure_watcher(app, gateway)
+        app["ensure_watcher"]()
 
     async def cleanup(app: web.Application) -> None:
+        watcher = app.get("watcher")
+        if watcher is not None:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
         await app["http"].close()
 
     app.on_startup.append(startup)
@@ -173,12 +188,51 @@ def create_gateway_app(gateway: Gateway) -> web.Application:
         found = await discover(request.app["http"], root=gateway.run_root)
         return web.json_response({"workspaces": [_workspace_public(w) for w in found]})
 
+    async def push_key(_request: web.Request) -> web.Response:
+        key = gateway.push.public_key()
+        if key is None:
+            return web.json_response(
+                {"error": "notifications need the push extra — `uv sync --extra push`"},
+                status=501,
+            )
+        return web.json_response({"key": key})
+
+    async def push_subscribe(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json body"}, status=400)
+        endpoint = body.get("endpoint")
+        keys = body.get("keys")
+        if not isinstance(endpoint, str) or not isinstance(keys, dict):
+            return web.json_response({"error": "endpoint and keys are required"}, status=400)
+        gateway.push.add(Subscription(
+            device_id=str(request.get("device_label") or "device"),
+            endpoint=endpoint,
+            keys={str(k): str(v) for k, v in keys.items()},
+        ))
+        # The watcher is only worth running when somebody wants to be told.
+        request.app["ensure_watcher"]()
+        return web.json_response({"ok": True})
+
+    async def push_unsubscribe(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        endpoint = str(body.get("endpoint") or "")
+        gateway.push.remove(endpoint)
+        return web.json_response({"ok": True})
+
     async def devices(_request: web.Request) -> web.Response:
         return web.json_response({"devices": [d.public() for d in gateway.tokens.devices()]})
 
     async def revoke_device(request: web.Request) -> web.Response:
         device_id = request.match_info.get("device_id", "")
         removed = gateway.tokens.revoke(device_id)
+        # Revoking a device has to take its notifications with it, or a phone
+        # you deliberately cut off keeps buzzing.
+        gateway.push.forget_device(device_id)
         # Live sockets belonging to a revoked device are closed by the ws
         # handler, which re-checks on every op — revocation that leaves an
         # open socket working is not revocation.
@@ -202,6 +256,9 @@ def create_gateway_app(gateway: Gateway) -> web.Application:
     app.router.add_post("/pair", pair)
     app.router.add_post("/ticket", ticket)
     app.router.add_get("/workspaces", workspaces)
+    app.router.add_get("/push/key", push_key)
+    app.router.add_post("/push/subscribe", push_subscribe)
+    app.router.add_post("/push/unsubscribe", push_unsubscribe)
     app.router.add_get("/devices", devices)
     app.router.add_delete("/devices/{device_id}", revoke_device)
     app.router.add_get("/ws", websocket)
@@ -242,10 +299,20 @@ def _add_static_routes(app: web.Application) -> None:
             return web.Response(status=404)
         return web.FileResponse(path)
 
+    async def service_worker(_request: web.Request) -> web.StreamResponse:
+        """Served from the root, not from /assets, because a service worker's
+        scope is the directory it is served from — one under /assets could
+        only control /assets."""
+        path = WEB_DIR / "sw.js"
+        if not path.exists():
+            return web.Response(status=404)
+        return web.FileResponse(path, headers={"content-type": "application/javascript"})
+
     if (WEB_DIR / "assets").is_dir():
         app.router.add_static("/assets/", WEB_DIR / "assets")
     app.router.add_get("/", spa)
     app.router.add_get("/manifest.webmanifest", manifest)
+    app.router.add_get("/sw.js", service_worker)
 
 
 # --- socket plumbing ---------------------------------------------------------
@@ -368,3 +435,85 @@ async def _serve_socket(request: web.Request, gateway: Gateway) -> web.WebSocket
         upstreams.clear()
         await ws.close()
     return ws
+
+
+# --- notification watcher ----------------------------------------------------
+
+
+def _ensure_watcher(app: web.Application, gateway: Gateway) -> None:
+    """Run the watcher exactly when there is somebody to notify."""
+    if not gateway.push.enabled:
+        return
+    existing = app.get("watcher")
+    if existing is not None and not existing.done():
+        return
+    app["watcher"] = asyncio.create_task(_watch_forever(app, gateway))
+
+
+async def _watch_forever(app: web.Application, gateway: Gateway) -> None:
+    """Hold a socket to every workspace so a parked question can find you.
+
+    This is the only part of the gateway that keeps a connection open without
+    a client asking for one, and it has to: a notification is worth sending
+    precisely when nobody is looking. It uses the bus's `watch` op, which
+    observes every session without subscribing to any — so it does not count
+    as somebody watching, and workspace servers still idle out under it.
+    """
+    watched: dict[str, asyncio.Task] = {}
+    try:
+        while True:
+            if gateway.push.enabled:
+                found = await discover(app["http"], root=gateway.run_root)
+                for workspace in found:
+                    if workspace.key in watched and not watched[workspace.key].done():
+                        continue
+                    watched[workspace.key] = asyncio.create_task(
+                        _watch_one(app, gateway, workspace)
+                    )
+            await asyncio.sleep(WATCH_REDISCOVER_S)
+    except asyncio.CancelledError:
+        for task in watched.values():
+            task.cancel()
+        raise
+
+
+async def _watch_one(app: web.Application, gateway: Gateway, workspace: Workspace) -> None:
+    """One workspace's watch socket. Ends when its server does; the
+    rediscovery loop reopens it if it comes back."""
+    http: aiohttp.ClientSession = app["http"]
+    try:
+        async with http.ws_connect(workspace.bus_url, heartbeat=HEARTBEAT_S) as ws:
+            await ws.send_json({"op": "watch", "op_id": "watch"})
+            async for msg in ws:
+                if msg.type is not WSMsgType.TEXT:
+                    continue
+                try:
+                    frame = msg.json()
+                except ValueError:
+                    continue
+                if frame.get("control") != "watch":
+                    continue
+                event = frame.get("event") or {}
+                if event.get("type") != "ask":
+                    continue
+                await _notify_ask(gateway, workspace, str(frame.get("session") or ""), event)
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return  # the server went away; rediscovery will find it again
+
+
+async def _notify_ask(
+    gateway: Gateway, workspace: Workspace, session_id: str, event: dict
+) -> None:
+    """Tell the phone a session wants an answer.
+
+    Deliberately without the question itself. A push payload passes through a
+    service run by Apple or Google, and a plan the agent is asking you to
+    approve can quote anything in the workspace — a file, a credential it
+    found, a customer's name. The notification says *which* session wants you;
+    reading it means opening the app.
+    """
+    header = str(event.get("header") or "").strip()
+    title = f"{workspace.name} is waiting on you"
+    body = header or ("Approve a plan" if event.get("kind") == "plan" else "Answer a question")
+    # pywebpush is synchronous, and there may be several endpoints.
+    await asyncio.to_thread(gateway.push.notify, title, body, url="/")

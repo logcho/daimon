@@ -197,6 +197,15 @@ class EventBus:
     def __init__(self, *, sink: Callable[[str, int, dict], None] | None = None) -> None:
         self._channels: dict[str, SessionChannel] = {}
         self.sink = sink
+        #: Called for every event on every session. Subscribing per session
+        #: cannot answer "did anything, anywhere, start waiting on me?" —
+        #: you would have to know which sessions exist before they do.
+        self._observers: set[Callable[[str, int, dict], None]] = set()
+
+    def observe(self, fn: Callable[[str, int, dict], None]) -> Callable[[], None]:
+        """Watch every session at once. Returns an unsubscribe."""
+        self._observers.add(fn)
+        return lambda: self._observers.discard(fn)
 
     def channel(self, session_id: str) -> SessionChannel:
         chan = self._channels.get(session_id)
@@ -219,7 +228,12 @@ class EventBus:
         chan = self.channel(session_id)
 
         def emit(event: dict) -> None:
-            chan.publish(event, sink=self.sink)
+            seq = chan.publish(event, sink=self.sink)
+            for observer in tuple(self._observers):
+                try:
+                    observer(session_id, seq, event)
+                except Exception:
+                    pass  # an observer must never be able to break a turn
 
         return emit
 
