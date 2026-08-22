@@ -66,7 +66,11 @@ async def test_task_streams_events_and_ends_with_done(client: TestClient) -> Non
 
     events = await _post_task(client, "What is 2+2?")
     types = [e["type"] for e in events]
-    assert types[0] == "step"
+    # The prompt itself leads the stream, so a client replaying a session it
+    # never saw gets both halves of the conversation.
+    assert types[0] == "user"
+    assert events[0]["text"] == "What is 2+2?"
+    assert types[1] == "step"
     assert types[-1] == "done"
     assert events[-1]["result"] == "The answer is 42."
     # Thinking bracketing and a single done — no error event.

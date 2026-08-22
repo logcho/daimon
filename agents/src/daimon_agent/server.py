@@ -32,9 +32,12 @@ from dotenv import dotenv_values
 
 from . import live_frames
 from .browser import aclose_browser, build_browser
+from .bus import EventBus
+from .busws import make_bus_ws_handler
 from .config import Settings
 from .envfile import patch_env_file
-from .events import TERMINAL_TYPES, error_event
+from .eventlog import FLUSH_INTERVAL_S, EventLog
+from .events import TERMINAL_TYPES, error_event, user_event
 from .graph import build_graph, close_checkpointer, make_sqlite_checkpointer
 from .memory import MemoryStore
 from .model import ModelRouter
@@ -234,6 +237,7 @@ async def _idle_shutdown_loop(
     turn_registry: dict,
     idle_timeout: float,
     *,
+    attached: Any = None,  # Callable[[], int] — clients currently watching
     poll_interval: float | None = None,
     sleep: Any = asyncio.sleep,
     kill: Any = os.kill,
@@ -243,6 +247,13 @@ async def _idle_shutdown_loop(
     deadline per turn, because the deadline itself moves every time a turn
     starts or ends — a `reg["count"] == 0` window between two turns of an
     active conversation must not trip this early.
+
+    `attached` reports how many clients are watching this server right now. A
+    turn is not the only thing worth staying alive for: somebody reading a
+    session from their phone, or holding a shell open, would otherwise watch
+    the server exit under them. Heartbeats deliberately do not touch
+    `last_active_at` — if they did, one idle attached client would keep the
+    process alive forever and this whole loop would be dead code.
 
     `poll_interval`/`sleep`/`kill` are overridable for tests only; production
     code (`create_app`'s `startup` hook) never passes them, so the effective
@@ -255,7 +266,12 @@ async def _idle_shutdown_loop(
         await sleep(interval)
         async with turn_registry["lock"]:
             idle_for = time.monotonic() - turn_registry["last_active_at"]
-            should_stop = turn_registry["count"] == 0 and idle_for >= idle_timeout
+            watching = attached() if attached is not None else 0
+            should_stop = (
+                turn_registry["count"] == 0
+                and watching == 0
+                and idle_for >= idle_timeout
+            )
         if should_stop:
             print(
                 f"[daimon-agent] idle for {idle_for:.0f}s "
@@ -299,6 +315,15 @@ async def create_app(
         "lock": asyncio.Lock(),
         "last_active_at": time.monotonic(),
     }
+    # Durable record of the TaskEvent stream, and the fan-out that feeds it.
+    # Every turn publishes through the bus now rather than straight down one
+    # socket, so a second client can watch a turn already in flight.
+    app["eventlog"] = EventLog(settings.resolved_events_db)
+    app["bus"] = EventBus(sink=app["eventlog"].record)
+    # session_id -> the in-flight turn's task, for POST /interrupt. Closing the
+    # socket used to be the only way to stop a turn, and that stops working the
+    # moment more than one client is reading it.
+    app["turns"] = {}
 
     async def release_session(session_id: str) -> None:
         """Drop a session's graph and everything keyed to its id."""
@@ -306,6 +331,11 @@ async def create_app(
         clear_todos(session_id)
         forget_reads(session_id)
         await close_repl(session_id)
+        # The live channel and its recorded stream are keyed to the id too. A
+        # conversation the user asked to forget must not come back the next
+        # time a client asks for the session directory.
+        app["bus"].release(session_id)
+        app["eventlog"].delete_session(session_id)
 
     async def graph_for(session_id: str) -> Any:
         """The graph this session runs on — its own, or the shared one."""
@@ -391,10 +421,38 @@ async def create_app(
         # Self-terminate after sustained inactivity — a per-workspace server
         # has nothing else watching it once the terminal that spawned it
         # closes.
-        asyncio.ensure_future(_idle_shutdown_loop(app["turn_registry"], settings.idle_timeout_s))
+        asyncio.ensure_future(
+            _idle_shutdown_loop(
+                app["turn_registry"],
+                settings.idle_timeout_s,
+                attached=lambda: sum(
+                    c.subscriber_count for c in app["bus"].channels()
+                ),
+            )
+        )
+
+        # Drain the event log off the turn's back. `record()` only appends to a
+        # deque; every SQLite write happens here, batched.
+        async def _eventlog_drain() -> None:
+            log = app["eventlog"]
+            while True:
+                await asyncio.sleep(FLUSH_INTERVAL_S)
+                try:
+                    log.flush()
+                except Exception as exc:  # a bad write must never end a turn
+                    print(f"[daimon-agent] event log write failed: {exc}", file=sys.stderr)
+
+        app["eventlog_drain"] = asyncio.ensure_future(_eventlog_drain())
 
     async def cleanup(app: web.Application) -> None:
         app["graphs"].clear()
+        drain = app.get("eventlog_drain")
+        if drain is not None:
+            drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drain
+        # Flushes what the cancelled drain left behind, then closes the file.
+        app["eventlog"].close()
         await close_checkpointer(app["checkpointer"])
         await aclose_browser()
         await aclose_web_fetcher()
@@ -433,56 +491,48 @@ async def create_app(
         everything subtle about the streaming lives here once — the ordered
         queue, the terminal-chunk close, the turn registry, and the
         per-session lock.
+
+        Events go out through the session's bus channel rather than straight
+        into this response, so every other attached client sees the same turn.
+        The bytes on *this* socket are unchanged: one JSON object per line,
+        body closed right after the terminal event.
         """
         response = web.StreamResponse(headers={"content-type": NDJSON})
         await response.prepare(request)
 
-        # Events must be emitted from sync graph-node context in order, so the
-        # emit closure enqueues and a single writer task drains the queue.
-        queue: asyncio.Queue[tuple[bytes, bool] | None] = asyncio.Queue()
-        # `terminal_emitted` — a done|error|ask event was enqueued (they are
+        bus: EventBus = app["bus"]
+        # `terminal_emitted` — a done|error|ask event was published (they are
         # mutually exclusive per the contract). The writer closes the body
         # right after the terminal event itself, so the client's stream ends at
         # the result instead of staying open through reflection/teardown (a
         # connection that dies in that window made the client's final read fail
         # with hyper's "incomplete message", surfacing as a spurious stream
-        # error after the result). The terminal-ness rides on the *chunk*, not
-        # this flag: the flag is set as soon as the terminal event is enqueued,
-        # which can happen while earlier chunks are still queued — checking
-        # the flag after every write would drop those earlier chunks' tails
-        # and the done itself. FIFO + synchronous emit keeps everything before
-        # the terminal event ahead of it in the queue.
+        # error after the result). The terminal-ness is read off the *event*,
+        # not this flag: the flag is set as soon as the terminal event is
+        # published, which can happen while earlier events are still queued —
+        # checking the flag after every write would drop those earlier events'
+        # tails and the done itself. FIFO + synchronous publish keeps
+        # everything before the terminal event ahead of it in the queue.
         terminal_emitted = False
         # Set when the client hangs up mid-turn (the user pressed Esc, or the
         # app quit). The writer notices first, because it is the only thing
-        # touching the socket — it cancels the work rather than letting an
-        # abandoned turn keep burning tokens.
+        # touching the socket.
         client_gone = asyncio.Event()
 
-        async def writer() -> None:
+        async def writer(sub) -> None:
             while True:
-                item = await queue.get()
+                item = await sub.queue.get()
                 if item is None:
                     break
-                chunk, is_terminal = item
+                _seq, event = item
+                chunk = json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n"
                 try:
                     await response.write(chunk)
                 except (ConnectionResetError, ClientConnectionResetError):
                     client_gone.set()
                     break
-                if is_terminal:
+                if event.get("type") in TERMINAL_TYPES:
                     break
-
-        writer_task = asyncio.create_task(writer())
-
-        def emit(event: dict) -> None:
-            nonlocal terminal_emitted
-            is_terminal = event.get("type") in TERMINAL_TYPES
-            if is_terminal:
-                terminal_emitted = True
-            queue.put_nowait(
-                (json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n", is_terminal)
-            )
 
         # Register the turn globally *before* acquiring the per-session lock —
         # a turn queued behind another for the same session is still activity
@@ -496,7 +546,23 @@ async def create_app(
 
         lock = app["locks"].setdefault(session_id, asyncio.Lock())
         async with lock:  # one turn per session at a time, like legacy's queue
+            # Subscribe *inside* the lock. A turn queued behind another one on
+            # the same session would otherwise be handed the running turn's
+            # events — including its terminal event, which would close this
+            # client's stream before its own turn had even started.
+            sub = bus.subscribe(session_id)
+            channel = bus.channel(session_id)
+            writer_task = asyncio.create_task(writer(sub))
+            publish = bus.publisher(session_id)
+
+            def emit(event: dict) -> None:
+                nonlocal terminal_emitted
+                if event.get("type") in TERMINAL_TYPES:
+                    terminal_emitted = True
+                publish(event)
+
             work = asyncio.create_task(run(emit))
+            app["turns"][session_id] = work
             disconnect = asyncio.create_task(client_gone.wait())
             try:
                 # Race the work against the client hanging up. run_turn owns
@@ -506,16 +572,41 @@ async def create_app(
                     {work, disconnect}, return_when=asyncio.FIRST_COMPLETED
                 )
                 if not work.done():
+                    # This client left, but it is no longer necessarily the
+                    # only one watching: killing a turn a phone is still
+                    # streaming would be worse than letting it finish. Drop
+                    # ourselves first, then cancel only if nobody is left.
+                    bus.unsubscribe(session_id, sub)
+                    if channel.subscriber_count == 0:
+                        work.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await work
+                        print(
+                            f"[daimon-agent] client disconnected — cancelled turn "
+                            f"for session {session_id}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        with contextlib.suppress(Exception):
+                            await work  # someone else is still reading it
+                else:
+                    await work  # re-raise anything run_turn let escape
+            except asyncio.CancelledError:
+                # aiohttp cancels the request handler when the client hangs up,
+                # and CancelledError is a BaseException — the `except Exception`
+                # below never sees it. This is *this response* ending, not the
+                # turn: apply the same rule as the client_gone branch, so a turn
+                # somebody else is still watching carries on without us.
+                #
+                # Deliberately no terminal event here. A turn stopped on purpose
+                # (POST /interrupt) is announced by whoever stopped it, which is
+                # the only place that knows why.
+                bus.unsubscribe(session_id, sub)
+                if channel.subscriber_count == 0 and not work.done():
                     work.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await work
-                    print(
-                        f"[daimon-agent] client disconnected — cancelled turn "
-                        f"for session {session_id}",
-                        file=sys.stderr,
-                    )
-                else:
-                    await work  # re-raise anything run_turn let escape
+                raise
             except Exception as exc:  # last-ditch backstop, port of server.ts's .catch
                 print(f"[daimon-agent] unhandled error running task: {exc}", file=sys.stderr)
                 if not terminal_emitted:  # done|error|ask is exclusive per the contract
@@ -525,6 +616,8 @@ async def create_app(
                         pass  # response may already be closed
             finally:
                 disconnect.cancel()
+                if app["turns"].get(session_id) is work:
+                    del app["turns"][session_id]
                 # De-register the turn so /status stops reporting busy.
                 async with reg["lock"]:
                     reg["count"] -= 1
@@ -534,7 +627,7 @@ async def create_app(
                         reg["sessions"][session_id] -= 1
                     reg["last_active_at"] = time.monotonic()
 
-                await queue.put(None)
+                bus.unsubscribe(session_id, sub)  # idempotent; also ends the writer
                 await writer_task
                 # The terminal chunk has been written; the client ends its
                 # read at the done|error|ask line and closes the connection
@@ -565,6 +658,9 @@ async def create_app(
         raw_caps = body.get("capabilities")
         capabilities = [str(c) for c in raw_caps] if isinstance(raw_caps, list) else []
         mode = body.get("mode") if body.get("mode") in ("plan", "normal") else "normal"
+        # Which surface started this turn, for the session directory a remote
+        # client renders. Free-form and advisory; nothing branches on it.
+        origin = str(body["origin"])[:32] if isinstance(body.get("origin"), str) else None
         # agent parameter is accepted for backward compat but ignored —
         # there is a single unified agent now.
         print(f"[daimon-agent] received task: {instruction}", file=sys.stderr)
@@ -576,6 +672,10 @@ async def create_app(
         app["skills"] = _discover(app["settings"])
 
         async def run(emit) -> Any:
+            # Inside `run`, so it lands after the per-session lock is taken and
+            # therefore in the right place in the ring and the log. Without it
+            # a replayed transcript is assistant-only — half a conversation.
+            emit(user_event(instruction, mode=mode, origin=origin))
             return await run_turn(
                 instruction,
                 session_id,
@@ -1265,6 +1365,10 @@ async def create_app(
 
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
+    # Read-only fan-out over one socket: watch any number of sessions, replay
+    # what you missed. Loopback-only and unauthenticated like everything else
+    # here — see busws.py.
+    app.router.add_get("/bus/ws", make_bus_ws_handler(app))
     app.router.add_get("/workspace", workspace_handler)
     app.router.add_get("/tools", tools_handler)
     app.router.add_get("/skills", skills_handler)

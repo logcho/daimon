@@ -37,7 +37,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         "DEEPSEEK_API_KEY", "DEEPSEEK_API_BASE", "DAIMON_API_BASE",
         "ANTHROPIC_API_KEY", "ANTHROPIC_API_BASE",
         "DAIMON_VAULT_DIR", "DAIMON_WORKSPACE_DIR",
-        "DAIMON_MEMORY_DB", "DAIMON_CHECKPOINTS_DB", "DAIMON_SKILLS_DIR",
+        "DAIMON_MEMORY_DB", "DAIMON_CHECKPOINTS_DB", "DAIMON_EVENTS_DB", "DAIMON_SKILLS_DIR",
         "DAIMON_GLOBAL_CONTEXT",
         "PINCHTAB_BASE", "PINCHTAB_TOKEN", "PORT", "DAIMON_LIVE_FRAMES", "TAVILY_API_KEY",
         "DAIMON_RECURSION_LIMIT", "DAIMON_MAX_STEPS", "DAIMON_COMPACTION_TOKENS",
@@ -78,6 +78,7 @@ def settings(clean_env: dict[str, str], tmp_path: Path) -> Settings:
             "DAIMON_GLOBAL_CONTEXT": str(tmp_path / "DAIMON.md"),
             "DAIMON_MEMORY_DB": str(tmp_path / "memory" / "daimon.db"),
             "DAIMON_CHECKPOINTS_DB": str(tmp_path / "memory" / "checkpoints.db"),
+            "DAIMON_EVENTS_DB": str(tmp_path / "memory" / "events.db"),
         }
     )
 

@@ -17,6 +17,7 @@ from daimon_agent.events import (
     live_frame_event,
     step_event,
     ui_action_event,
+    user_event,
 )
 
 
@@ -192,3 +193,27 @@ def test_compaction_event_shape() -> None:
     assert compaction_event(50000, 8000, 24) == {
         "type": "compaction", "before_tokens": 50000, "after_tokens": 8000, "dropped": 24,
     }
+
+
+def test_user_event_carries_the_prompt() -> None:
+    assert user_event("do the thing") == {"type": "user", "text": "do the thing"}
+
+
+def test_user_event_omits_mode_and_origin_when_absent() -> None:
+    """Same discipline as every other constructor here: a key with no value is
+    absent, not null, because legacy's JSON.stringify dropped undefined."""
+    assert "mode" not in user_event("x")
+    assert "origin" not in user_event("x")
+    assert user_event("x", mode="plan", origin="remote") == {
+        "type": "user",
+        "text": "x",
+        "mode": "plan",
+        "origin": "remote",
+    }
+
+
+def test_user_event_is_not_terminal() -> None:
+    """It opens a turn; it does not close a stream."""
+    from daimon_agent.events import TERMINAL_TYPES
+
+    assert user_event("x")["type"] not in TERMINAL_TYPES

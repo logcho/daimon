@@ -240,3 +240,21 @@ def host_action_open_file(path: str) -> dict:
 # --- live_frame --------------------------------------------------------------
 def live_frame_event(data: str) -> dict:
     return {"type": "live_frame", "data": data}
+
+
+# --- user (what the human said) ----------------------------------------------
+def user_event(text: str, *, mode: str | None = None, origin: str | None = None) -> dict:
+    """The prompt that started a turn.
+
+    The stream never carried this before, because the only consumer was the
+    client that had just typed it. Once a *second* client can attach and replay
+    a session it never saw, an assistant-only transcript is half a
+    conversation. Additive by the same discipline as everything else here: a
+    consumer that doesn't know the type ignores it.
+    """
+    event: dict = {"type": "user", "text": text}
+    if mode is not None:
+        event["mode"] = mode
+    if origin is not None:
+        event["origin"] = origin
+    return event

@@ -34,6 +34,7 @@ class Settings:
     workspace_dir: Path | None = None  # defaults to vault_dir
     memory_db: Path | None = None  # defaults to resolved_workspace_dir/.daimon/memory/daimon.db
     checkpoints_db: Path | None = None  # defaults to resolved_workspace_dir/.daimon/memory/checkpoints.db
+    events_db: Path | None = None  # defaults to resolved_workspace_dir/.daimon/memory/events.db
     skills_dir: Path | None = None  # defaults to vault_dir / "skills"
     global_context: Path | None = None  # defaults to ~/.daimon/DAIMON.md
 
@@ -102,6 +103,13 @@ class Settings:
         using the default session name "cli" in two different DBs instead of
         one shared row. `DAIMON_CHECKPOINTS_DB` still overrides it."""
         return self.checkpoints_db or (self.resolved_workspace_dir / ".daimon" / "memory" / "checkpoints.db")
+
+    @property
+    def resolved_events_db(self) -> Path:
+        """Per-workspace, next to the checkpoints it deliberately does not
+        duplicate: this holds the TaskEvent stream a client replays, the
+        checkpointer holds the model's context. See `eventlog.py`."""
+        return self.events_db or (self.resolved_workspace_dir / ".daimon" / "memory" / "events.db")
 
     @property
     def resolved_skills_dir(self) -> Path:
@@ -200,6 +208,7 @@ class Settings:
             workspace_dir=Path(get("DAIMON_WORKSPACE_DIR")) if get("DAIMON_WORKSPACE_DIR") else None,
             memory_db=Path(get("DAIMON_MEMORY_DB")) if get("DAIMON_MEMORY_DB") else None,
             checkpoints_db=Path(get("DAIMON_CHECKPOINTS_DB")) if get("DAIMON_CHECKPOINTS_DB") else None,
+            events_db=Path(get("DAIMON_EVENTS_DB")) if get("DAIMON_EVENTS_DB") else None,
             skills_dir=Path(get("DAIMON_SKILLS_DIR")) if get("DAIMON_SKILLS_DIR") else None,
             global_context=(
                 Path(get("DAIMON_GLOBAL_CONTEXT")) if get("DAIMON_GLOBAL_CONTEXT") else None
