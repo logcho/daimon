@@ -62,6 +62,8 @@ def test_the_gateway_exposes_exactly_these_routes(gateway: Gateway) -> None:
         ("GET", "/devices"),
         ("DELETE", "/devices/{device_id}"),
         ("GET", "/ws"),
+        ("GET", "/manifest.webmanifest"),
+        ("GET", "/assets"),
     }
 
 

@@ -4,6 +4,7 @@ import {
   agentStatus,
   fetchConfig,
   onDictationStatus,
+  onSessionStatus,
   onUiCommand,
   onVoiceModelDownload,
   sendMessage,
@@ -11,7 +12,7 @@ import {
   startChat,
   voiceModelStatus,
 } from "./api";
-import { applyEvent, applyTodoEvent, isSessionBusy, onSessionStatus } from "./sessionEvents";
+import { applyEvent, applyTodoEvent, isSessionBusy } from "./sessionEvents";
 import { bus } from "./lib/bus";
 import { collapseToPill, expandToPanel } from "./lib/window";
 import type {

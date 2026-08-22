@@ -1,0 +1,4 @@
+# Built by `npm run build:mobile` in app/ and committed because the Python
+# package ships it and there is no CI to build it on the way past. Marked
+# -diff so a rebuild does not fill reviews with minified noise.
+agents/src/daimon_agent/remote/web/** -diff linguist-generated=true

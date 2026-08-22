@@ -415,3 +415,124 @@ async def test_binary_input_can_be_sent_base64(client: TestClient) -> None:
                             "data": "printf 'AFTER-%s\\n' INT\n"})
         frames = await _read_until(ws, lambda f: b"AFTER-INT" in _term_text([f]))
         assert b"AFTER-INT" in _term_text(frames)
+
+
+# --- prompting ---------------------------------------------------------------
+
+async def test_a_client_can_start_a_turn_and_watch_it(client: TestClient) -> None:
+    """The difference from POST /task: no second connection holds the body.
+    The result arrives as ordinary events on the socket already open."""
+    client.app["graph"].router._pro.script = [AIMessage(content="from the socket")]
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "attach", session="remote-1")
+        ack, _ = await _call(ws, "prompt", session="remote-1", instruction="do the thing")
+        assert ack["ok"] is True
+
+        seen = []
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=15)
+            if frame["kind"] != "event":
+                continue
+            seen.append(frame["event"])
+            if frame["event"]["type"] in ("done", "error"):
+                break
+
+        assert seen[0]["type"] == "user"
+        assert seen[0]["text"] == "do the thing"
+        assert seen[-1]["result"] == "from the socket"
+
+
+async def test_a_prompt_records_where_it_came_from(client: TestClient) -> None:
+    client.app["graph"].router._pro.script = [AIMessage(content="ok")]
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "attach", session="s")
+        await _call(ws, "prompt", session="s", instruction="hello")
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=15)
+            if frame.get("kind") == "event" and frame["event"]["type"] in ("done", "error"):
+                break
+
+    client.app["eventlog"].flush()
+    assert client.app["eventlog"].replay("s")[0]["origin"] == "remote"
+
+
+async def test_a_prompt_needs_a_session_and_an_instruction(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        blank, _ = await _call(ws, "prompt", session="s", instruction="   ")
+        missing, _ = await _call(ws, "prompt", instruction="hi")
+        assert blank["ok"] is False and missing["ok"] is False
+
+
+async def test_asking_is_only_offered_to_a_client_that_said_it_can_answer(client: TestClient) -> None:
+    """An agent that asks a question nobody will answer has hung, not paused."""
+    from daimon_agent.graph import ASK_TOOLS
+
+    client.app["graph"].router._pro.script = [AIMessage(content="ok")]
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "attach", session="watcher")  # wants_ask defaults off
+        await _call(ws, "prompt", session="watcher", instruction="go")
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=15)
+            if frame.get("kind") == "event" and frame["event"]["type"] in ("done", "error"):
+                break
+
+    state = await client.app["graph"].aget_state(
+        {"configurable": {"thread_id": "watcher"}}
+    )
+    assert "ask" not in (state.values.get("capabilities") or [])
+
+
+async def test_a_client_that_can_answer_gets_the_ask_capability(client: TestClient) -> None:
+    client.app["graph"].router._pro.script = [AIMessage(content="ok")]
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "attach", session="answerer", wants_ask=True)
+        await _call(ws, "prompt", session="answerer", instruction="go")
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=15)
+            if frame.get("kind") == "event" and frame["event"]["type"] in ("done", "error"):
+                break
+
+    state = await client.app["graph"].aget_state(
+        {"configurable": {"thread_id": "answerer"}}
+    )
+    assert "ask" in (state.values.get("capabilities") or [])
+
+
+async def test_a_turn_started_over_the_socket_outlives_the_socket(client: TestClient) -> None:
+    """A phone going into a tunnel mid-turn must not cancel work the laptop is
+    also watching — which is exactly why the turn is detached rather than tied
+    to the connection that asked for it."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    original = client.app["graph"].router._pro._astream
+
+    async def blocking(*args, **kwargs):
+        started.set()
+        await release.wait()
+        async for chunk in original(*args, **kwargs):
+            yield chunk
+
+    client.app["graph"].router._pro._astream = blocking
+    client.app["graph"].router._pro.script = [AIMessage(content="finished anyway")]
+
+    watcher = client.app["bus"].subscribe("detached")
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "prompt", session="detached", instruction="slow")
+        await asyncio.wait_for(started.wait(), timeout=10)
+
+    release.set()  # the socket is closed; the turn is not
+
+    events = []
+    async def drain():
+        while True:
+            item = await watcher.queue.get()
+            if item is None:
+                return
+            events.append(item[1])
+            if item[1]["type"] in ("done", "error"):
+                return
+
+    await asyncio.wait_for(drain(), timeout=15)
+    assert events[-1]["result"] == "finished anyway"

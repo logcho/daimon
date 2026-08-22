@@ -486,6 +486,81 @@ async def create_app(
             "workspace": str(s.resolved_workspace_dir.resolve()),
         })
 
+    async def _enter_turn(session_id: str) -> None:
+        """Count a turn as in flight.
+
+        Deliberately called *before* the per-session lock: a turn queued behind
+        another is still activity, and the pill should show busy while it
+        waits. `/status` reads this, and it gates idle auto-shutdown.
+        """
+        reg = app["turn_registry"]
+        async with reg["lock"]:
+            reg["count"] += 1
+            reg["sessions"][session_id] += 1
+            reg["last_active_at"] = time.monotonic()
+
+    async def _leave_turn(session_id: str) -> None:
+        reg = app["turn_registry"]
+        async with reg["lock"]:
+            reg["count"] -= 1
+            if reg["sessions"][session_id] <= 1:
+                del reg["sessions"][session_id]
+            else:
+                reg["sessions"][session_id] -= 1
+            reg["last_active_at"] = time.monotonic()
+
+    def _publisher_for(session_id: str):
+        """An `emit` for one turn, plus a way to ask whether it ended.
+
+        The flag matters because `done|error|ask` are mutually exclusive: an
+        error backstop must not add a second terminal event to a turn that
+        already produced one.
+        """
+        publish = app["bus"].publisher(session_id)
+        state = {"terminal": False}
+
+        def emit(event: dict) -> None:
+            if event.get("type") in TERMINAL_TYPES:
+                state["terminal"] = True
+            publish(event)
+
+        return emit, state
+
+    async def run_turn_detached(session_id: str, run: Any) -> None:
+        """Run a turn with no HTTP response attached to it.
+
+        This is what a client that is *watching* rather than *streaming* uses —
+        a phone sends a prompt over the bus socket and then sees the result
+        arrive through the same fan-out as everyone else, rather than holding a
+        second connection open for the body. Same lock, same registry, same
+        publisher as the streaming path; only the socket is missing.
+        """
+        await _enter_turn(session_id)
+        lock = app["locks"].setdefault(session_id, asyncio.Lock())
+        async with lock:
+            emit, state = _publisher_for(session_id)
+            work = asyncio.create_task(run(emit))
+            app["turns"][session_id] = work
+            try:
+                await work
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[daimon-agent] unhandled error running task: {exc}", file=sys.stderr)
+                if not state["terminal"]:
+                    with contextlib.suppress(Exception):
+                        emit(error_event(str(exc)))
+            finally:
+                if app["turns"].get(session_id) is work:
+                    del app["turns"][session_id]
+                await _leave_turn(session_id)
+
+    app["run_turn_detached"] = run_turn_detached
+    # The bus socket starts turns too, and must use exactly what POST /task
+    # uses — the per-session graph, a fresh skill scan, the live-frame task.
+    app["graph_for"] = graph_for
+    app["discover_skills"] = lambda: _discover(app["settings"])
+
     async def _stream_turn_response(
         request: web.Request,
         session_id: str,
@@ -508,8 +583,9 @@ async def create_app(
         await response.prepare(request)
 
         bus: EventBus = app["bus"]
-        # `terminal_emitted` — a done|error|ask event was published (they are
-        # mutually exclusive per the contract). The writer closes the body
+        # `_publisher_for`'s terminal flag — a done|error|ask event was
+        # published (they are mutually exclusive per the contract). The writer
+        # closes the body
         # right after the terminal event itself, so the client's stream ends at
         # the result instead of staying open through reflection/teardown (a
         # connection that dies in that window made the client's final read fail
@@ -520,7 +596,6 @@ async def create_app(
         # checking the flag after every write would drop those earlier events'
         # tails and the done itself. FIFO + synchronous publish keeps
         # everything before the terminal event ahead of it in the queue.
-        terminal_emitted = False
         # Set when the client hangs up mid-turn (the user pressed Esc, or the
         # app quit). The writer notices first, because it is the only thing
         # touching the socket.
@@ -541,16 +616,7 @@ async def create_app(
                 if event.get("type") in TERMINAL_TYPES:
                     break
 
-        # Register the turn globally *before* acquiring the per-session lock —
-        # a turn queued behind another for the same session is still activity
-        # and the pill should show busy while it waits. The /status endpoint
-        # reads this registry to answer "is anything running."
-        reg = app["turn_registry"]
-        async with reg["lock"]:
-            reg["count"] += 1
-            reg["sessions"][session_id] += 1
-            reg["last_active_at"] = time.monotonic()
-
+        await _enter_turn(session_id)
         lock = app["locks"].setdefault(session_id, asyncio.Lock())
         async with lock:  # one turn per session at a time, like legacy's queue
             # Subscribe *inside* the lock. A turn queued behind another one on
@@ -560,13 +626,7 @@ async def create_app(
             sub = bus.subscribe(session_id)
             channel = bus.channel(session_id)
             writer_task = asyncio.create_task(writer(sub))
-            publish = bus.publisher(session_id)
-
-            def emit(event: dict) -> None:
-                nonlocal terminal_emitted
-                if event.get("type") in TERMINAL_TYPES:
-                    terminal_emitted = True
-                publish(event)
+            emit, emit_state = _publisher_for(session_id)
 
             work = asyncio.create_task(run(emit))
             app["turns"][session_id] = work
@@ -616,7 +676,7 @@ async def create_app(
                 raise
             except Exception as exc:  # last-ditch backstop, port of server.ts's .catch
                 print(f"[daimon-agent] unhandled error running task: {exc}", file=sys.stderr)
-                if not terminal_emitted:  # done|error|ask is exclusive per the contract
+                if not emit_state["terminal"]:  # done|error|ask is exclusive per the contract
                     try:
                         emit(error_event(str(exc)))
                     except Exception:
@@ -625,15 +685,7 @@ async def create_app(
                 disconnect.cancel()
                 if app["turns"].get(session_id) is work:
                     del app["turns"][session_id]
-                # De-register the turn so /status stops reporting busy.
-                async with reg["lock"]:
-                    reg["count"] -= 1
-                    if reg["sessions"][session_id] <= 1:
-                        del reg["sessions"][session_id]
-                    else:
-                        reg["sessions"][session_id] -= 1
-                    reg["last_active_at"] = time.monotonic()
-
+                await _leave_turn(session_id)  # /status stops reporting busy
                 bus.unsubscribe(session_id, sub)  # idempotent; also ends the writer
                 await writer_task
                 # The terminal chunk has been written; the client ends its
@@ -648,6 +700,8 @@ async def create_app(
 
     def _frame_task(emit_fn) -> asyncio.Task | None:
         return live_frames.start(emit_fn, build_browser(app["settings"]), app["settings"])
+
+    app["frame_task"] = _frame_task
 
     async def task(request: web.Request) -> web.StreamResponse:
         try:

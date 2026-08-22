@@ -234,9 +234,18 @@ def _add_static_routes(app: web.Application) -> None:
             )
         return web.FileResponse(index)
 
+    async def manifest(_request: web.Request) -> web.StreamResponse:
+        """Add-to-Home-Screen: without this the page opens in Safari chrome
+        rather than as a standalone app."""
+        path = WEB_DIR / "manifest.webmanifest"
+        if not path.exists():
+            return web.Response(status=404)
+        return web.FileResponse(path)
+
     if (WEB_DIR / "assets").is_dir():
         app.router.add_static("/assets/", WEB_DIR / "assets")
     app.router.add_get("/", spa)
+    app.router.add_get("/manifest.webmanifest", manifest)
 
 
 # --- socket plumbing ---------------------------------------------------------

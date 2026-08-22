@@ -1,19 +1,21 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { fmtTokens } from "./lib/format";
 import {
   emptyUsage,
   type AgentEvent,
   type ChatMessage,
-  type SessionStatusPayload,
   type Step,
   type StepEvent,
   type TodoItem,
   type TurnUsage,
 } from "./types";
 
-export const onSessionStatus = (
-  handler: (payload: SessionStatusPayload) => void,
-): Promise<UnlistenFn> => listen<SessionStatusPayload>("session-status", (e) => handler(e.payload));
+// Deliberately transport-free: this file is the fold from the agent's event
+// stream to what a UI renders, and it is exactly the same fold whether those
+// events arrived over Tauri's event channel, an NDJSON body, or a WebSocket
+// from the other side of a tailnet. `onSessionStatus` used to live here and
+// pulled in @tauri-apps for one line, which made the whole module
+// desktop-only for no reason; it now sits with the rest of the Tauri
+// bindings in api.ts.
 
 function lastAssistant(messages: ChatMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {

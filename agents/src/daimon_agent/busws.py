@@ -35,6 +35,9 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
+from .events import user_event
+from .run import run_turn
+
 PROTOCOL_VERSION = 1
 
 #: Sent by aiohttp itself; the client is expected to answer. Pings must not
@@ -200,6 +203,44 @@ def make_bus_ws_handler(app: web.Application):
                 row["pending_ask"] = bool(channel and channel.pending_ask)
             return {"ok": True, "sessions": list(rows.values())}
 
+        # --- prompting ------------------------------------------------------
+
+        async def do_prompt(op: dict) -> dict:
+            """Start a turn. The result arrives as ordinary events on this
+            socket, like any other turn on this session — there is no second
+            connection holding the body, which is the difference between a
+            client that *streams* a turn and one that *watches* it."""
+            session_id = str(op.get("session") or "")
+            instruction = op.get("instruction")
+            if not session_id:
+                return {"ok": False, "error": "session is required"}
+            if not isinstance(instruction, str) or not instruction.strip():
+                return {"ok": False, "error": "instruction is required"}
+            mode = op.get("mode") if op.get("mode") in ("plan", "normal") else "normal"
+
+            # Only offer the ask tools if this client said it can answer. An
+            # agent that asks a question nobody will answer has hung, not
+            # paused — the same rule POST /task applies.
+            attachment = attachments.get(session_id)
+            capabilities = ["ask"] if attachment and attachment.sub.wants_ask else []
+
+            graph = await app["graph_for"](session_id)
+            app["skills"] = app["discover_skills"]()
+
+            async def run(emit) -> Any:
+                emit(user_event(instruction, mode=mode, origin=str(op.get("origin") or "remote")))
+                return await run_turn(
+                    instruction, session_id, app["settings"], emit,
+                    graph=graph, memory=app["memory"], skills=app["skills"],
+                    router=app["router"], live_frames=app["frame_task"],
+                    capabilities=capabilities, mode=mode,
+                )
+
+            # Detached: a turn can outlast this socket. A phone going into a
+            # tunnel mid-turn must not cancel work the laptop is also watching.
+            asyncio.ensure_future(app["run_turn_detached"](session_id, run))
+            return {"ok": True}
+
         # --- terminals ------------------------------------------------------
 
         def on_terminal(kind: str, term_id: str, payload: Any) -> None:
@@ -282,6 +323,7 @@ def make_bus_ws_handler(app: web.Application):
             "attach": do_attach,
             "detach": do_detach,
             "sessions": do_sessions,
+            "prompt": do_prompt,
             "term.open": do_term_open,
             "term.list": do_term_list,
             "term.attach": do_term_attach,
