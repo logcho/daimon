@@ -68,6 +68,7 @@ def test_the_gateway_exposes_exactly_these_routes(gateway: Gateway) -> None:
         ("GET", "/manifest.webmanifest"),
         ("GET", "/sw.js"),
         ("GET", "/assets"),
+        ("GET", "/icons"),
     }
 
 

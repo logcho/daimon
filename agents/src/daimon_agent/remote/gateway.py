@@ -113,7 +113,7 @@ class Gateway:
 async def auth_middleware(request: web.Request, handler):
     gateway: Gateway = request.app["gateway"]
     path = request.path
-    if path in PUBLIC_PATHS or path.startswith("/assets/"):
+    if path in PUBLIC_PATHS or path.startswith(("/assets/", "/icons/")):
         return await handler(request)
     if path == "/ws":
         return await handler(request)  # gated by its ticket, checked in the handler
@@ -310,6 +310,11 @@ def _add_static_routes(app: web.Application) -> None:
 
     if (WEB_DIR / "assets").is_dir():
         app.router.add_static("/assets/", WEB_DIR / "assets")
+    if (WEB_DIR / "icons").is_dir():
+        # Unauthenticated, like the rest of the shell: the home-screen icon is
+        # fetched before anyone has a token, and iOS falls back to a screenshot
+        # of the page when it 404s.
+        app.router.add_static("/icons/", WEB_DIR / "icons")
     app.router.add_get("/", spa)
     app.router.add_get("/manifest.webmanifest", manifest)
     app.router.add_get("/sw.js", service_worker)
