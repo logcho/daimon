@@ -34,6 +34,7 @@ from . import live_frames
 from .browser import aclose_browser, build_browser
 from .bus import EventBus
 from .busws import make_bus_ws_handler
+from .client import workspace_run_dir
 from .config import Settings
 from .envfile import patch_env_file
 from .eventlog import FLUSH_INTERVAL_S, EventLog
@@ -1417,11 +1418,20 @@ def main() -> None:
     # Passed through to create_app so cleanup() removes it on any clean exit
     # (idle timeout, --stop, SIGTERM) — not just when a spawner overwrites it.
     pidfile_env = os.environ.get("DAIMON_PIDFILE")
-    pidfile_path: Path | None = None
-    if pidfile_env:
-        pidfile_path = Path(pidfile_env)
-        pidfile_path.parent.mkdir(parents=True, exist_ok=True)
-        pidfile_path.write_text(f"{os.getpid()}\n{settings.port}\n", encoding="utf-8")
+    # Absent an explicit path, announce ourselves in this workspace's run dir
+    # anyway. It used to be that only a CLI-spawned server got a pidfile, and
+    # "unmanaged" was the point — each owner killed only its own. But the
+    # remote gateway has to be able to *find* the servers on this machine, and
+    # the app's server (the one holding the terminals you actually want) is
+    # exactly the one that had no record anywhere. Writing pid + port here
+    # costs nothing and makes every server discoverable; cleanup() removes it
+    # on any clean exit, and a stale one is dead by definition because the
+    # server writes it itself.
+    pidfile_path = Path(pidfile_env) if pidfile_env else (
+        workspace_run_dir(settings.resolved_workspace_dir.resolve()) / "daimon-agent.pid"
+    )
+    pidfile_path.parent.mkdir(parents=True, exist_ok=True)
+    pidfile_path.write_text(f"{os.getpid()}\n{settings.port}\n", encoding="utf-8")
     # run_app awaits the app coroutine inside its own loop, so startup hooks
     # (checkpointer, browser) bind to the running loop.
     web.run_app(

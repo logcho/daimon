@@ -28,6 +28,7 @@ anthropic = ["langchain-anthropic>=1.0"]
 
 [project.scripts]
 daimon-agent = "daimon_agent.server:main"
+daimon-remote = "daimon_agent.remote.main:main"
 daimon-chat = "daimon_agent.cli:main"
 daimon = "daimon_agent.cli:main"
 
