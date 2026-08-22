@@ -1,1 +1,4 @@
 .DS_Store
+# Per-workspace agent state (checkpoints, memory, the event log). Written
+# wherever a server is run, including the repo root during development.
+.daimon/
