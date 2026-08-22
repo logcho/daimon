@@ -58,7 +58,7 @@ export function Notes({ bus, workspace }: { bus: BusClient; workspace: string })
     const dirty = editing && draft !== open.content;
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
+        <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-3 py-2">
           <button onClick={() => setOpen(null)} className="text-sm text-neutral-400">‹ notes</button>
           <span className="min-w-0 flex-1 truncate text-xs text-neutral-500">{open.name}</span>
           {editing ? (
@@ -94,7 +94,7 @@ export function Notes({ bus, workspace }: { bus: BusClient; workspace: string })
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-3 py-3">
+    <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
       {error && <p className="pb-2 text-xs text-red-400">{error}</p>}
       {notes.length === 0 && <p className="px-1 py-6 text-center text-sm text-neutral-500">no notes yet</p>}
       {notes.map((note) => (

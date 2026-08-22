@@ -137,10 +137,15 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
       .catch((err) => (String(err.message) === "unauthorized" ? onUnauthorized() : setError(String(err.message))));
   }, [onUnauthorized]);
 
-  async function openWorkspace(workspace: WorkspaceInfo) {
+  /** The only way to land on a workspace's list — and it always refetches.
+   *
+   *  It used to be that `back` just set the screen, so the lists were whatever
+   *  had been fetched on the way in. A terminal you opened after that never
+   *  appeared, which looked exactly like the terminal not having survived. */
+  const goToList = useCallback(async (workspace: WorkspaceInfo) => {
     setScreen({ view: "list", workspace });
     await refreshLists(workspace);
-  }
+  }, []);
 
   async function refreshLists(workspace: WorkspaceInfo) {
     const bus = busRef.current;
@@ -153,6 +158,21 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
     // A refusal here is expected and not an error: the gateway was started
     // without --terminals, so this device is not allowed shells.
     setTerminals(termAck.ok ? ((termAck.terminals ?? []) as TerminalInfo[]) : []);
+  }
+
+  /** Start a fresh conversation.
+   *
+   *  A session is just a checkpointer thread id, so "new" is a new id — it
+   *  becomes real when the first turn runs. Nothing to ask the server for,
+   *  which is why the list could only ever show sessions that already existed
+   *  and there was no way to begin one. */
+  async function newSession(workspace: WorkspaceInfo) {
+    await openSession(workspace, {
+      session_id: crypto.randomUUID(),
+      title: "new session",
+      busy: false,
+      pending_ask: false,
+    });
   }
 
   async function openSession(workspace: WorkspaceInfo, session: SessionInfo) {
@@ -175,8 +195,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
 
   async function leaveSession(workspace: WorkspaceInfo, sessionId: string) {
     await busRef.current?.send("detach", { workspace: workspace.key, session: sessionId });
-    setScreen({ view: "list", workspace });
-    await refreshLists(workspace);
+    await goToList(workspace);
   }
 
   async function newTerminal(workspace: WorkspaceInfo) {
@@ -186,11 +205,18 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
       return;
     }
     setScreen({ view: "terminal", workspace, id: (ack.terminal as TerminalInfo).id });
+    void refreshLists(workspace);
   }
 
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-neutral-950 text-neutral-100">
-      <Header screen={screen} connected={connected} onBack={setScreen} onLeave={leaveSession} />
+    <div className="flex h-[100dvh] flex-col overflow-hidden bg-neutral-950 text-neutral-100">
+      <Header
+        screen={screen}
+        connected={connected}
+        onBack={setScreen}
+        onToList={goToList}
+        onLeave={leaveSession}
+      />
 
       {error && (
         <button
@@ -202,7 +228,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
       )}
 
       {screen.view === "workspaces" && (
-        <WorkspaceList workspaces={workspaces} onOpen={openWorkspace} />
+        <WorkspaceList workspaces={workspaces} onOpen={goToList} />
       )}
 
       {screen.view === "list" && (
@@ -210,6 +236,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           sessions={sessions}
           terminals={terminals}
           onSession={(s) => openSession(screen.workspace, s)}
+          onNewSession={() => newSession(screen.workspace)}
           onTerminal={(t) => setScreen({ view: "terminal", workspace: screen.workspace, id: t.id })}
           onNewTerminal={() => newTerminal(screen.workspace)}
           onRefresh={() => refreshLists(screen.workspace)}
@@ -296,11 +323,13 @@ function Header({
   screen,
   connected,
   onBack,
+  onToList,
   onLeave,
 }: {
   screen: Screen;
   connected: boolean;
   onBack: (s: Screen) => void;
+  onToList: (w: WorkspaceInfo) => void;
   onLeave: (w: WorkspaceInfo, sessionId: string) => void;
 }) {
   const title =
@@ -313,7 +342,7 @@ function Header({
 
   return (
     <header
-      className="sticky top-0 z-10 flex items-center gap-3 border-b border-white/10 bg-neutral-950/90 px-3 py-3 backdrop-blur-xl"
+      className="flex shrink-0 items-center gap-3 border-b border-white/10 bg-neutral-950/90 px-3 py-3 backdrop-blur-xl"
       style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
     >
       {screen.view !== "workspaces" && (
@@ -321,7 +350,7 @@ function Header({
           onClick={() => {
             if (screen.view === "session") onLeave(screen.workspace, screen.sessionId);
             else if (screen.view === "terminal" || screen.view === "notes" || screen.view === "settings")
-              onBack({ view: "list", workspace: screen.workspace });
+              void onToList(screen.workspace);
             else onBack({ view: "workspaces" });
           }}
           className="rounded-lg px-2 py-1 text-sm text-neutral-400 active:text-neutral-100"
@@ -346,7 +375,7 @@ function WorkspaceList({
   onOpen: (w: WorkspaceInfo) => void;
 }) {
   return (
-    <div className="flex-1 px-3 py-3">
+    <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
       {workspaces.length === 0 && (
         <p className="px-1 py-8 text-center text-sm text-neutral-500">
           No agent servers are running on that machine.
@@ -370,6 +399,7 @@ function SessionAndTerminalList({
   sessions,
   terminals,
   onSession,
+  onNewSession,
   onTerminal,
   onNewTerminal,
   onRefresh,
@@ -379,6 +409,7 @@ function SessionAndTerminalList({
   sessions: SessionInfo[];
   terminals: TerminalInfo[];
   onSession: (s: SessionInfo) => void;
+  onNewSession: () => void;
   onTerminal: (t: TerminalInfo) => void;
   onNewTerminal: () => void;
   onRefresh: () => void;
@@ -386,7 +417,7 @@ function SessionAndTerminalList({
   onSettings: () => void;
 }) {
   return (
-    <div className="flex-1 overflow-y-auto px-3 py-3">
+    <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
       <div className="mb-4 flex gap-2">
         <button
           onClick={onNotes}
@@ -427,7 +458,10 @@ function SessionAndTerminalList({
 
       <div className="mb-2 mt-6 flex items-center justify-between px-1">
         <h2 className="text-xs uppercase tracking-wide text-neutral-500">sessions</h2>
-        <button onClick={onRefresh} className="text-xs text-neutral-500">refresh</button>
+        <div className="flex gap-3">
+          <button onClick={onRefresh} className="text-xs text-neutral-500">refresh</button>
+          <button onClick={onNewSession} className="text-xs text-[#4f8dff]">+ new</button>
+        </div>
       </div>
       {sessions.length === 0 && <p className="px-1 text-xs text-neutral-600">no conversations yet</p>}
       {sessions.map((session) => (

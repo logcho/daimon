@@ -251,3 +251,66 @@ async def test_terminals_are_refused_unless_explicitly_exposed(settings, tmp_pat
                 # whole socket.
                 ack, _ = await _call(ws, "attach", workspace=key, session="s")
                 assert ack["ok"] is True
+
+
+async def test_a_conversation_can_be_started_from_the_remote_client(stack) -> None:
+    """The path a phone actually uses: a session id it made up itself, a
+    prompt over the socket, and the answer coming back as events. Nothing
+    creates a session server-side first — a session *is* a checkpointer thread
+    id, so a new one is simply an id nothing has used yet."""
+    stack["agent_app"]["graph"].router._pro.script = [AIMessage(content="hello from the agent")]
+
+    ws = await _open_socket(stack)
+    try:
+        ack, _ = await _call(ws, "attach", workspace=stack["key"],
+                             session="brand-new-id", wants_ask=True)
+        assert ack["ok"] is True
+
+        ack, _ = await _call(ws, "prompt", workspace=stack["key"],
+                             session="brand-new-id", instruction="say hello")
+        assert ack["ok"] is True, ack
+
+        seen = []
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=20)
+            if frame.get("kind") != "event":
+                continue
+            seen.append(frame["event"])
+            if frame["event"]["type"] in ("done", "error"):
+                break
+
+        assert seen[0]["type"] == "user"
+        assert seen[-1]["type"] == "done", seen[-1]
+        assert seen[-1]["result"] == "hello from the agent"
+    finally:
+        await ws.close()
+
+
+async def test_a_new_session_shows_up_in_the_directory_afterwards(stack) -> None:
+    """Until a turn runs there is nothing to list, which is why the client has
+    to be able to start one without asking the server for a session first."""
+    stack["agent_app"]["graph"].router._pro.script = [AIMessage(content="done")]
+
+    ws = await _open_socket(stack)
+    try:
+        before, _ = await _call(ws, "sessions", workspace=stack["key"])
+        assert "made-up" not in [s["session_id"] for s in before["sessions"]]
+
+        # Attach first: `prompt` starts a turn but does not subscribe you to
+        # it, so a client that skips this sees its own conversation happen
+        # in silence.
+        await _call(ws, "attach", workspace=stack["key"], session="made-up")
+        await _call(ws, "prompt", workspace=stack["key"],
+                    session="made-up", instruction="first thing")
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=20)
+            if frame.get("kind") == "control" and frame.get("control") == "workspace_lost":
+                raise AssertionError("workspace went away")
+            if frame.get("kind") == "event" and frame["event"]["type"] in ("done", "error"):
+                break
+
+        after, _ = await _call(ws, "sessions", workspace=stack["key"])
+        row = [s for s in after["sessions"] if s["session_id"] == "made-up"][0]
+        assert row["title"] == "first thing"
+    finally:
+        await ws.close()

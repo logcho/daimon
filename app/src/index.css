@@ -33,8 +33,15 @@ body,
 }
 
 input,
-textarea {
+textarea,
+/* Anything the user reads rather than operates. `user-select: none` above
+   suits a desktop chrome you click through; on a phone it also means a note
+   you opened cannot be selected or copied, which is most of what reading one
+   is for. */
+.prose,
+.select-text {
   user-select: text;
+  -webkit-user-select: text;
 }
 
 @keyframes daimon-in {

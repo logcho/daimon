@@ -251,3 +251,72 @@ async def test_cloudflared_exiting_without_a_url_is_not_a_hang(monkeypatch) -> N
     monkeypatch.setattr(tunnel_mod.asyncio, "create_subprocess_exec", fake_exec)
 
     assert await tunnel_mod.Tunnel().start(4712) is None
+
+
+# --- the whole path ----------------------------------------------------------
+
+async def test_a_real_ask_with_nobody_attached_reaches_the_notifier(
+    settings, tmp_path, monkeypatch
+) -> None:
+    """The feature, end to end and in the state that matters: a turn parks on
+    a question while *nothing* is attached to that session.
+
+    This is the case `attach` cannot serve — you would have to know the session
+    id before it existed — and it is the only case where a notification is
+    worth sending at all.
+    """
+    import asyncio
+    import hashlib
+    import os
+
+    from aiohttp.test_utils import TestClient, TestServer
+    from langchain_core.messages import AIMessage
+
+    from daimon_agent.server import create_app
+    from fakes import tool_call
+    from test_server import fake_graph_builder
+
+    agent_app = await create_app(settings, graph_builder=fake_graph_builder)
+    async with TestClient(TestServer(agent_app)) as agent:
+        workspace = settings.resolved_workspace_dir.resolve()
+        key = hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
+        run_dir = tmp_path / "run" / key
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "workspace.txt").write_text(f"{workspace}\n")
+        (run_dir / "daimon-agent.pid").write_text(f"{os.getpid()}\n{agent.port}\n")
+
+        gateway = Gateway(state_dir=tmp_path / "remote", run_root=tmp_path / "run")
+        notified: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            gateway.push, "notify",
+            lambda title, body, url="/": notified.append((title, body)) or 1,
+        )
+        gateway.push.add(Subscription("phone", "https://push.example/e", {"p256dh": "k", "auth": "a"}))
+
+        async with TestClient(TestServer(create_gateway_app(gateway))):
+            # The watcher starts on gateway startup because a subscription
+            # already exists; give it a moment to find the workspace.
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                if agent_app["bus"]._observers:
+                    break
+            assert agent_app["bus"]._observers, "the gateway never started watching"
+
+            agent_app["graph"].router._pro.script = [
+                tool_call("ask_user", {"question": "Which?", "options": "A|first"}, id="c1"),
+                AIMessage(content="fine"),
+            ]
+            resp = await agent.post("/task", json={
+                "instruction": "pick one", "session_id": "unwatched", "capabilities": ["ask"],
+            })
+            await resp.read()
+
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                if notified:
+                    break
+
+    assert notified, "a parked question produced no notification"
+    (title, body) = notified[0]
+    assert "waiting on you" in title
+    assert "Which?" not in f"{title} {body}"  # the question never leaves the machine
