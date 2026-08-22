@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentConfig } from "./api";
 import {
   agentStatus,
-  closeTerminal,
   fetchConfig,
   onDictationStatus,
   onUiCommand,
@@ -13,6 +12,7 @@ import {
   voiceModelStatus,
 } from "./api";
 import { applyEvent, applyTodoEvent, isSessionBusy, onSessionStatus } from "./sessionEvents";
+import { bus } from "./lib/bus";
 import { collapseToPill, expandToPanel } from "./lib/window";
 import type {
   AgentStatus,
@@ -145,12 +145,17 @@ export default function App() {
     setActiveTerminalId(id);
   }, []);
 
-  // Closing a tab both ends its real shell process (`closeTerminal`, fired
-  // and forgotten — nothing here needs to wait for the kill to land before
-  // dropping it from the list) and picks a new active tab if the closed one
-  // was it, falling back to a neighbor, or to nothing.
+  // Closing a tab both ends its real shell process (fired and forgotten —
+  // nothing here needs to wait for the kill to land before dropping it from
+  // the list) and picks a new active tab if the closed one was it, falling
+  // back to a neighbor, or to nothing.
+  //
+  // Note this is the one path that genuinely ends a shell. The panel merely
+  // *detaching* on unmount is not the same thing any more: terminals live in
+  // the agent server, so a tab you close is gone on purpose while one that
+  // merely scrolled out of view keeps running.
   const closeTerminalTab = useCallback((id: string) => {
-    void closeTerminal(id);
+    bus().post("term.close", { id });
     setTerminalTabs((tabs) => {
       const remaining = tabs.filter((tabId) => tabId !== id);
       // Always keep at least one terminal tab — if the user closes the last

@@ -2,8 +2,6 @@ mod agent;
 mod fn_key;
 mod paths;
 mod session;
-mod terminal;
-mod timefmt;
 mod vault;
 mod vibrancy;
 mod voice;
@@ -268,19 +266,12 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             activate_and_focus_window,
             deactivate_app,
             set_panel_expanded,
-            terminal::start_terminal,
-            terminal::write_to_terminal,
-            terminal::resize_terminal,
-            terminal::close_terminal,
             voice::voice_model_status,
             voice::download_voice_model,
             voice::start_dictation,
             voice::stop_dictation,
             accessibility_trusted,
-            vault::get_vault_path_status,
             vault::set_vault_path,
-            vault::list_vault_files,
-            vault::read_vault_file,
             list_skills,
             read_skill,
             delete_skill,
@@ -333,10 +324,11 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
-            // The agent server (and its kernels) must not outlive us —
-            // and neither must any open terminal shells.
+            // The agent server (and its kernels) must not outlive us. Open
+            // terminals used to be swept here too; they live in the server
+            // now, which kills them on its own shutdown — and which is what
+            // lets a shell survive the app being restarted.
             app_handle.state::<AgentManager>().kill_sync();
-            terminal::kill_terminal_on_exit();
         }
     });
 }

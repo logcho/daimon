@@ -4,8 +4,6 @@ import type {
   AgentStatus,
   DictationStatus,
   SkillFile,
-  TerminalExitedPayload,
-  TerminalOutputPayload,
   VaultFile,
   VoiceModelDownloadPayload,
   VoiceModelStatus,
@@ -76,27 +74,6 @@ export const closeAgent = (): Promise<void> => invoke<void>("close_agent");
 
 export const setWindowVibrancy = (radius: number): Promise<void> =>
   invoke<void>("set_window_vibrancy", { radius });
-
-// --- Embedded terminals -----------------------------------------------------
-
-export const startTerminal = (id: string): Promise<void> => invoke<void>("start_terminal", { id });
-
-/** Raw bytes as a string — never appends a newline; the caller decides what
- * to send (a staged command must NOT carry a trailing `\r`). */
-export const writeToTerminal = (id: string, data: string): Promise<void> =>
-  invoke<void>("write_to_terminal", { id, data });
-
-export const resizeTerminal = (id: string, cols: number, rows: number): Promise<void> =>
-  invoke<void>("resize_terminal", { id, cols, rows });
-
-export const closeTerminal = (id: string): Promise<void> => invoke<void>("close_terminal", { id });
-
-/** Base64-encoded pty output, matching the Rust side's framing. */
-export const onTerminalOutput = (handler: (payload: TerminalOutputPayload) => void): Promise<UnlistenFn> =>
-  listen<TerminalOutputPayload>("terminal-output", (e) => handler(e.payload));
-
-export const onTerminalExited = (handler: (payload: TerminalExitedPayload) => void): Promise<UnlistenFn> =>
-  listen<TerminalExitedPayload>("terminal-exited", (e) => handler(e.payload));
 
 // --- Voice dictation --------------------------------------------------------
 

@@ -237,19 +237,6 @@ export interface AgentStatus {
   sessions: string[];
 }
 
-/** Rust → webview terminal events (not part of the agent's NDJSON contract). */
-export interface TerminalOutputPayload {
-  id: string;
-  /** Base64-encoded raw pty bytes. */
-  data: string;
-}
-
-export interface TerminalExitedPayload {
-  id: string;
-  /** Exit code, or null when the shell was killed by a signal. */
-  code: number | null;
-}
-
 export type View = "chat" | "terminal" | "vault" | "skills" | "settings";
 
 // --- Vault ------------------------------------------------------------------
