@@ -145,3 +145,44 @@ async def test_config_never_carries_the_api_keys(client: TestClient) -> None:
     blob = json.dumps(ack)
     assert "sk-secret-value-do-not-leak" not in blob
     assert ack["config"]["api_key_configured"] is True
+
+
+# --- deleting ----------------------------------------------------------------
+
+async def test_a_note_can_be_deleted(client: TestClient) -> None:
+    root = client.app["settings"].vault_dir
+    (root / "gone.md").write_text("delete me")
+
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "vault.delete", name="gone.md")
+        assert ack["ok"] is True
+
+    assert not (root / "gone.md").exists()
+
+
+async def test_deleting_a_note_takes_it_out_of_recall(client: TestClient) -> None:
+    """A note left in the index reads as the agent making things up."""
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "vault.write", name="temp.md", content="the pickled herring recipe")
+        assert client.app["memory"].search_notes("herring")
+
+        await _call(ws, "vault.delete", name="temp.md")
+        assert not client.app["memory"].search_notes("herring")
+
+
+async def test_deleting_a_note_cannot_reach_outside_the_vault(client: TestClient) -> None:
+    outside = client.app["settings"].vault_dir.parent / "precious.md"
+    outside.write_text("do not delete")
+
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "vault.delete", name="../precious.md")
+        assert ack["ok"] is False
+
+    assert outside.exists()
+
+
+async def test_deleting_a_note_that_is_not_there_says_so(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "vault.delete", name="imaginary.md")
+        assert ack["ok"] is False
+        assert "no such note" in ack["error"]

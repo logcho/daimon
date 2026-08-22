@@ -396,6 +396,23 @@ def make_bus_ws_handler(app: web.Application):
                     memory_store.index_note(name, content)
             return {"ok": True, "name": name}
 
+        async def do_vault_delete(op: dict) -> dict:
+            return app["delete_note"](str(op.get("name") or ""))
+
+        async def do_session_delete(op: dict) -> dict:
+            """Forget a conversation. Detaches this socket first — otherwise
+            the pump is left holding a subscription to a channel that has been
+            released, and the client keeps a dead session on screen."""
+            session_id = str(op.get("session") or "")
+            if not session_id:
+                return {"ok": False, "error": "session is required"}
+            att = attachments.pop(session_id, None)
+            if att is not None:
+                await _drop(att)
+            result = await app["forget_session"](session_id)
+            result.pop("status", None)
+            return result
+
         # --- skills and config (read-mostly) ----------------------------------
 
         async def do_skills(_op: dict) -> dict:
@@ -525,6 +542,8 @@ def make_bus_ws_handler(app: web.Application):
             "vault.list": do_vault_list,
             "vault.read": do_vault_read,
             "vault.write": do_vault_write,
+            "vault.delete": do_vault_delete,
+            "session.delete": do_session_delete,
             "term.open": do_term_open,
             "term.list": do_term_list,
             "term.attach": do_term_attach,

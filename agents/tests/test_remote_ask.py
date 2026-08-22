@@ -266,3 +266,63 @@ async def test_a_client_that_loses_the_race_is_told_so_specifically(client: Test
         await client_mod.resume_turn(
             client.session, client.port, "loser", ask_id, "A", lambda _e: None,
         )
+
+
+# --- forgetting a conversation -----------------------------------------------
+
+async def test_a_session_can_be_forgotten_from_the_socket(client: TestClient) -> None:
+    from langchain_core.messages import AIMessage
+
+    client.app["graph"].router._pro.script = [AIMessage(content="something private")]
+    await (await client.post("/task", json={
+        "instruction": "remember this", "session_id": "forget-me",
+    })).read()
+    client.app["eventlog"].flush()
+    assert client.app["eventlog"].replay("forget-me")
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await ws.send_json({"op": "attach", "op_id": "a", "session": "forget-me"})
+        await ws.send_json({"op": "session.delete", "op_id": "d", "session": "forget-me"})
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=10)
+            if frame.get("kind") == "ack" and frame.get("op_id") == "d":
+                break
+        assert frame["ok"] is True
+
+    # Both halves: the live channel and the recorded history.
+    assert client.app["bus"].peek("forget-me") is None
+    assert client.app["eventlog"].replay("forget-me") == []
+
+
+async def test_a_session_running_a_turn_is_not_forgotten_underneath_it(client: TestClient) -> None:
+    """Deleting mid-turn would wipe the history and then have the turn write
+    it straight back."""
+    from langchain_core.messages import AIMessage
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original = client.app["graph"].router._pro._astream
+
+    async def blocking(*args, **kwargs):
+        started.set()
+        await release.wait()
+        async for chunk in original(*args, **kwargs):
+            yield chunk
+
+    client.app["graph"].router._pro._astream = blocking
+    client.app["graph"].router._pro.script = [AIMessage(content="mid-flight")]
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await ws.send_json({"op": "prompt", "op_id": "p", "session": "busy-one",
+                            "instruction": "long one"})
+        await asyncio.wait_for(started.wait(), timeout=10)
+
+        await ws.send_json({"op": "session.delete", "op_id": "d", "session": "busy-one"})
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=10)
+            if frame.get("kind") == "ack" and frame.get("op_id") == "d":
+                break
+        assert frame["ok"] is False
+        assert "turn is running" in frame["error"]
+
+    release.set()

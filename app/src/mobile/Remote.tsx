@@ -198,6 +198,24 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
     await goToList(workspace);
   }
 
+  /** End a shell for good. Distinct from leaving its view, which only
+   *  detaches — the shell outliving the screen is the point. */
+  async function closeTerminal(workspace: WorkspaceInfo, id: string) {
+    await busRef.current?.send("term.close", { workspace: workspace.key, id });
+    await refreshLists(workspace);
+  }
+
+  async function forgetSession(workspace: WorkspaceInfo, sessionId: string) {
+    const ack = await busRef.current?.send("session.delete", {
+      workspace: workspace.key,
+      session: sessionId,
+    });
+    // Refused while a turn is running: deleting underneath one would wipe the
+    // history and have the turn write it straight back.
+    if (ack && !ack.ok) setError(ack.error ?? "could not forget that session");
+    await refreshLists(workspace);
+  }
+
   async function newTerminal(workspace: WorkspaceInfo) {
     const ack = await busRef.current?.send("term.open", { workspace: workspace.key, cols: 80, rows: 24 });
     if (!ack?.ok) {
@@ -237,6 +255,8 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           terminals={terminals}
           onSession={(s) => openSession(screen.workspace, s)}
           onNewSession={() => newSession(screen.workspace)}
+          onForgetSession={(id) => forgetSession(screen.workspace, id)}
+          onCloseTerminal={(id) => closeTerminal(screen.workspace, id)}
           onTerminal={(t) => setScreen({ view: "terminal", workspace: screen.workspace, id: t.id })}
           onNewTerminal={() => newTerminal(screen.workspace)}
           onRefresh={() => refreshLists(screen.workspace)}
@@ -319,6 +339,32 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
 
 // --- pieces -----------------------------------------------------------------
 
+/** Destructive actions on a phone need a second tap, not a dialog: a misplaced
+ *  thumb should not be able to end a shell or forget a conversation, and a
+ *  modal for every one of them is worse than the risk it removes. Disarms
+ *  itself so a half-pressed button does not stay dangerous. */
+function ConfirmButton({ label, onConfirm }: { label: string; onConfirm: () => void }) {
+  const [armed, setArmed] = useState(false);
+
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(timer);
+  }, [armed]);
+
+  return (
+    <button
+      onClick={() => (armed ? onConfirm() : setArmed(true))}
+      className={`shrink-0 rounded-xl px-3 py-2 text-xs ${
+        armed ? "bg-red-500/20 text-red-300" : "text-neutral-500"
+      }`}
+    >
+      {armed ? "sure?" : label}
+    </button>
+  );
+}
+
+
 function Header({
   screen,
   connected,
@@ -400,6 +446,8 @@ function SessionAndTerminalList({
   terminals,
   onSession,
   onNewSession,
+  onForgetSession,
+  onCloseTerminal,
   onTerminal,
   onNewTerminal,
   onRefresh,
@@ -410,6 +458,8 @@ function SessionAndTerminalList({
   terminals: TerminalInfo[];
   onSession: (s: SessionInfo) => void;
   onNewSession: () => void;
+  onForgetSession: (sessionId: string) => void;
+  onCloseTerminal: (id: string) => void;
   onTerminal: (t: TerminalInfo) => void;
   onNewTerminal: () => void;
   onRefresh: () => void;
@@ -440,20 +490,25 @@ function SessionAndTerminalList({
         <p className="px-1 pb-3 text-xs text-neutral-600">none running</p>
       )}
       {terminals.map((terminal) => (
-        <button
+        <div
           key={terminal.id}
-          onClick={() => onTerminal(terminal)}
-          className="mb-2 flex w-full items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left active:bg-white/10"
+          className="mb-2 flex w-full items-center gap-1 rounded-2xl border border-white/10 bg-white/5 pr-1"
         >
-          <span className={`h-2 w-2 rounded-full ${terminal.exited ? "bg-neutral-600" : "bg-emerald-400"}`} />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm">{terminal.cwd}</span>
-            <span className="text-xs text-neutral-500">
-              {terminal.exited ? "exited" : `pid ${terminal.pid}`}
-              {terminal.clients > 0 && ` · ${terminal.clients} watching`}
+          <button
+            onClick={() => onTerminal(terminal)}
+            className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left"
+          >
+            <span className={`h-2 w-2 shrink-0 rounded-full ${terminal.exited ? "bg-neutral-600" : "bg-emerald-400"}`} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm">{terminal.cwd}</span>
+              <span className="text-xs text-neutral-500">
+                {terminal.exited ? "exited" : `pid ${terminal.pid}`}
+                {terminal.clients > 0 && ` · ${terminal.clients} watching`}
+              </span>
             </span>
-          </span>
-        </button>
+          </button>
+          <ConfirmButton label="close" onConfirm={() => onCloseTerminal(terminal.id)} />
+        </div>
       ))}
 
       <div className="mb-2 mt-6 flex items-center justify-between px-1">
@@ -465,26 +520,31 @@ function SessionAndTerminalList({
       </div>
       {sessions.length === 0 && <p className="px-1 text-xs text-neutral-600">no conversations yet</p>}
       {sessions.map((session) => (
-        <button
+        <div
           key={session.session_id}
-          onClick={() => onSession(session)}
-          className="mb-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left active:bg-white/10"
+          className="mb-2 flex w-full items-center gap-1 rounded-2xl border border-white/10 bg-white/5 pr-1"
         >
-          <div className="flex items-center gap-2">
-            {session.busy && <span className="h-2 w-2 animate-pulse rounded-full bg-[#4f8dff]" />}
-            <span className="min-w-0 flex-1 truncate text-sm">
-              {session.title || session.session_id.slice(0, 8)}
-            </span>
-            {session.pending_ask && (
-              <span className="shrink-0 rounded-full bg-amber-400/15 px-2 py-0.5 text-[10px] text-amber-300">
-                waiting on you
+          <button
+            onClick={() => onSession(session)}
+            className="min-w-0 flex-1 px-4 py-3 text-left"
+          >
+            <div className="flex items-center gap-2">
+              {session.busy && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-[#4f8dff]" />}
+              <span className="min-w-0 flex-1 truncate text-sm">
+                {session.title || session.session_id.slice(0, 8)}
               </span>
+              {session.pending_ask && (
+                <span className="shrink-0 rounded-full bg-amber-400/15 px-2 py-0.5 text-[10px] text-amber-300">
+                  waiting on you
+                </span>
+              )}
+            </div>
+            {session.last_result && (
+              <div className="mt-1 line-clamp-2 text-xs text-neutral-500">{session.last_result}</div>
             )}
-          </div>
-          {session.last_result && (
-            <div className="mt-1 line-clamp-2 text-xs text-neutral-500">{session.last_result}</div>
-          )}
-        </button>
+          </button>
+          <ConfirmButton label="forget" onConfirm={() => onForgetSession(session.session_id)} />
+        </div>
       ))}
     </div>
   );

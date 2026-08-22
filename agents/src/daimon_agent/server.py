@@ -873,47 +873,48 @@ async def create_app(
         result = await interrupt_session(session_id, str(body.get("by") or "") or None)
         return web.json_response(result)
 
-    async def session_delete_handler(request: web.Request) -> web.Response:
-        """DELETE /sessions/{session_id} — forget a conversation.
+    async def forget_session(session_id: str) -> dict:
+        """The body of DELETE /sessions/{id}, callable without a request.
 
         Two halves, and the second is the one that matters. `release_session`
-        drops what this process holds for the id (graph, todo list, read
-        registry, REPL kernel); the checkpointer delete drops the persisted
-        message history, which outlives the process — without it the next turn
-        on this id resumes the conversation the user just asked to forget.
+        drops what this process holds for the id; the checkpointer delete drops
+        the persisted message history, which outlives the process — without it
+        the next turn on this id resumes the conversation the user just asked
+        to forget.
         """
-        session_id = request.match_info.get("session_id", "")
-        if not session_id:
-            return web.Response(status=400, text="session id is required")
-        # A running turn is part-way through writing checkpoints, and it holds
-        # its own message list in memory — deleting underneath it would wipe
-        # the history and then have the turn write it straight back. The
-        # caller cancels the turn first, then clears.
         lock = app["locks"].get(session_id)
         if lock is not None and lock.locked():
-            return web.json_response(
-                {"error": "a turn is running for this session"}, status=409
-            )
+            # A running turn is part-way through writing checkpoints and holds
+            # its own message list in memory: deleting underneath it would wipe
+            # the history and then have the turn write it straight back.
+            return {"ok": False, "error": "a turn is running for this session", "status": 409}
         await release_session(session_id)
-        # A test that injects its own 3-tuple graph builder may hand us a
-        # checkpointer that cannot do this; say so rather than claim success.
         forget = getattr(app["checkpointer"], "adelete_thread", None)
         if forget is None:
-            return web.json_response(
-                {"error": "this checkpointer cannot forget a thread"}, status=500
-            )
+            return {"ok": False, "error": "this checkpointer cannot forget a thread",
+                    "status": 500}
         try:
             await forget(session_id)
         except sqlite3.OperationalError as exc:
-            # The checkpoint tables are created lazily on the first write, so
-            # a server that has not run a turn yet has nothing to forget —
-            # which is the state being asked for. Any other operational error
-            # (a locked database, say) is a real failure to clear.
+            # The checkpoint tables are created lazily on the first write, so a
+            # server that has not run a turn yet has nothing to forget — which
+            # is the state being asked for.
             if "no such table" not in str(exc):
-                return web.json_response({"error": str(exc)}, status=500)
+                return {"ok": False, "error": str(exc), "status": 500}
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
-        return web.json_response({"ok": True, "session": session_id})
+            return {"ok": False, "error": str(exc), "status": 500}
+        return {"ok": True, "session": session_id}
+
+    app["forget_session"] = forget_session
+
+    async def session_delete_handler(request: web.Request) -> web.Response:
+        """DELETE /sessions/{session_id} — forget a conversation."""
+        session_id = request.match_info.get("session_id", "")
+        if not session_id:
+            return web.Response(status=400, text="session id is required")
+        result = await forget_session(session_id)
+        status_code = result.pop("status", 200 if result["ok"] else 400)
+        return web.json_response(result, status=status_code)
 
     async def status(request: web.Request) -> web.Response:
         """Global busy state — the pill polls this to drive its activity dot.
@@ -1298,28 +1299,40 @@ async def create_app(
             "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
         })
 
-    async def vault_delete_handler(request: web.Request) -> web.Response:
-        """DELETE /vault/{name} — remove a note, and its memory index entry.
+    def delete_note(name: str) -> dict:
+        """Remove a note and its memory index entry.
 
         Leaving the FTS row behind would keep `recall` surfacing a note that no
         longer exists, which reads as the agent making things up.
         """
-        name = request.match_info.get("name", "")
         try:
-            path = vault_file(request.app["settings"], name)
+            path = vault_file(app["settings"], name)
         except ValueError as exc:
-            return web.Response(status=400, text=str(exc))
+            return {"ok": False, "error": str(exc)}
         if not path.is_file():
-            return web.Response(status=404, text="no such note")
+            return {"ok": False, "error": "no such note"}
         try:
             path.unlink()
         except OSError as exc:
-            return web.json_response({"error": str(exc)}, status=500)
-        memory_store = request.app["memory"]
+            return {"ok": False, "error": str(exc)}
+        memory_store = app["memory"]
         if memory_store is not None:
             with contextlib.suppress(Exception):
                 memory_store.delete_note(name)
-        return web.json_response({"ok": True, "deleted": name})
+        return {"ok": True, "deleted": name}
+
+    app["delete_note"] = delete_note
+
+    async def vault_delete_handler(request: web.Request) -> web.Response:
+        """DELETE /vault/{name} — see `delete_note`."""
+        name = request.match_info.get("name", "")
+        result = delete_note(name)
+        if result["ok"]:
+            return web.json_response(result)
+        status_code = 400 if "outside the vault" in result["error"] else 404
+        if result["error"] not in ("no such note",) and status_code == 404:
+            status_code = 500
+        return web.json_response(result, status=status_code)
 
     async def skill_delete_handler(request: web.Request) -> web.Response:
         """DELETE /skills/{name} — remove a skill directory and everything in
