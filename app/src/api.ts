@@ -4,17 +4,12 @@ import type {
   AgentStatus,
   DictationStatus,
   SkillFile,
-  TerminalExitedPayload,
-  TerminalOutputPayload,
   VaultFile,
   VoiceModelDownloadPayload,
   VoiceModelStatus,
 } from "./types";
 
 export const startChat = (): Promise<string> => invoke<string>("start_chat");
-
-export const sendMessage = (sessionId: string, instruction: string): Promise<void> =>
-  invoke<void>("send_message", { sessionId, instruction });
 
 // --- Agent configuration (settings tab) ------------------------------------
 
@@ -76,27 +71,6 @@ export const closeAgent = (): Promise<void> => invoke<void>("close_agent");
 
 export const setWindowVibrancy = (radius: number): Promise<void> =>
   invoke<void>("set_window_vibrancy", { radius });
-
-// --- Embedded terminals -----------------------------------------------------
-
-export const startTerminal = (id: string): Promise<void> => invoke<void>("start_terminal", { id });
-
-/** Raw bytes as a string — never appends a newline; the caller decides what
- * to send (a staged command must NOT carry a trailing `\r`). */
-export const writeToTerminal = (id: string, data: string): Promise<void> =>
-  invoke<void>("write_to_terminal", { id, data });
-
-export const resizeTerminal = (id: string, cols: number, rows: number): Promise<void> =>
-  invoke<void>("resize_terminal", { id, cols, rows });
-
-export const closeTerminal = (id: string): Promise<void> => invoke<void>("close_terminal", { id });
-
-/** Base64-encoded pty output, matching the Rust side's framing. */
-export const onTerminalOutput = (handler: (payload: TerminalOutputPayload) => void): Promise<UnlistenFn> =>
-  listen<TerminalOutputPayload>("terminal-output", (e) => handler(e.payload));
-
-export const onTerminalExited = (handler: (payload: TerminalExitedPayload) => void): Promise<UnlistenFn> =>
-  listen<TerminalExitedPayload>("terminal-exited", (e) => handler(e.payload));
 
 // --- Voice dictation --------------------------------------------------------
 
@@ -186,3 +160,24 @@ export const readSkill = (name: string): Promise<SkillDetail> =>
 
 export const deleteSkill = (name: string): Promise<{ ok: boolean }> =>
   invoke<{ ok: boolean }>("delete_skill", { name });
+
+// --- Remote access -----------------------------------------------------------
+
+/** The gateway that fronts this machine for other devices. Off by default and
+ *  supervised separately from the agent server: the agent is what the app is,
+ *  while this exists to put it on a network. */
+export interface RemoteStatus {
+  running: boolean;
+  port: number;
+  url: string | null;
+  pairingCode: string | null;
+  terminals: boolean;
+  error: string | null;
+}
+
+export const remoteStatus = (): Promise<RemoteStatus> => invoke<RemoteStatus>("remote_status");
+
+export const startRemote = (terminals: boolean, pair: boolean): Promise<RemoteStatus> =>
+  invoke<RemoteStatus>("start_remote", { terminals, pair });
+
+export const stopRemote = (): Promise<RemoteStatus> => invoke<RemoteStatus>("stop_remote");

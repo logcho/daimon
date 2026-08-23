@@ -561,6 +561,11 @@ async def run_tui(
                 http, port, session_id, str(ask.event.get("id", "")), value, on_event
             )
             await _settle(terminal)
+        except client.AlreadyAnswered:
+            # The prompt is already gone from the screen — `state.ask` was
+            # cleared before the request went out. Say what happened rather
+            # than letting the question vanish for no visible reason.
+            emit(state.end_turn() + ["  answered on another device"])
         except client.ClientError as exc:
             emit(state.end_turn() + render.error_lines(str(exc)))
         except asyncio.CancelledError:

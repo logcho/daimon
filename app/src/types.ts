@@ -145,7 +145,31 @@ export interface LiveFrameEvent {
   data: string;
 }
 
+/** The prompt that opened a turn.
+ *
+ *  Carried on the stream because a session can be driven from more than one
+ *  device: a client replaying, or watching, a conversation it did not start
+ *  needs both halves of it. */
+export interface UserEvent {
+  type: "user";
+  text: string;
+  mode?: string;
+  origin?: string;
+}
+
+/** Somebody answered the question a session was parked on — possibly on
+ *  another device. Not the answer reaching the agent (that is POST /resume);
+ *  this is so every other client takes its prompt down. */
+export interface AskResolvedEvent {
+  type: "ask_resolved";
+  id: string;
+  answer: unknown;
+  by?: string;
+}
+
 export type AgentEvent =
+  | UserEvent
+  | AskResolvedEvent
   | StepEvent
   | AssistantDeltaEvent
   | UsageEvent
@@ -159,11 +183,6 @@ export type AgentEvent =
   | UiActionEvent
   | HostActionEvent
   | LiveFrameEvent;
-
-export interface SessionStatusPayload {
-  session_id: string;
-  event: AgentEvent;
-}
 
 /** A stored step. Mirrors StepEvent — they drifted once, and the display is
  *  only as good as what it keeps. */
@@ -235,19 +254,6 @@ export interface AgentStatus {
   busy: boolean;
   active_turns: number;
   sessions: string[];
-}
-
-/** Rust → webview terminal events (not part of the agent's NDJSON contract). */
-export interface TerminalOutputPayload {
-  id: string;
-  /** Base64-encoded raw pty bytes. */
-  data: string;
-}
-
-export interface TerminalExitedPayload {
-  id: string;
-  /** Exit code, or null when the shell was killed by a signal. */
-  code: number | null;
 }
 
 export type View = "chat" | "terminal" | "vault" | "skills" | "settings";

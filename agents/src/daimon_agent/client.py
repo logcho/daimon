@@ -114,6 +114,15 @@ class ClientError(RuntimeError):
     """Any failure to reach, spawn, or stream from the server."""
 
 
+class AlreadyAnswered(ClientError):
+    """Somebody else answered this question first.
+
+    Not a failure to report as one: with a phone and a laptop both able to see
+    a parked session, losing the race is an ordinary outcome. The caller takes
+    its prompt down and carries on.
+    """
+
+
 def _agents_cwd() -> Path:
     """The cwd the server is spawned with: the agents/ package root when
     this code runs from an (editable) install, else the caller's cwd. The
@@ -342,6 +351,8 @@ async def _stream_ndjson(
     only in endpoint and payload."""
     try:
         async with http.post(url, json=body) as resp:
+            if resp.status == 409:
+                raise AlreadyAnswered("answered on another device")
             if resp.status != 200:
                 raise ClientError(f"server rejected the task (HTTP {resp.status})")
             terminal_event: dict[str, Any] | None = None

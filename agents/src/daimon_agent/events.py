@@ -240,3 +240,37 @@ def host_action_open_file(path: str) -> dict:
 # --- live_frame --------------------------------------------------------------
 def live_frame_event(data: str) -> dict:
     return {"type": "live_frame", "data": data}
+
+
+# --- user (what the human said) ----------------------------------------------
+def user_event(text: str, *, mode: str | None = None, origin: str | None = None) -> dict:
+    """The prompt that started a turn.
+
+    The stream never carried this before, because the only consumer was the
+    client that had just typed it. Once a *second* client can attach and replay
+    a session it never saw, an assistant-only transcript is half a
+    conversation. Additive by the same discipline as everything else here: a
+    consumer that doesn't know the type ignores it.
+    """
+    event: dict = {"type": "user", "text": text}
+    if mode is not None:
+        event["mode"] = mode
+    if origin is not None:
+        event["origin"] = origin
+    return event
+
+
+# --- ask_resolved (somebody answered) ----------------------------------------
+def ask_resolved_event(ask_id: str, answer: Any, *, by: str | None = None) -> dict:
+    """A question this session was parked on has been answered.
+
+    Not a terminal event and not a reply — the *answer* reaches the agent
+    through POST /resume, and the turn that follows streams normally. This
+    exists for the other clients: with a laptop and a phone both watching one
+    parked session, the one that didn't answer needs to take its prompt down,
+    and saying who answered beats having it vanish for no visible reason.
+    """
+    event: dict = {"type": "ask_resolved", "id": ask_id, "answer": answer}
+    if by is not None:
+        event["by"] = by
+    return event

@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/mobile", "src/sessionEvents.ts", "src/types.ts", "src/lib", "src/components"]
+}

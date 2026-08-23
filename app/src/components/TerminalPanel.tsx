@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { onTerminalExited, onTerminalOutput, resizeTerminal, startTerminal, writeToTerminal } from "../api";
+import { bus, onBusControl, onBusReconnect, onTermData } from "../lib/bus";
+import { decodeBase64 } from "../lib/busClient";
 import { setInsertTarget, clearInsertTarget } from "../lib/voice";
 
 // Matches the app's one dark/glass theme (single #4f8dff accent) rather than
@@ -41,47 +42,14 @@ const TERMINAL_THEME = {
   brightWhite: "#fafafa",
 };
 
-function decodeBase64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-// Escape sequences are always plain ASCII control/printable bytes, so a
-// straight byte->char mapping is safe here even though the underlying
-// stream can otherwise contain arbitrary binary data — this string is only
-// ever used for pattern-matching below, never rendered or fed back into
-// xterm (the original `bytes` still go to `term.write()` untouched).
-function bytesToAsciiString(bytes: Uint8Array): string {
-  let out = "";
-  for (let i = 0; i < bytes.length; i++) {
-    out += String.fromCharCode(bytes[i]);
-  }
-  return out;
-}
-
-// xterm.js (as of the stable version this app uses — see package.json)
-// doesn't implement the Kitty keyboard protocol: it never answers a
-// terminal's `CSI ? u` capability query, which is exactly the query Claude
-// Code's own CLI sends at startup to decide whether it's safe to enable its
-// richer interactive UI. Kitty protocol support does exist in xterm.js, but
-// only in a pre-release with its own documented compatibility bugs in
-// exactly this app's runtime (macOS WKWebView via Tauri 2 — see
-// xtermjs/xterm.js#5894), so upgrading isn't safe right now.
+// The Kitty keyboard-protocol reply used to live here: xterm.js never answers
+// `CSI ? u`, and Claude Code's CLI sends it at startup to decide whether it can
+// enable its richer UI, so this component synthesized the answer.
 //
-// This synthesizes the answer ourselves instead: watches every chunk of
-// real PTY output for that exact query and, if seen, writes a standards-
-// compliant reply (`CSI ? 0 u` — "yes, I understand this protocol; no
-// enhancements currently active") straight back into the PTY, exactly as if
-// a real Kitty-capable terminal had answered. Entirely local to this
-// component; doesn't touch xterm.js's rendering at all, so it costs nothing
-// if this particular query never shows up (e.g. plain shell use with no
-// TUI asking).
-const KITTY_KEYBOARD_QUERY = "\x1b[?u";
-const KITTY_KEYBOARD_QUERY_RESPONSE = "\x1b[?0u";
+// It now lives in the server's pty service instead, and had to: with the
+// desktop app and a phone both attached to one shell, each of them answering
+// would write two replies into the same pty. The answer has to happen exactly
+// once, which means it has to happen where the pty is.
 
 // Never fit a terminal that isn't on screen.
 //
@@ -124,7 +92,11 @@ export function TerminalPanel({
 
   async function handleRestart() {
     setExitCode(undefined);
-    await startTerminal(id);
+    const term = termRef.current;
+    // The server drops an exited terminal's entry, so opening the same id
+    // spawns a fresh shell rather than finding the dead one.
+    await bus().send("term.open", { id, cols: term?.cols ?? 80, rows: term?.rows ?? 24 });
+    await bus().send("term.attach", { id, cols: term?.cols ?? 80, rows: term?.rows ?? 24 });
   }
 
   /** Fit the grid to the container and tell the PTY — but only when there is
@@ -146,9 +118,11 @@ export function TerminalPanel({
     // from a ResizeObserver callback and a rAF, and an exception there would
     // skip whatever the caller does next (the repaint and focus below). The
     // fit itself has already happened, which is the part the user sees.
-    Promise.resolve()
-      .then(() => resizeTerminal(id, term.cols, term.rows))
-      .catch(() => {});
+    //
+    // Note the pty may not end up this size: it takes the smallest size of
+    // everything attached, so a phone watching the same shell wins. That is
+    // deliberate — see the server's terminal service.
+    bus().post("term.resize", { id, cols: term.cols, rows: term.rows });
     return true;
   }, [id]);
 
@@ -183,59 +157,42 @@ export function TerminalPanel({
     refit();
 
     const dataDisposable = term.onData((data) => {
-      void writeToTerminal(id, data);
+      // Fire-and-forget rather than awaited: a round trip per keystroke would
+      // put the whole latency of the socket between typing and seeing the
+      // character echoed back.
+      bus().post("term.input", { id, data });
     });
 
-    let cancelled = false;
-    let unlistenOutput: (() => void) | undefined;
-    let unlistenExited: (() => void) | undefined;
+    // The bus multiplexes every terminal over one socket, so route by id —
+    // the same reason the Tauri event handler filtered by id before.
+    const unlistenData = onTermData(id, (bytes) => term.write(bytes));
 
-    // `onTerminalOutput`/`onTerminalExited` route every open terminal's
-    // events through one subscription (see api.ts) — filter to this
-    // instance's own `id` so a multi-tab session doesn't cross-wire output
-    // between tabs.
-    onTerminalOutput((payload) => {
-      if (payload.id !== id) return;
-      const bytes = decodeBase64ToBytes(payload.data);
-      term.write(bytes);
-      // See KITTY_KEYBOARD_QUERY's doc comment above — a real terminal that
-      // understood this query would already have answered it as part of
-      // reading the same bytes; xterm.js doesn't, so answer on its behalf
-      // whenever it shows up in the raw output stream.
-      if (bytesToAsciiString(bytes).includes(KITTY_KEYBOARD_QUERY)) {
-        void writeToTerminal(id, KITTY_KEYBOARD_QUERY_RESPONSE);
+    const unlistenControl = onBusControl((frame) => {
+      if (frame.id !== id) return;
+      if (frame.control === "term_exited") {
+        setExitCode((frame.code ?? null) as number | null);
+      } else if (frame.control === "term_snapshot") {
+        // Scrollback for a shell that has been running without us — on first
+        // attach, and again after a reconnect. Reset first: this is a fresh
+        // rendering of the whole buffer, not a continuation of what is on
+        // screen, and appending it would duplicate everything.
+        term.reset();
+        term.write(decodeBase64(String(frame.data ?? "")));
+        setExitCode(frame.exited ? ((frame.code ?? null) as number | null) : undefined);
       }
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenOutput = fn;
     });
 
-    onTerminalExited((payload) => {
-      if (payload.id !== id) return;
-      setExitCode(payload.code);
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlistenExited = fn;
-    });
-
-    // Sequenced, not two independent fire-and-forget calls: `write_to_terminal`
-    // errors with "no active terminal — start one first" if it lands before
-    // this tab's `start_terminal` has actually finished spawning the PTY on
-    // the Rust side. Awaiting `startTerminal` before ever issuing the staged
-    // command guarantees the ordering regardless of which IPC round trip
-    // would otherwise resolve first. The staged command carries no trailing
-    // `\r` — the user presses Enter to run it (stage-don't-execute).
+    // Open, then attach: `term.open` is idempotent per id, so a remount finds
+    // the shell that is already running instead of spawning a second one. That
+    // is the whole point of terminals living in the server — this panel can be
+    // torn down and rebuilt, or the app restarted, without the shell noticing.
     //
-    // After `startTerminal` returns, re-fit and re-resize: the initial
-    // `fit()` above (and the ResizeObserver's first callback) can both race
-    // the async PTY spawn and land before the terminal is registered — Rust's
-    // `resize_terminal` silently drops calls for unknown ids, leaving the PTY
-    // at the 80×24 placeholder until the container actually changes size.
-    // Re-sending here guarantees the PTY dimensions match the real grid
-    // before any TUI renders.
+    // Awaited in sequence: a staged command must not be written before the
+    // attach that will show its output.
     async function bootTerminal() {
       try {
-        await startTerminal(id);
+        await bus().send("term.open", { id, cols: term.cols, rows: term.rows });
+        await bus().send("term.attach", { id, cols: term.cols, rows: term.rows });
       } finally {
         // Fit even if the spawn failed. The grid is local state — leaving it
         // at the 80x24 placeholder in a full-size window makes a terminal that
@@ -243,10 +200,19 @@ export function TerminalPanel({
         refit();
       }
       if (initialCommand) {
-        await writeToTerminal(id, initialCommand);
+        // No trailing newline, ever: the user reads it and presses Enter
+        // (stage-don't-execute).
+        bus().post("term.input", { id, data: initialCommand });
       }
     }
     void bootTerminal();
+
+    // A dropped socket means the server no longer has us attached, so
+    // re-attach rather than assuming the stream simply resumes. The snapshot
+    // that comes back repaints whatever happened while we were away.
+    const unlistenReconnect = onBusReconnect(() => {
+      void bus().send("term.attach", { id, cols: term.cols, rows: term.rows });
+    });
 
     // Debounced — fires on every container size change, but the PTY
     // resize is only issued once the size has settled (50ms trailing).
@@ -261,9 +227,12 @@ export function TerminalPanel({
     resizeObserver.observe(container);
 
     return () => {
-      cancelled = true;
-      unlistenOutput?.();
-      unlistenExited?.();
+      // Detach, do not close: the shell keeps running. Closing a tab used to
+      // be the only way a terminal ended, because it lived in the window.
+      bus().post("term.detach", { id });
+      unlistenData();
+      unlistenControl();
+      unlistenReconnect();
       dataDisposable.dispose();
       clearTimeout(resizeTimer);
       resizeObserver.disconnect();

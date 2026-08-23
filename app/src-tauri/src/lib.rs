@@ -1,9 +1,7 @@
 mod agent;
 mod fn_key;
 mod paths;
-mod session;
-mod terminal;
-mod timefmt;
+mod remote;
 mod vault;
 mod vibrancy;
 mod voice;
@@ -11,7 +9,6 @@ mod window_focus;
 mod workspace;
 
 use agent::{AgentManager, AgentStatus};
-use serde::Serialize;
 use tauri::Manager;
 
 /// Whether the panel is expanded or collapsed to the pill.
@@ -23,13 +20,6 @@ use tauri::Manager;
 /// `expandToPanel`/`collapseToPill` in `lib/window.ts`.
 pub(crate) struct PanelExpanded(pub std::sync::atomic::AtomicBool);
 
-/// Every NDJSON event the agent streams is forwarded to the webview wrapped
-/// in this envelope (the legacy `session-status` channel, kept verbatim).
-#[derive(Clone, Serialize)]
-pub(crate) struct SessionStatusPayload {
-    pub session_id: String,
-    pub event: serde_json::Value,
-}
 
 #[tauri::command]
 async fn agent_status(
@@ -52,18 +42,6 @@ fn start_chat() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-#[tauri::command]
-async fn send_message(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AgentManager>,
-    session_id: String,
-    instruction: String,
-    agent: Option<String>,
-) -> Result<(), String> {
-    let status = state.ensure(&app).await?;
-    session::spawn_turn(app, status.port, session_id, instruction, agent.unwrap_or_else(|| "general".to_string()));
-    Ok(())
-}
 
 #[tauri::command]
 async fn get_config(
@@ -254,13 +232,16 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
     workspace::load_persisted_env();
     builder
         .manage(AgentManager::new())
+        .manage(remote::RemoteManager::new())
         // Starts collapsed — App.tsx's mount effect calls collapseToPill(),
         // which pushes the same value straight back down.
         .manage(PanelExpanded(std::sync::atomic::AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             agent_status,
             start_chat,
-            send_message,
+            remote::remote_status,
+            remote::start_remote,
+            remote::stop_remote,
             get_config,
             update_config,
             close_agent,
@@ -268,19 +249,12 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             activate_and_focus_window,
             deactivate_app,
             set_panel_expanded,
-            terminal::start_terminal,
-            terminal::write_to_terminal,
-            terminal::resize_terminal,
-            terminal::close_terminal,
             voice::voice_model_status,
             voice::download_voice_model,
             voice::start_dictation,
             voice::stop_dictation,
             accessibility_trusted,
-            vault::get_vault_path_status,
             vault::set_vault_path,
-            vault::list_vault_files,
-            vault::read_vault_file,
             list_skills,
             read_skill,
             delete_skill,
@@ -333,10 +307,11 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
-            // The agent server (and its kernels) must not outlive us —
-            // and neither must any open terminal shells.
+            // The agent server (and its kernels) must not outlive us. Open
+            // terminals used to be swept here too; they live in the server
+            // now, which kills them on its own shutdown — and which is what
+            // lets a shell survive the app being restarted.
             app_handle.state::<AgentManager>().kill_sync();
-            terminal::kill_terminal_on_exit();
         }
     });
 }

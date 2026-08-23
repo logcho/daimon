@@ -32,9 +32,13 @@ from dotenv import dotenv_values
 
 from . import live_frames
 from .browser import aclose_browser, build_browser
+from .bus import EventBus
+from .busws import make_bus_ws_handler
+from .client import workspace_run_dir
 from .config import Settings
 from .envfile import patch_env_file
-from .events import TERMINAL_TYPES, error_event
+from .eventlog import FLUSH_INTERVAL_S, EventLog
+from .events import TERMINAL_TYPES, ask_resolved_event, error_event, user_event
 from .graph import build_graph, close_checkpointer, make_sqlite_checkpointer
 from .memory import MemoryStore
 from .model import ModelRouter
@@ -51,7 +55,9 @@ from .skills.registry import RegistryError, SkillRegistry, install_bundle
 from .tools import build_tools
 from .tools.files import forget_reads
 from .tools.repl import close_all_repls, close_repl
+from .terminals import TerminalManager
 from .tools.todo import clear_todos
+from .vault import is_internal, vault_file
 from .tools.search import aclose_search_provider
 from .tools.web import aclose_web_fetcher
 
@@ -234,6 +240,7 @@ async def _idle_shutdown_loop(
     turn_registry: dict,
     idle_timeout: float,
     *,
+    attached: Any = None,  # Callable[[], int] — clients currently watching
     poll_interval: float | None = None,
     sleep: Any = asyncio.sleep,
     kill: Any = os.kill,
@@ -243,6 +250,13 @@ async def _idle_shutdown_loop(
     deadline per turn, because the deadline itself moves every time a turn
     starts or ends — a `reg["count"] == 0` window between two turns of an
     active conversation must not trip this early.
+
+    `attached` reports how many clients are watching this server right now. A
+    turn is not the only thing worth staying alive for: somebody reading a
+    session from their phone, or holding a shell open, would otherwise watch
+    the server exit under them. Heartbeats deliberately do not touch
+    `last_active_at` — if they did, one idle attached client would keep the
+    process alive forever and this whole loop would be dead code.
 
     `poll_interval`/`sleep`/`kill` are overridable for tests only; production
     code (`create_app`'s `startup` hook) never passes them, so the effective
@@ -255,7 +269,12 @@ async def _idle_shutdown_loop(
         await sleep(interval)
         async with turn_registry["lock"]:
             idle_for = time.monotonic() - turn_registry["last_active_at"]
-            should_stop = turn_registry["count"] == 0 and idle_for >= idle_timeout
+            watching = attached() if attached is not None else 0
+            should_stop = (
+                turn_registry["count"] == 0
+                and watching == 0
+                and idle_for >= idle_timeout
+            )
         if should_stop:
             print(
                 f"[daimon-agent] idle for {idle_for:.0f}s "
@@ -299,6 +318,18 @@ async def create_app(
         "lock": asyncio.Lock(),
         "last_active_at": time.monotonic(),
     }
+    # Durable record of the TaskEvent stream, and the fan-out that feeds it.
+    # Every turn publishes through the bus now rather than straight down one
+    # socket, so a second client can watch a turn already in flight.
+    app["eventlog"] = EventLog(settings.resolved_events_db)
+    app["bus"] = EventBus(sink=app["eventlog"].record)
+    # session_id -> the in-flight turn's task, for POST /interrupt. Closing the
+    # socket used to be the only way to stop a turn, and that stops working the
+    # moment more than one client is reading it.
+    app["turns"] = {}
+    # Terminals live here now rather than in the desktop app, so they outlive
+    # the window that opened them and more than one client can watch a shell.
+    app["terminals"] = TerminalManager()
 
     async def release_session(session_id: str) -> None:
         """Drop a session's graph and everything keyed to its id."""
@@ -306,6 +337,11 @@ async def create_app(
         clear_todos(session_id)
         forget_reads(session_id)
         await close_repl(session_id)
+        # The live channel and its recorded stream are keyed to the id too. A
+        # conversation the user asked to forget must not come back the next
+        # time a client asks for the session directory.
+        app["bus"].release(session_id)
+        app["eventlog"].delete_session(session_id)
 
     async def graph_for(session_id: str) -> Any:
         """The graph this session runs on — its own, or the shared one."""
@@ -391,10 +427,40 @@ async def create_app(
         # Self-terminate after sustained inactivity — a per-workspace server
         # has nothing else watching it once the terminal that spawned it
         # closes.
-        asyncio.ensure_future(_idle_shutdown_loop(app["turn_registry"], settings.idle_timeout_s))
+        asyncio.ensure_future(
+            _idle_shutdown_loop(
+                app["turn_registry"],
+                settings.idle_timeout_s,
+                attached=lambda: sum(
+                    c.subscriber_count for c in app["bus"].channels()
+                ) + app["terminals"].live_count,
+            )
+        )
+
+        # Drain the event log off the turn's back. `record()` only appends to a
+        # deque; every SQLite write happens here, batched.
+        async def _eventlog_drain() -> None:
+            log = app["eventlog"]
+            while True:
+                await asyncio.sleep(FLUSH_INTERVAL_S)
+                try:
+                    log.flush()
+                except Exception as exc:  # a bad write must never end a turn
+                    print(f"[daimon-agent] event log write failed: {exc}", file=sys.stderr)
+
+        app["eventlog_drain"] = asyncio.ensure_future(_eventlog_drain())
 
     async def cleanup(app: web.Application) -> None:
         app["graphs"].clear()
+        drain = app.get("eventlog_drain")
+        if drain is not None:
+            drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drain
+        # Flushes what the cancelled drain left behind, then closes the file.
+        app["eventlog"].close()
+        # Quitting must not leave shells (and whatever they started) running.
+        app["terminals"].close_all()
         await close_checkpointer(app["checkpointer"])
         await aclose_browser()
         await aclose_web_fetcher()
@@ -421,6 +487,81 @@ async def create_app(
             "workspace": str(s.resolved_workspace_dir.resolve()),
         })
 
+    async def _enter_turn(session_id: str) -> None:
+        """Count a turn as in flight.
+
+        Deliberately called *before* the per-session lock: a turn queued behind
+        another is still activity, and the pill should show busy while it
+        waits. `/status` reads this, and it gates idle auto-shutdown.
+        """
+        reg = app["turn_registry"]
+        async with reg["lock"]:
+            reg["count"] += 1
+            reg["sessions"][session_id] += 1
+            reg["last_active_at"] = time.monotonic()
+
+    async def _leave_turn(session_id: str) -> None:
+        reg = app["turn_registry"]
+        async with reg["lock"]:
+            reg["count"] -= 1
+            if reg["sessions"][session_id] <= 1:
+                del reg["sessions"][session_id]
+            else:
+                reg["sessions"][session_id] -= 1
+            reg["last_active_at"] = time.monotonic()
+
+    def _publisher_for(session_id: str):
+        """An `emit` for one turn, plus a way to ask whether it ended.
+
+        The flag matters because `done|error|ask` are mutually exclusive: an
+        error backstop must not add a second terminal event to a turn that
+        already produced one.
+        """
+        publish = app["bus"].publisher(session_id)
+        state = {"terminal": False}
+
+        def emit(event: dict) -> None:
+            if event.get("type") in TERMINAL_TYPES:
+                state["terminal"] = True
+            publish(event)
+
+        return emit, state
+
+    async def run_turn_detached(session_id: str, run: Any) -> None:
+        """Run a turn with no HTTP response attached to it.
+
+        This is what a client that is *watching* rather than *streaming* uses —
+        a phone sends a prompt over the bus socket and then sees the result
+        arrive through the same fan-out as everyone else, rather than holding a
+        second connection open for the body. Same lock, same registry, same
+        publisher as the streaming path; only the socket is missing.
+        """
+        await _enter_turn(session_id)
+        lock = app["locks"].setdefault(session_id, asyncio.Lock())
+        async with lock:
+            emit, state = _publisher_for(session_id)
+            work = asyncio.create_task(run(emit))
+            app["turns"][session_id] = work
+            try:
+                await work
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[daimon-agent] unhandled error running task: {exc}", file=sys.stderr)
+                if not state["terminal"]:
+                    with contextlib.suppress(Exception):
+                        emit(error_event(str(exc)))
+            finally:
+                if app["turns"].get(session_id) is work:
+                    del app["turns"][session_id]
+                await _leave_turn(session_id)
+
+    app["run_turn_detached"] = run_turn_detached
+    # The bus socket starts turns too, and must use exactly what POST /task
+    # uses — the per-session graph, a fresh skill scan, the live-frame task.
+    app["graph_for"] = graph_for
+    app["discover_skills"] = lambda: _discover(app["settings"])
+
     async def _stream_turn_response(
         request: web.Request,
         session_id: str,
@@ -433,70 +574,63 @@ async def create_app(
         everything subtle about the streaming lives here once — the ordered
         queue, the terminal-chunk close, the turn registry, and the
         per-session lock.
+
+        Events go out through the session's bus channel rather than straight
+        into this response, so every other attached client sees the same turn.
+        The bytes on *this* socket are unchanged: one JSON object per line,
+        body closed right after the terminal event.
         """
         response = web.StreamResponse(headers={"content-type": NDJSON})
         await response.prepare(request)
 
-        # Events must be emitted from sync graph-node context in order, so the
-        # emit closure enqueues and a single writer task drains the queue.
-        queue: asyncio.Queue[tuple[bytes, bool] | None] = asyncio.Queue()
-        # `terminal_emitted` — a done|error|ask event was enqueued (they are
-        # mutually exclusive per the contract). The writer closes the body
+        bus: EventBus = app["bus"]
+        # `_publisher_for`'s terminal flag — a done|error|ask event was
+        # published (they are mutually exclusive per the contract). The writer
+        # closes the body
         # right after the terminal event itself, so the client's stream ends at
         # the result instead of staying open through reflection/teardown (a
         # connection that dies in that window made the client's final read fail
         # with hyper's "incomplete message", surfacing as a spurious stream
-        # error after the result). The terminal-ness rides on the *chunk*, not
-        # this flag: the flag is set as soon as the terminal event is enqueued,
-        # which can happen while earlier chunks are still queued — checking
-        # the flag after every write would drop those earlier chunks' tails
-        # and the done itself. FIFO + synchronous emit keeps everything before
-        # the terminal event ahead of it in the queue.
-        terminal_emitted = False
+        # error after the result). The terminal-ness is read off the *event*,
+        # not this flag: the flag is set as soon as the terminal event is
+        # published, which can happen while earlier events are still queued —
+        # checking the flag after every write would drop those earlier events'
+        # tails and the done itself. FIFO + synchronous publish keeps
+        # everything before the terminal event ahead of it in the queue.
         # Set when the client hangs up mid-turn (the user pressed Esc, or the
         # app quit). The writer notices first, because it is the only thing
-        # touching the socket — it cancels the work rather than letting an
-        # abandoned turn keep burning tokens.
+        # touching the socket.
         client_gone = asyncio.Event()
 
-        async def writer() -> None:
+        async def writer(sub) -> None:
             while True:
-                item = await queue.get()
+                item = await sub.queue.get()
                 if item is None:
                     break
-                chunk, is_terminal = item
+                _seq, event = item
+                chunk = json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n"
                 try:
                     await response.write(chunk)
                 except (ConnectionResetError, ClientConnectionResetError):
                     client_gone.set()
                     break
-                if is_terminal:
+                if event.get("type") in TERMINAL_TYPES:
                     break
 
-        writer_task = asyncio.create_task(writer())
-
-        def emit(event: dict) -> None:
-            nonlocal terminal_emitted
-            is_terminal = event.get("type") in TERMINAL_TYPES
-            if is_terminal:
-                terminal_emitted = True
-            queue.put_nowait(
-                (json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n", is_terminal)
-            )
-
-        # Register the turn globally *before* acquiring the per-session lock —
-        # a turn queued behind another for the same session is still activity
-        # and the pill should show busy while it waits. The /status endpoint
-        # reads this registry to answer "is anything running."
-        reg = app["turn_registry"]
-        async with reg["lock"]:
-            reg["count"] += 1
-            reg["sessions"][session_id] += 1
-            reg["last_active_at"] = time.monotonic()
-
+        await _enter_turn(session_id)
         lock = app["locks"].setdefault(session_id, asyncio.Lock())
         async with lock:  # one turn per session at a time, like legacy's queue
+            # Subscribe *inside* the lock. A turn queued behind another one on
+            # the same session would otherwise be handed the running turn's
+            # events — including its terminal event, which would close this
+            # client's stream before its own turn had even started.
+            sub = bus.subscribe(session_id)
+            channel = bus.channel(session_id)
+            writer_task = asyncio.create_task(writer(sub))
+            emit, emit_state = _publisher_for(session_id)
+
             work = asyncio.create_task(run(emit))
+            app["turns"][session_id] = work
             disconnect = asyncio.create_task(client_gone.wait())
             try:
                 # Race the work against the client hanging up. run_turn owns
@@ -506,35 +640,54 @@ async def create_app(
                     {work, disconnect}, return_when=asyncio.FIRST_COMPLETED
                 )
                 if not work.done():
+                    # This client left, but it is no longer necessarily the
+                    # only one watching: killing a turn a phone is still
+                    # streaming would be worse than letting it finish. Drop
+                    # ourselves first, then cancel only if nobody is left.
+                    bus.unsubscribe(session_id, sub)
+                    if channel.subscriber_count == 0:
+                        work.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await work
+                        print(
+                            f"[daimon-agent] client disconnected — cancelled turn "
+                            f"for session {session_id}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        with contextlib.suppress(Exception):
+                            await work  # someone else is still reading it
+                else:
+                    await work  # re-raise anything run_turn let escape
+            except asyncio.CancelledError:
+                # aiohttp cancels the request handler when the client hangs up,
+                # and CancelledError is a BaseException — the `except Exception`
+                # below never sees it. This is *this response* ending, not the
+                # turn: apply the same rule as the client_gone branch, so a turn
+                # somebody else is still watching carries on without us.
+                #
+                # Deliberately no terminal event here. A turn stopped on purpose
+                # (POST /interrupt) is announced by whoever stopped it, which is
+                # the only place that knows why.
+                bus.unsubscribe(session_id, sub)
+                if channel.subscriber_count == 0 and not work.done():
                     work.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await work
-                    print(
-                        f"[daimon-agent] client disconnected — cancelled turn "
-                        f"for session {session_id}",
-                        file=sys.stderr,
-                    )
-                else:
-                    await work  # re-raise anything run_turn let escape
+                raise
             except Exception as exc:  # last-ditch backstop, port of server.ts's .catch
                 print(f"[daimon-agent] unhandled error running task: {exc}", file=sys.stderr)
-                if not terminal_emitted:  # done|error|ask is exclusive per the contract
+                if not emit_state["terminal"]:  # done|error|ask is exclusive per the contract
                     try:
                         emit(error_event(str(exc)))
                     except Exception:
                         pass  # response may already be closed
             finally:
                 disconnect.cancel()
-                # De-register the turn so /status stops reporting busy.
-                async with reg["lock"]:
-                    reg["count"] -= 1
-                    if reg["sessions"][session_id] <= 1:
-                        del reg["sessions"][session_id]
-                    else:
-                        reg["sessions"][session_id] -= 1
-                    reg["last_active_at"] = time.monotonic()
-
-                await queue.put(None)
+                if app["turns"].get(session_id) is work:
+                    del app["turns"][session_id]
+                await _leave_turn(session_id)  # /status stops reporting busy
+                bus.unsubscribe(session_id, sub)  # idempotent; also ends the writer
                 await writer_task
                 # The terminal chunk has been written; the client ends its
                 # read at the done|error|ask line and closes the connection
@@ -548,6 +701,8 @@ async def create_app(
 
     def _frame_task(emit_fn) -> asyncio.Task | None:
         return live_frames.start(emit_fn, build_browser(app["settings"]), app["settings"])
+
+    app["frame_task"] = _frame_task
 
     async def task(request: web.Request) -> web.StreamResponse:
         try:
@@ -565,6 +720,9 @@ async def create_app(
         raw_caps = body.get("capabilities")
         capabilities = [str(c) for c in raw_caps] if isinstance(raw_caps, list) else []
         mode = body.get("mode") if body.get("mode") in ("plan", "normal") else "normal"
+        # Which surface started this turn, for the session directory a remote
+        # client renders. Free-form and advisory; nothing branches on it.
+        origin = str(body["origin"])[:32] if isinstance(body.get("origin"), str) else None
         # agent parameter is accepted for backward compat but ignored —
         # there is a single unified agent now.
         print(f"[daimon-agent] received task: {instruction}", file=sys.stderr)
@@ -576,6 +734,10 @@ async def create_app(
         app["skills"] = _discover(app["settings"])
 
         async def run(emit) -> Any:
+            # Inside `run`, so it lands after the per-session lock is taken and
+            # therefore in the right place in the ring and the log. Without it
+            # a replayed transcript is assistant-only — half a conversation.
+            emit(user_event(instruction, mode=mode, origin=origin))
             return await run_turn(
                 instruction,
                 session_id,
@@ -605,6 +767,34 @@ async def create_app(
         if "answer" not in body:
             return web.Response(status=400, text="answer is required")
         answer = body["answer"]
+
+        # Claim the question before answering it. Clients have always sent
+        # `ask_id` and this handler has always ignored it, which was harmless
+        # while exactly one client could see a question — and is not, now that
+        # a laptop and a phone can both be looking at the same parked session.
+        # Taking it is a compare-and-swap: whoever gets there first answers,
+        # the loser is told so rather than resuming the same turn twice.
+        ask_id = body.get("ask_id")
+        channel = app["bus"].channel(session_id)
+        pending = channel.pending_ask
+        if ask_id is not None and pending is not None and pending.get("id") != ask_id:
+            return web.json_response(
+                {"error": "already answered", "ask_id": pending.get("id")}, status=409
+            )
+        if ask_id is not None and pending is None and channel.answered_ask_id == ask_id:
+            return web.json_response({"error": "already answered"}, status=409)
+        claimed = channel.clear_pending_ask()
+        if claimed is not None:
+            # Everyone else watching this session should stop showing the
+            # prompt, and see who dealt with it.
+            app["bus"].publisher(session_id)(
+                ask_resolved_event(
+                    str(claimed.get("id") or ""),
+                    answer,
+                    by=str(body.get("by") or "") or None,
+                )
+            )
+
         graph = await graph_for(session_id)
 
         async def run(emit) -> Any:
@@ -621,47 +811,110 @@ async def create_app(
 
         return await _stream_turn_response(request, session_id, run)
 
-    async def session_delete_handler(request: web.Request) -> web.Response:
-        """DELETE /sessions/{session_id} — forget a conversation.
+    async def interrupt_session(session_id: str, by: str | None = None) -> dict:
+        """Stop a turn on purpose.
 
-        Two halves, and the second is the one that matters. `release_session`
-        drops what this process holds for the id (graph, todo list, read
-        registry, REPL kernel); the checkpointer delete drops the persisted
-        message history, which outlives the process — without it the next turn
-        on this id resumes the conversation the user just asked to forget.
+        Closing the connection used to be the only way, and that stopped being
+        workable the moment more than one client could read a turn: a phone
+        hanging up must not end work the laptop is watching, so a disconnect no
+        longer cancels anything unless it was the last reader. Stopping has to
+        be something you *say*.
+
+        A turn parked on a question is two steps, deliberately. The first
+        answers it with nothing — `_format_answer` renders "The user did not
+        answer." and the graph unwinds through its normal path — because
+        cancelling a suspended LangGraph thread mid-node is how you corrupt the
+        checkpoint it is suspended in. A second interrupt then cancels the turn
+        that resumed.
         """
-        session_id = request.match_info.get("session_id", "")
+        channel = app["bus"].peek(session_id)
+        if channel is not None and channel.pending_ask is not None:
+            claimed = channel.clear_pending_ask()
+            app["bus"].publisher(session_id)(
+                ask_resolved_event(str(claimed.get("id") or ""), None, by=by)
+            )
+            graph = await graph_for(session_id)
+
+            async def run(emit) -> Any:
+                return await resume_turn(
+                    None, session_id, app["settings"], emit,
+                    graph=graph, memory=app["memory"], router=app["router"],
+                    live_frames=_frame_task,
+                )
+
+            asyncio.ensure_future(run_turn_detached(session_id, run))
+            return {"ok": True, "was": "waiting"}
+
+        work = app["turns"].get(session_id)
+        if work is None or work.done():
+            # Not an error: "stop" on something already stopped is the state
+            # the caller asked for.
+            return {"ok": True, "was": "idle"}
+
+        # The terminal event is published here rather than by the cancelled
+        # turn, because this is the only place that knows the turn was stopped
+        # on purpose and by whom.
+        who = f" by {by}" if by else ""
+        app["bus"].publisher(session_id)(error_event(f"turn cancelled{who}"))
+        work.cancel()
+        return {"ok": True, "was": "running"}
+
+    app["interrupt_session"] = interrupt_session
+
+    async def interrupt_handler(request: web.Request) -> web.Response:
+        """POST /interrupt — see `interrupt_session`."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        session_id = str(body.get("session_id") or request.query.get("session_id") or "")
         if not session_id:
             return web.Response(status=400, text="session id is required")
-        # A running turn is part-way through writing checkpoints, and it holds
-        # its own message list in memory — deleting underneath it would wipe
-        # the history and then have the turn write it straight back. The
-        # caller cancels the turn first, then clears.
+        result = await interrupt_session(session_id, str(body.get("by") or "") or None)
+        return web.json_response(result)
+
+    async def forget_session(session_id: str) -> dict:
+        """The body of DELETE /sessions/{id}, callable without a request.
+
+        Two halves, and the second is the one that matters. `release_session`
+        drops what this process holds for the id; the checkpointer delete drops
+        the persisted message history, which outlives the process — without it
+        the next turn on this id resumes the conversation the user just asked
+        to forget.
+        """
         lock = app["locks"].get(session_id)
         if lock is not None and lock.locked():
-            return web.json_response(
-                {"error": "a turn is running for this session"}, status=409
-            )
+            # A running turn is part-way through writing checkpoints and holds
+            # its own message list in memory: deleting underneath it would wipe
+            # the history and then have the turn write it straight back.
+            return {"ok": False, "error": "a turn is running for this session", "status": 409}
         await release_session(session_id)
-        # A test that injects its own 3-tuple graph builder may hand us a
-        # checkpointer that cannot do this; say so rather than claim success.
         forget = getattr(app["checkpointer"], "adelete_thread", None)
         if forget is None:
-            return web.json_response(
-                {"error": "this checkpointer cannot forget a thread"}, status=500
-            )
+            return {"ok": False, "error": "this checkpointer cannot forget a thread",
+                    "status": 500}
         try:
             await forget(session_id)
         except sqlite3.OperationalError as exc:
-            # The checkpoint tables are created lazily on the first write, so
-            # a server that has not run a turn yet has nothing to forget —
-            # which is the state being asked for. Any other operational error
-            # (a locked database, say) is a real failure to clear.
+            # The checkpoint tables are created lazily on the first write, so a
+            # server that has not run a turn yet has nothing to forget — which
+            # is the state being asked for.
             if "no such table" not in str(exc):
-                return web.json_response({"error": str(exc)}, status=500)
+                return {"ok": False, "error": str(exc), "status": 500}
         except Exception as exc:
-            return web.json_response({"error": str(exc)}, status=500)
-        return web.json_response({"ok": True, "session": session_id})
+            return {"ok": False, "error": str(exc), "status": 500}
+        return {"ok": True, "session": session_id}
+
+    app["forget_session"] = forget_session
+
+    async def session_delete_handler(request: web.Request) -> web.Response:
+        """DELETE /sessions/{session_id} — forget a conversation."""
+        session_id = request.match_info.get("session_id", "")
+        if not session_id:
+            return web.Response(status=400, text="session id is required")
+        result = await forget_session(session_id)
+        status_code = result.pop("status", 200 if result["ok"] else 400)
+        return web.json_response(result, status=status_code)
 
     async def status(request: web.Request) -> web.Response:
         """Global busy state — the pill polls this to drive its activity dot.
@@ -819,30 +1072,6 @@ async def create_app(
     # it showed a stale set of notes — which would have made "delete" delete
     # the wrong files.
 
-    def _vault_file(settings_obj: Settings, relative: str) -> Path:
-        """Resolve a client-supplied path inside the vault, or raise.
-
-        Same discipline as `workspace.Confinement`: resolve first, then check
-        containment, so `..` and symlinks can't walk out. Used for folders as
-        well as notes — this is pure path resolution; whether the target has to
-        be a `.md` file is the caller's rule.
-        """
-        root = Path(settings_obj.vault_dir).resolve()
-        target = (root / relative).resolve()
-        if target != root and root not in target.parents:
-            raise ValueError("path is outside the vault")
-        return target
-
-    def _is_internal(relative: Path) -> bool:
-        """Paths the vault views must not show.
-
-        `skills` has its own view, and dot-directories are plumbing rather
-        than notes — `.daimon/memory` holds this workspace's own databases and
-        would otherwise show up in the tree as a folder the user can't
-        meaningfully use but can delete.
-        """
-        return any(part == "skills" or part.startswith(".") for part in relative.parts)
-
     async def vault_list_handler(request: web.Request) -> web.Response:
         """GET /vault — every note, newest first.
 
@@ -854,7 +1083,7 @@ async def create_app(
             return web.json_response([])
         notes = []
         for path in root.rglob("*.md"):
-            if _is_internal(path.relative_to(root)):
+            if is_internal(path.relative_to(root)):
                 continue  # skills have their own view; dot-dirs are plumbing
             stat = path.stat()
             notes.append({
@@ -879,7 +1108,7 @@ async def create_app(
         folders = sorted(
             str(path.relative_to(root))
             for path in root.rglob("*")
-            if path.is_dir() and not _is_internal(path.relative_to(root))
+            if path.is_dir() and not is_internal(path.relative_to(root))
         )
         return web.json_response(folders)
 
@@ -893,7 +1122,7 @@ async def create_app(
         if not isinstance(path_str, str) or not path_str.strip():
             return web.json_response({"error": "path must be a non-empty string"}, status=400)
         try:
-            target = _vault_file(request.app["settings"], path_str.strip())
+            target = vault_file(request.app["settings"], path_str.strip())
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         if target.is_file():
@@ -914,7 +1143,7 @@ async def create_app(
         """
         name = request.match_info.get("path", "")
         try:
-            target = _vault_file(request.app["settings"], name)
+            target = vault_file(request.app["settings"], name)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         root = Path(request.app["settings"].vault_dir).resolve()
@@ -957,8 +1186,8 @@ async def create_app(
         if not isinstance(src_name, str) or not isinstance(dst_name, str):
             return web.json_response({"error": "from and to must be strings"}, status=400)
         try:
-            src = _vault_file(request.app["settings"], src_name)
-            dst = _vault_file(request.app["settings"], dst_name)
+            src = vault_file(request.app["settings"], src_name)
+            dst = vault_file(request.app["settings"], dst_name)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         root = Path(request.app["settings"].vault_dir).resolve()
@@ -1014,7 +1243,7 @@ async def create_app(
 
     async def vault_read_handler(request: web.Request) -> web.Response:
         try:
-            path = _vault_file(request.app["settings"], request.match_info.get("name", ""))
+            path = vault_file(request.app["settings"], request.match_info.get("name", ""))
         except ValueError as exc:
             return web.Response(status=400, text=str(exc))
         if not path.is_file():
@@ -1024,74 +1253,110 @@ async def create_app(
             "content": path.read_text(encoding="utf-8", errors="replace"),
         })
 
-    async def vault_write_handler(request: web.Request) -> web.Response:
-        """PUT /vault/{name} — create or overwrite a note, and reindex it.
+    # Told when a note is written or removed. Same shape as the terminal and
+    # session watchers, and for the same reason: a client holding a list of
+    # notes cannot discover that somebody else changed one.
+    vault_watchers: set = set()
 
-        One endpoint for both create and update: the vault is a directory of
-        files, so "create" is just a write to a name that doesn't exist yet,
-        and making the client pick between two endpoints would only invite
-        getting it wrong. Parent directories are created so `folder/note.md`
-        works without a separate mkdir step.
+    def watch_vault(fn):
+        vault_watchers.add(fn)
+        return lambda: vault_watchers.discard(fn)
+
+    def announce_vault(change: str, name: str) -> None:
+        for watcher in tuple(vault_watchers):
+            try:
+                watcher(change, name)
+            except Exception:
+                pass  # a watcher must never be able to break a write
+
+    app["watch_vault"] = watch_vault
+
+    def write_note(name: str, content: object) -> dict:
+        """Create or overwrite a note, and keep recall in step with it.
+
+        One function for both create and update: the vault is a directory of
+        files, so "create" is a write to a name that does not exist yet, and
+        making a caller choose between two paths only invites getting it wrong.
         """
-        name = request.match_info.get("name", "")
-        try:
-            body = await request.json()
-        except json.JSONDecodeError:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        content = body.get("content")
         if not isinstance(content, str):
-            return web.json_response({"error": "content must be a string"}, status=400)
+            return {"ok": False, "error": "content must be a string"}
         try:
-            path = _vault_file(request.app["settings"], name)
+            path = vault_file(app["settings"], name)
         except ValueError as exc:
-            return web.json_response({"error": str(exc)}, status=400)
-        # Only markdown: the listing is `rglob("*.md")`, so anything else
-        # would be written but never shown again.
+            return {"ok": False, "error": str(exc)}
+        # Only markdown: the listing is a glob for it, so anything else would
+        # be written and then never shown again.
         if path.suffix.lower() != ".md":
-            return web.json_response({"error": "note names must end in .md"}, status=400)
+            return {"ok": False, "error": "note names must end in .md"}
         if path.is_dir():
-            return web.json_response({"error": "that name is a directory"}, status=400)
+            return {"ok": False, "error": "that name is a directory"}
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
         except OSError as exc:
-            return web.json_response({"error": str(exc)}, status=500)
-        memory_store = request.app["memory"]
+            return {"ok": False, "error": str(exc)}
+        memory_store = app["memory"]
         if memory_store is not None:
-            # Best-effort, exactly as the delete path: a failed reindex costs
-            # recall accuracy, not the user's note.
+            # Best-effort, as the delete path is: a failed reindex costs recall
+            # accuracy, not the user's note.
             with contextlib.suppress(Exception):
                 memory_store.index_note(name, content)
+        announce_vault("written", name)
         stat = path.stat()
-        return web.json_response({
+        return {
             "ok": True,
             "name": name,
             "sizeBytes": stat.st_size,
             "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
-        })
+        }
 
-    async def vault_delete_handler(request: web.Request) -> web.Response:
-        """DELETE /vault/{name} — remove a note, and its memory index entry.
+    app["write_note"] = write_note
+
+    async def vault_write_handler(request: web.Request) -> web.Response:
+        """PUT /vault/{name} — see `write_note`."""
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        result = write_note(request.match_info.get("name", ""), body.get("content"))
+        return web.json_response(result, status=200 if result["ok"] else 400)
+
+
+    def delete_note(name: str) -> dict:
+        """Remove a note and its memory index entry.
 
         Leaving the FTS row behind would keep `recall` surfacing a note that no
         longer exists, which reads as the agent making things up.
         """
-        name = request.match_info.get("name", "")
         try:
-            path = _vault_file(request.app["settings"], name)
+            path = vault_file(app["settings"], name)
         except ValueError as exc:
-            return web.Response(status=400, text=str(exc))
+            return {"ok": False, "error": str(exc)}
         if not path.is_file():
-            return web.Response(status=404, text="no such note")
+            return {"ok": False, "error": "no such note"}
         try:
             path.unlink()
         except OSError as exc:
-            return web.json_response({"error": str(exc)}, status=500)
-        memory_store = request.app["memory"]
+            return {"ok": False, "error": str(exc)}
+        memory_store = app["memory"]
         if memory_store is not None:
             with contextlib.suppress(Exception):
                 memory_store.delete_note(name)
-        return web.json_response({"ok": True, "deleted": name})
+        announce_vault("deleted", name)
+        return {"ok": True, "deleted": name}
+
+    app["delete_note"] = delete_note
+
+    async def vault_delete_handler(request: web.Request) -> web.Response:
+        """DELETE /vault/{name} — see `delete_note`."""
+        name = request.match_info.get("name", "")
+        result = delete_note(name)
+        if result["ok"]:
+            return web.json_response(result)
+        status_code = 400 if "outside the vault" in result["error"] else 404
+        if result["error"] not in ("no such note",) and status_code == 404:
+            status_code = 500
+        return web.json_response(result, status=status_code)
 
     async def skill_delete_handler(request: web.Request) -> web.Response:
         """DELETE /skills/{name} — remove a skill directory and everything in
@@ -1265,6 +1530,10 @@ async def create_app(
 
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
+    # Read-only fan-out over one socket: watch any number of sessions, replay
+    # what you missed. Loopback-only and unauthenticated like everything else
+    # here — see busws.py.
+    app.router.add_get("/bus/ws", make_bus_ws_handler(app))
     app.router.add_get("/workspace", workspace_handler)
     app.router.add_get("/tools", tools_handler)
     app.router.add_get("/skills", skills_handler)
@@ -1292,6 +1561,7 @@ async def create_app(
     app.router.add_post("/task", task)
     app.router.add_post("/resume", resume)
     app.router.add_delete("/sessions/{session_id}", session_delete_handler)
+    app.router.add_post("/interrupt", interrupt_handler)
     return app
 
 
@@ -1307,11 +1577,20 @@ def main() -> None:
     # Passed through to create_app so cleanup() removes it on any clean exit
     # (idle timeout, --stop, SIGTERM) — not just when a spawner overwrites it.
     pidfile_env = os.environ.get("DAIMON_PIDFILE")
-    pidfile_path: Path | None = None
-    if pidfile_env:
-        pidfile_path = Path(pidfile_env)
-        pidfile_path.parent.mkdir(parents=True, exist_ok=True)
-        pidfile_path.write_text(f"{os.getpid()}\n{settings.port}\n", encoding="utf-8")
+    # Absent an explicit path, announce ourselves in this workspace's run dir
+    # anyway. It used to be that only a CLI-spawned server got a pidfile, and
+    # "unmanaged" was the point — each owner killed only its own. But the
+    # remote gateway has to be able to *find* the servers on this machine, and
+    # the app's server (the one holding the terminals you actually want) is
+    # exactly the one that had no record anywhere. Writing pid + port here
+    # costs nothing and makes every server discoverable; cleanup() removes it
+    # on any clean exit, and a stale one is dead by definition because the
+    # server writes it itself.
+    pidfile_path = Path(pidfile_env) if pidfile_env else (
+        workspace_run_dir(settings.resolved_workspace_dir.resolve()) / "daimon-agent.pid"
+    )
+    pidfile_path.parent.mkdir(parents=True, exist_ok=True)
+    pidfile_path.write_text(f"{os.getpid()}\n{settings.port}\n", encoding="utf-8")
     # run_app awaits the app coroutine inside its own loop, so startup hooks
     # (checkpointer, browser) bind to the running loop.
     web.run_app(

@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:mobile": "tsc -p tsconfig.mobile.json --noEmit && vite build --config vite.mobile.config.ts",
+    "dev:mobile": "vite --config vite.mobile.config.ts --host",
+    "test": "vitest run"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.20",
@@ -27,6 +30,7 @@
     "@vitejs/plugin-react": "^4",
     "tailwindcss": "^4",
     "typescript": "~5.6",
-    "vite": "^7"
+    "vite": "^7",
+    "vitest": "^3.2.7"
   }
 }

@@ -12,6 +12,7 @@ import { VoiceIndicator } from "./VoiceIndicator";
 import { SkillsPanel } from "./SkillsPanel";
 import { VaultPanel } from "./VaultPanel";
 import { ChatStatusBar } from "./ChatStatusBar";
+import { AskPrompt, type AskPrompt as AskPromptData } from "./AskPrompt";
 import { TodoList } from "./TodoList";
 
 interface PanelProps {
@@ -36,6 +37,11 @@ interface PanelProps {
   activeSessionId: string | null;
   onSelectChat: (id: string) => void;
   onCloseChat: (id: string) => void;
+  /** Destroy the conversation, not just this window's view of it. */
+  onForgetChat: (id: string) => void;
+  /** The question the active session is parked on, if any. */
+  ask: AskPromptData | null;
+  onAnswerAsk: (answer: string | string[]) => void;
   /** From GET /config — the same source the CLI's status bar reads. */
   config: AgentConfig | null;
   onAddChat: () => void;
@@ -84,6 +90,9 @@ export function Panel({
   activeSessionId,
   onSelectChat,
   onCloseChat,
+  onForgetChat,
+  ask,
+  onAnswerAsk,
   config,
   onAddChat,
   messages,
@@ -255,8 +264,13 @@ export function Panel({
                   {chatTitle(list, index)}
                 </button>
                 <button
-                  onClick={() => onCloseChat(id)}
-                  title="close chat (⌘W)"
+                  // Closing a tab and forgetting a conversation are different
+                  // things — the first is a view decision, the second destroys
+                  // history that outlives this window and is visible from
+                  // other devices. Same button, because the tab strip has no
+                  // room for two, with the modifier named in the tooltip.
+                  onClick={(e) => (e.altKey ? onForgetChat(id) : onCloseChat(id))}
+                  title="close chat (⌘W) — ⌥-click to forget it everywhere"
                   className="rounded-full px-1 text-neutral-500 transition hover:bg-white/10 hover:text-neutral-200 active:scale-90"
                 >
                   ×
@@ -324,6 +338,10 @@ export function Panel({
           {/* Between the transcript and the composer, and `shrink-0`, so it
               never competes with the transcript for scroll. */}
           <TodoList items={todos} />
+          {/* Above the composer for the same reason the checklist is: a
+              question is something the session is waiting on, and it has to
+              stay put while the answer is chosen. */}
+          {ask && <AskPrompt ask={ask} onAnswer={onAnswerAsk} />}
           <ErrorBanner
             message={
               status?.running === false

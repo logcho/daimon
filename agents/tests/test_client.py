@@ -215,7 +215,8 @@ async def test_stream_turn_against_real_server(settings):
         )
         assert client.turn_result(terminal) == "The answer is 42."
         types = [e["type"] for e in events]
-        assert types[0] == "step"
+        assert types[0] == "user"
+        assert types[1] == "step"
         assert types[-1] == "done"
 
 

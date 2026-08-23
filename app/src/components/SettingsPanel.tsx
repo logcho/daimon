@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { RemotePanel } from "./RemotePanel";
 import {
   fetchConfig,
   listModels,
@@ -326,6 +327,10 @@ export function SettingsPanel() {
         ["Reflection", config.reflect],
         ["Compaction", `${(config.compaction_chars / 1000).toFixed(0)}k chars`],
       ])}
+
+      <div className="border-t border-white/10 pt-5">
+        <RemotePanel />
+      </div>
 
       {section("Keyboard", SHORTCUTS)}
 
