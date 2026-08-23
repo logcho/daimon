@@ -298,6 +298,9 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             remote::remote_status,
             remote::start_remote,
             remote::stop_remote,
+            remote::pair_remote,
+            remote::remote_devices,
+            remote::revoke_remote_device,
             get_config,
             update_config,
             close_agent,
@@ -386,6 +389,12 @@ pub fn run() {
             // now, which kills them on its own shutdown — and which is what
             // lets a shell survive the app being restarted.
             app_handle.state::<AgentManager>().kill_sync();
+            // The gateway least of all. It is the one thing here that exposes
+            // this machine to a network, and the panel is the only sign it is
+            // on — so surviving the app meant staying reachable with nothing
+            // left to show it, and left an orphan holding the port that the
+            // next launch could neither see nor stop.
+            app_handle.state::<remote::RemoteManager>().stop();
         }
     });
 }

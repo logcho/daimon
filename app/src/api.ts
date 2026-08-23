@@ -239,3 +239,27 @@ export const startRemote = (terminals: boolean, pair: boolean): Promise<RemoteSt
   invoke<RemoteStatus>("start_remote", { terminals, pair });
 
 export const stopRemote = (): Promise<RemoteStatus> => invoke<RemoteStatus>("stop_remote");
+
+/** Open a fresh pairing window on the gateway that is already running.
+ *
+ *  Distinct from `startRemote(_, true)`, which only opens one because it is
+ *  starting a process. Pairing a second device used to mean stopping and
+ *  respawning, which dropped every device already connected. */
+export const pairRemote = (): Promise<RemoteStatus> => invoke<RemoteStatus>("pair_remote");
+
+/** A device that has been paired with this machine. */
+export interface PairedDevice {
+  id: string;
+  label: string;
+  /** Unix seconds; 0 when unknown. */
+  createdAt: number;
+  lastSeenAt: number | null;
+}
+
+/** Who can reach this machine. Until now the only way to see or change this
+ *  was `daimon-remote --devices` in a terminal — the workflow the switch was
+ *  built to replace. */
+export const remoteDevices = (): Promise<PairedDevice[]> => invoke<PairedDevice[]>("remote_devices");
+
+export const revokeRemoteDevice = (id: string): Promise<PairedDevice[]> =>
+  invoke<PairedDevice[]>("revoke_remote_device", { id });
