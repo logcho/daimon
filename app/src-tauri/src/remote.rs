@@ -45,7 +45,7 @@ pub struct RemoteStatus {
 
 struct Running {
     pid: u32,
-    _child: std::process::Child,
+    child: std::process::Child,
     _log: File,
     terminals: bool,
 }
@@ -79,7 +79,9 @@ impl RemoteManager {
         RemoteStatus {
             running: true,
             port: GATEWAY_PORT,
-            url: scrape(&log, "then open:  "),
+            // From `serve status`, not the gateway's banner: the banner prints
+            // a tailnet URL whenever Tailscale is installed, serving or not.
+            url: tailscale_serve_url(GATEWAY_PORT),
             // Only while a window is open: the CLI prints it once, and it is
             // single-use, so a stale one on screen is worse than none.
             pairing_code: scrape(&log, "pairing code:  ").filter(|_| running.pid > 0),
@@ -131,10 +133,23 @@ impl RemoteManager {
 
         let pid = child.id();
         *self.inner.lock().expect("remote state mutex poisoned") =
-            Some(Running { pid, _child: child, _log: log, terminals });
+            Some(Running { pid, child, _log: log, terminals });
 
         for _ in 0..HEALTH_POLL_TRIES {
+            // Whether our *own* child is alive, checked before the health
+            // probe rather than after. A health check on a fixed port cannot
+            // tell whose gateway answered it: another one already listening
+            // there will reply happily while the process we just spawned is
+            // dying of "address already in use", and we would report success
+            // and then show a pairing code belonging to a process that no
+            // longer exists.
+            if let Some(exit) = self.child_exited() {
+                let detail = last_error_line(&path).unwrap_or(exit);
+                self.stop();
+                return Err(detail);
+            }
             if health().await {
+                tailscale_serve(GATEWAY_PORT);
                 return Ok(self.status(app));
             }
             tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
@@ -143,8 +158,22 @@ impl RemoteManager {
         Err("daimon-remote did not come up — see daimon-remote.log".to_string())
     }
 
+    /// `Some(reason)` once our child has exited, `None` while it is running.
+    fn child_exited(&self) -> Option<String> {
+        let mut guard = self.inner.lock().expect("remote state mutex poisoned");
+        let running = guard.as_mut()?;
+        match running.child.try_wait() {
+            Ok(Some(status)) => Some(format!("daimon-remote exited ({status})")),
+            Ok(None) => None,
+            Err(e) => Some(format!("lost track of daimon-remote: {e}")),
+        }
+    }
+
     pub fn stop(&self) {
         let mut guard = self.inner.lock().expect("remote state mutex poisoned");
+        if guard.is_some() {
+            tailscale_unserve(GATEWAY_PORT);
+        }
         if let Some(running) = guard.take() {
             // The group, not the process: the gateway may have started a
             // cloudflared child. SIGTERM rather than SIGKILL so it gets to
@@ -152,6 +181,62 @@ impl RemoteManager {
             unsafe { libc::kill(-(running.pid as i32), libc::SIGTERM) };
         }
     }
+}
+
+/// The Tailscale CLI, wherever it landed.
+fn tailscale_bin() -> Option<PathBuf> {
+    [
+        PathBuf::from("/usr/local/bin/tailscale"),
+        PathBuf::from("/opt/homebrew/bin/tailscale"),
+        PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
+/// Put the gateway on the tailnet, and return the URL that actually routes.
+///
+/// This is the step that used to be a second command typed by hand, and
+/// leaving it out was worse than it sounds: the gateway prints a tailnet URL
+/// in its banner whenever Tailscale is *installed*, whether or not anything is
+/// serving, so the app would show a link that quietly went nowhere. The URL
+/// reported here comes from `serve status` — if it is absent, there is nothing
+/// to open, and saying so beats a dead link.
+fn tailscale_serve(port: u16) -> Option<String> {
+    let binary = tailscale_bin()?;
+    // Best-effort: a machine that is not signed in, or where the user is not
+    // the operator, simply does not get a URL. The gateway still runs and is
+    // still reachable on the LAN or over a tunnel.
+    let _ = std::process::Command::new(&binary)
+        .args(["serve", "--bg", &port.to_string()])
+        .output();
+    tailscale_serve_url(port)
+}
+
+fn tailscale_serve_url(port: u16) -> Option<String> {
+    let binary = tailscale_bin()?;
+    let out = std::process::Command::new(&binary).args(["serve", "status"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Only claim a URL if this port is the thing being proxied — a serve
+    // config left over for something else is not ours to advertise.
+    if !text.contains(&format!("127.0.0.1:{port}")) {
+        return None;
+    }
+    text.lines()
+        .find(|l| l.starts_with("https://"))
+        .map(|l| l.split_whitespace().next().unwrap_or(l).to_string())
+}
+
+fn tailscale_unserve(port: u16) {
+    let Some(binary) = tailscale_bin() else { return };
+    // Only tear down a config that is ours. `--https=443 off` is the form
+    // Tailscale itself prints when the proxy starts.
+    if tailscale_serve_url(port).is_none() {
+        return;
+    }
+    let _ = std::process::Command::new(&binary)
+        .args(["serve", "--https=443", "off"])
+        .output();
 }
 
 async fn health() -> bool {
@@ -169,6 +254,21 @@ fn scrape(log: &str, marker: &str) -> Option<String> {
     log.rsplit_once(marker)
         .map(|(_, rest)| rest.split_whitespace().next().unwrap_or("").to_string())
         .filter(|found| !found.is_empty())
+}
+
+/// The most useful line of a Python traceback is its last one. Surfacing it
+/// beats "it didn't come up — check the log", which is a instruction to go and
+/// do the work by hand.
+fn last_error_line(path: &std::path::Path) -> Option<String> {
+    let log = read_tail(path)?;
+    let last = log.lines().rev().find(|l| !l.trim().is_empty())?;
+    if last.contains("address already in use") {
+        return Some(format!(
+            "port {GATEWAY_PORT} is already in use — something else is serving on it, \
+             possibly a daimon-remote started from a terminal"
+        ));
+    }
+    Some(last.trim().to_string())
 }
 
 fn read_tail(path: &std::path::Path) -> Option<String> {
@@ -220,6 +320,26 @@ mod tests {
         // previous launch would be worse than none: the code is single-use.
         let log = "  daimon remote — gateway on http://127.0.0.1:4712\n";
         assert!(super::scrape(log, "pairing code:  ").is_none());
+    }
+
+    #[test]
+    fn a_port_clash_is_explained_rather_than_dumped() {
+        let dir = std::env::temp_dir().join(format!("daimon-remote-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clash.log");
+        std::fs::write(
+            &path,
+            "Traceback (most recent call last):\n  ...\n\
+             OSError: [Errno 48] error while attempting to bind on address \
+             ('127.0.0.1', 4712): [errno 48] address already in use\n",
+        )
+        .unwrap();
+
+        let message = super::last_error_line(&path).unwrap();
+        assert!(message.contains("already in use"), "{message}");
+        // The Python traceback is not the answer; what to do about it is.
+        assert!(!message.contains("Traceback"), "{message}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

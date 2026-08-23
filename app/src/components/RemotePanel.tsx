@@ -103,11 +103,12 @@ export function RemotePanel() {
             <Field label="open on your phone" value={status.url} />
           ) : (
             <p className="text-xs text-neutral-400">
-              Running on this machine only. To reach it from your phone, put it on
-              your tailnet:
-              <code className="mt-1 block rounded bg-black/40 px-2 py-1 font-mono text-[11px] text-neutral-300">
-                tailscale serve --bg {status?.port ?? 4712}
-              </code>
+              Running, but not on your tailnet — so this machine is reachable
+              from itself and nowhere else.
+              <span className="mt-1 block text-neutral-500">
+                Tailscale needs to be installed and signed in on this Mac. Once
+                it is, switching this off and on again puts the gateway on it.
+              </span>
             </p>
           )}
 
