@@ -32,10 +32,18 @@ export function TerminalView({
   workspace,
   id,
   onData,
+  onRegisterReattach,
 }: {
   bus: BusClient;
   workspace: string;
   id: string;
+  /** Registers this view's re-attach with the parent, which owns the socket
+   *  and so is the only thing that knows when it came back. Without it a
+   *  phone returning from a locked screen showed a live-looking terminal that
+   *  received nothing and silently dropped every keystroke — the socket is
+   *  deliberately dropped 120s after the tab goes hidden, and the server
+   *  stops holding the attachment when it does. */
+  onRegisterReattach?: (reattach: (() => void) | null) => void;
   /** Registers this view's byte sink with the parent, which owns the one
    *  socket and routes frames by terminal id. */
   onData: (id: string, sink: ((bytes: Uint8Array) => void) | null) => void;
@@ -84,11 +92,17 @@ export function TerminalView({
 
     const disposable = term.onData((data) => bus.post("term.input", { workspace, id, data }));
 
-    void (async () => {
+    const attach = async () => {
       const ack = await bus.send("term.attach", { workspace, id, cols: term.cols, rows: term.rows });
       if (!ack.ok) term.write(`\r\n\x1b[31mcould not attach: ${ack.error ?? "unknown"}\x1b[0m\r\n`);
       refit();
-    })();
+    };
+    void attach();
+    // The snapshot that comes back on re-attach repaints whatever happened
+    // while we were away, so a reset first would only throw away scrollback
+    // the server is about to resend. Same shape as the desktop's
+    // TerminalPanel, which has always done this.
+    onRegisterReattach?.(() => void attach());
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const observer = new ResizeObserver(() => {
@@ -100,6 +114,7 @@ export function TerminalView({
     return () => {
       // Detach, never close: the shell is not ours, we are only looking at it.
       bus.post("term.detach", { workspace, id });
+      onRegisterReattach?.(null);
       onData(id, null);
       clearTimeout(timer);
       observer.disconnect();
@@ -107,7 +122,7 @@ export function TerminalView({
       term.dispose();
       termRef.current = null;
     };
-  }, [bus, workspace, id, onData]);
+  }, [bus, workspace, id, onData, onRegisterReattach]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

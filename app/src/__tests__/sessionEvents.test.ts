@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyEvent, applyTodoEvent, isSessionBusy, sessionTotals } from "../sessionEvents";
+import { applyEvent, applyTodoEvent, isSessionBusy, reconcileBusy, sessionTotals } from "../sessionEvents";
 import type { AgentEvent, ChatMessage } from "../types";
 
 /**
@@ -188,5 +188,76 @@ describe("questions", () => {
     ]);
     expect(messages).toHaveLength(2);
     expect(messages[1].content).toBe("done it");
+  });
+});
+
+describe("retry notices", () => {
+  it("replaces a trailing retry rather than stacking under it", () => {
+    // A flaky provider produces a run of these. Five identical lines say
+    // nothing the newest one doesn't, while pushing the transcript off screen.
+    const messages = fold([
+      { type: "user", text: "go" },
+      { type: "retry", attempt: 1, max_attempts: 5, reason: "eof" },
+      { type: "retry", attempt: 2, max_attempts: 5, reason: "eof" },
+      { type: "retry", attempt: 3, max_attempts: 5, reason: "eof" },
+    ]);
+    const notices = messages[1].notices ?? [];
+    expect(notices).toHaveLength(1);
+    expect(notices[0].text).toContain("(3/5)");
+  });
+
+  it("keeps a retry that happened before real progress", () => {
+    // Only a *trailing* retry is replaced: one that preceded actual work is
+    // part of the record of what happened.
+    const messages = fold([
+      { type: "user", text: "go" },
+      { type: "retry", attempt: 1, max_attempts: 5, reason: "eof" },
+      { type: "compaction", before_tokens: 100, after_tokens: 40, dropped: 3 },
+      { type: "retry", attempt: 1, max_attempts: 5, reason: "eof" },
+    ]);
+    const notices = messages[1].notices ?? [];
+    expect(notices.map((n) => n.kind)).toEqual(["retry", "compaction", "retry"]);
+  });
+});
+
+describe("reconcileBusy", () => {
+  it("closes out a turn the server says is no longer running", () => {
+    // `thinking` is only ever cleared by done/error, and neither is guaranteed
+    // to arrive — the socket can die mid-turn. The server counts its own
+    // active turns, so it is the authority on this.
+    const open = fold([{ type: "user", text: "go" }, { type: "step", id: "t", label: "Thinking", status: "running" }]);
+    expect(isSessionBusy(open)).toBe(true);
+
+    const settled = reconcileBusy(open, false);
+    expect(isSessionBusy(settled)).toBe(false);
+    expect(settled[1].error).toBeTruthy();
+  });
+
+  it("leaves a genuinely running turn alone", () => {
+    const open = fold([{ type: "user", text: "go" }, { type: "step", id: "t", label: "Thinking", status: "running" }]);
+    expect(reconcileBusy(open, true)).toBe(open);
+  });
+
+  it("does not re-open a turn that already finished", () => {
+    // Deliberately one-way. The events are what say where text goes; a server
+    // reporting busy must never reanimate a settled bubble.
+    const done = fold([
+      { type: "user", text: "go" },
+      { type: "step", id: "t", label: "Thinking", status: "running" },
+      { type: "done", result: "finished" },
+    ]);
+    expect(reconcileBusy(done, true)).toBe(done);
+    expect(reconcileBusy(done, false)).toBe(done);
+  });
+
+  it("keeps the text of a turn that produced one before dying", () => {
+    const partial = fold([
+      { type: "user", text: "go" },
+      { type: "step", id: "t", label: "Thinking", status: "running" },
+      { type: "assistant_delta", text: "here is what I found" },
+    ]);
+    const settled = reconcileBusy(partial, false);
+    expect(settled[1].content).toBe("here is what I found");
+    expect(settled[1].error).toBeUndefined();
   });
 });

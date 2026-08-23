@@ -46,6 +46,37 @@ export function hasCompletedTurn(messages: ChatMessage[]): boolean {
 }
 
 /**
+ * Reconcile a transcript against the server's own view of whether the session
+ * is running, as carried on the attach snapshot (`busws.py`'s `busy`).
+ *
+ * Needed because `thinking` is only ever cleared by a `done` or `error` event,
+ * and neither is guaranteed to arrive: the socket can die mid-turn, or the
+ * agent server can be restarted underneath one. The bubble then claims to be
+ * working forever, with no way out.
+ *
+ * The server counts active turns, so it is the authority. If it says the
+ * session is idle while the last assistant message is still open, the turn
+ * ended while we were not listening — close it out. Deliberately one-way: a
+ * server that says *busy* never re-opens a turn the transcript has already
+ * settled, because the events are what say where the text goes.
+ */
+export function reconcileBusy(messages: ChatMessage[], busy: boolean): ChatMessage[] {
+  if (busy) return messages;
+  const idx = lastAssistant(messages);
+  if (idx < 0 || !messages[idx].thinking) return messages;
+  const settled: ChatMessage = {
+    ...messages[idx],
+    thinking: false,
+    // Nothing came back for it. Saying so beats a bubble that simply stops,
+    // which is indistinguishable from an answer the agent chose not to give.
+    error: messages[idx].content
+      ? messages[idx].error
+      : (messages[idx].error ?? "this turn ended without a result"),
+  };
+  return messages.map((m, i) => (i === idx ? settled : m));
+}
+
+/**
  * Fold a todo event into a session's checklist.
  *
  * Deliberately separate from `applyEvent`: todos are session state, not
@@ -192,19 +223,26 @@ export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMess
         ],
       };
       break;
-    case "retry":
+    case "retry": {
+      // Attempt 4 of 5 replaces attempt 3 of 5 rather than stacking under it.
+      // A flaky provider produces a run of these, and five identical lines say
+      // nothing the newest one doesn't — while pushing the actual transcript
+      // off the screen. Only a *trailing* retry is replaced, so a retry that
+      // happened before some real progress stays in the record where it
+      // belongs.
+      const notices = next.notices ?? [];
+      const trailing = notices.length > 0 && notices[notices.length - 1].kind === "retry";
+      const notice = {
+        id: crypto.randomUUID(),
+        kind: "retry" as const,
+        text: `connection lost — retrying (${event.attempt}/${event.max_attempts})`,
+      };
       next = {
         ...next,
-        notices: [
-          ...(next.notices ?? []),
-          {
-            id: crypto.randomUUID(),
-            kind: "retry",
-            text: `connection lost — retrying (${event.attempt}/${event.max_attempts})`,
-          },
-        ],
+        notices: trailing ? [...notices.slice(0, -1), notice] : [...notices, notice],
       };
       break;
+    }
     case "done":
       next = {
         ...next,

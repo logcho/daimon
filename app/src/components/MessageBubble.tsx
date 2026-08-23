@@ -1,8 +1,9 @@
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { fmtDuration } from "../lib/format";
 import type { ChatMessage, Step } from "../types";
-import { ThinkingIndicator } from "./ThinkingIndicator";
+import { useSpinnerFrame, useThinkingVerb } from "./ThinkingIndicator";
 import { categoryParts, MAX_EXPANDED, StepSummary, summarise } from "./StepSummary";
 
 /** A tool call. Shows what it was called *with*, not just its name — twelve
@@ -187,11 +188,95 @@ function StepList({ steps }: { steps: Step[] }) {
   );
 }
 
-interface Props {
-  message: ChatMessage;
+/** The step the turn is actually inside right now, or nothing between calls.
+ *
+ *  The *last* running step, not the first: steps arrive in order and a
+ *  sub-agent's own call always follows the spawn that owns it, so scanning
+ *  backwards names what is really happening. Taking the first would say
+ *  "task" for minutes on end while the interesting part — the file it is
+ *  reading — went unsaid. */
+function runningStep(steps: Step[]): Step | undefined {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (steps[i].status === "running") return steps[i];
+  }
+  return undefined;
 }
 
-export function MessageBubble({ message }: Props) {
+/** Wall clock since the turn opened, ticking once a second.
+ *
+ *  `startedAt` has been recorded ever since the Thinking step arrives
+ *  (`sessionEvents.ts`) and was only ever read *after* the turn ended. A turn
+ *  that has been going four minutes should be able to say so while it is
+ *  still going. */
+function useElapsed(startedAt: number | undefined): string | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+  if (!startedAt) return null;
+  const seconds = (now - startedAt) / 1000;
+  // Under a second there is nothing to report and the number only flickers.
+  return seconds >= 1 ? fmtDuration(seconds) : null;
+}
+
+/** What the turn is doing, for as long as it is doing it.
+ *
+ *  This used to be gated on the bubble still being *empty*
+ *  (`empty && message.thinking`), so the first streamed token took it away.
+ *  Models routinely open with a line of preamble before their first tool
+ *  call, which meant a turn minutes from finishing read as a finished reply —
+ *  the single biggest way this transcript misrepresented what was happening.
+ *
+ *  It now lives exactly as long as the Thinking step does, and names the step
+ *  that is running rather than rotating a verb over the top of it. The verbs
+ *  stay for the moments when there is genuinely nothing to name. */
+function TurnFooter({ message, stalled }: { message: ChatMessage; stalled?: boolean }) {
+  const step = runningStep(message.steps);
+  const frame = useSpinnerFrame();
+  const verb = useThinkingVerb();
+  const elapsed = useElapsed(message.startedAt);
+
+  // The socket is down and the turn was open when it went. The work may well
+  // still be running on the server — turns are deliberately detached from the
+  // client that started them — so this says what is actually known rather
+  // than either spinning as if nothing happened or declaring it dead.
+  if (stalled) {
+    return (
+      <span className="flex min-w-0 items-baseline gap-2 text-xs text-amber-300/90">
+        <span className="shrink-0 font-mono">⚠</span>
+        <span className="min-w-0">reconnecting — this turn may still be running</span>
+        {elapsed && <span className="ml-auto shrink-0 font-mono text-neutral-600">{elapsed}</span>}
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex min-w-0 items-baseline gap-2 text-xs text-[#4f8dff]">
+      <span className="inline-block w-3 shrink-0 self-center text-center font-mono">{frame}</span>
+      {step ? (
+        <>
+          <span className="shrink-0 font-mono">{step.tool ?? step.label}</span>
+          {step.detail && (
+            <span className="min-w-0 truncate font-mono text-neutral-500">{step.detail}</span>
+          )}
+        </>
+      ) : (
+        <span className="min-w-0 truncate">{verb}</span>
+      )}
+      {elapsed && <span className="ml-auto shrink-0 font-mono text-neutral-600">{elapsed}</span>}
+    </span>
+  );
+}
+
+interface Props {
+  message: ChatMessage;
+  /** The bus is disconnected and this turn was open when it went. */
+  stalled?: boolean;
+}
+
+export function MessageBubble({ message, stalled }: Props) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
@@ -220,13 +305,23 @@ export function MessageBubble({ message }: Props) {
               <StepList steps={steps} />
             </StepSummary>
           ))}
+        {/* Three different glyphs with no legend said less than the text
+            beside them already did. A retry is the one that is not routine —
+            the model call died and is being restarted — so it reads as a
+            warning; continuing and compacting stay the quiet progress record
+            they are. Repeated retries collapse in the fold rather than
+            stacking up here. */}
         {message.notices?.map((notice) => (
-          <p key={notice.id} className="font-mono text-xs text-neutral-500">
-            {notice.kind === "continuation" ? "↻" : notice.kind === "retry" ? "↺" : "⌘"}{" "}
-            {notice.text}
+          <p
+            key={notice.id}
+            className={`flex items-baseline gap-1.5 font-mono text-xs ${
+              notice.kind === "retry" ? "text-amber-300/90" : "text-neutral-500"
+            }`}
+          >
+            <span className="shrink-0">{notice.kind === "retry" ? "⚠" : "·"}</span>
+            <span className="min-w-0">{notice.text}</span>
           </p>
         ))}
-        {empty && message.thinking && <ThinkingIndicator />}
         {!empty && (
           <div className="daimon-prose prose prose-invert prose-sm max-w-none text-sm leading-relaxed text-white">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
@@ -235,6 +330,8 @@ export function MessageBubble({ message }: Props) {
         {message.error && (
           <p className="whitespace-pre-wrap text-sm leading-relaxed text-red-400">{message.error}</p>
         )}
+        {/* Last, and unconditional on the text above it. */}
+        {message.thinking && <TurnFooter message={message} stalled={stalled} />}
       </div>
     </div>
   );

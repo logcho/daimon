@@ -50,6 +50,16 @@ interface PanelProps {
    *  buried in a message, so it survives the turn that created it. */
   todos: TodoItem[];
   onSend: (text: string) => void;
+  /** Stop the active session's running turn. */
+  onStop: () => void;
+  /** Sent but not yet echoed back by the bus — see MessageList. */
+  pending?: string | null;
+  /** Bumped on send, to snap the transcript back to the newest. */
+  snapToken?: number;
+  /** The socket is down while the newest turn is still open. */
+  stalled?: boolean;
+  /** Replay could not reach the start of this conversation. */
+  truncated?: boolean;
   terminalTabs: string[];
   activeTerminalId: string | null;
   initialTerminalCommands: Record<string, string>;
@@ -98,6 +108,11 @@ export function Panel({
   messages,
   todos,
   onSend,
+  onStop,
+  pending,
+  snapToken,
+  stalled,
+  truncated,
   terminalTabs,
   activeTerminalId,
   initialTerminalCommands,
@@ -334,7 +349,13 @@ export function Panel({
 
       {view === "chat" && (
         <div className="flex min-h-0 flex-1 flex-col">
-          <MessageList messages={messages} />
+          <MessageList
+            messages={messages}
+            pending={pending}
+            snapToken={snapToken}
+            stalled={stalled}
+            truncated={truncated}
+          />
           {/* Between the transcript and the composer, and `shrink-0`, so it
               never competes with the transcript for scroll. */}
           <TodoList items={todos} />
@@ -353,7 +374,7 @@ export function Panel({
               floating line, `pb-5` reserves the space it sits in without the
               line itself occupying a row in this column. */}
           <div className="relative shrink-0 pb-6">
-            <ChatInput onSend={onSend} disabled={busy} />
+            <ChatInput onSend={onSend} disabled={busy} onStop={onStop} />
             <ChatStatusBar
               model={config?.model ?? "…"}
               contextWindow={config?.context_window ?? 128000}

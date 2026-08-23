@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageList } from "../components/MessageList";
 import { TodoList } from "../components/TodoList";
-import { applyEvent, applyTodoEvent } from "../sessionEvents";
+import { applyEvent, applyTodoEvent, reconcileBusy } from "../sessionEvents";
 import type { AgentEvent, ChatMessage, TodoItem } from "../types";
 import type { BusClient } from "../lib/busClient";
 import { AskSheet, type AskPrompt } from "./AskSheet";
@@ -35,6 +35,11 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The workspace's agent server is not answering. Distinct from the socket to
+  // the gateway being down: the gateway is fine, the thing behind it is not.
+  const [workspaceDown, setWorkspaceDown] = useState(false);
+  // Replay could not reach the start of this conversation.
+  const [truncated, setTruncated] = useState(false);
 
   const busRef = useRef<BusClient | null>(null);
   // The screen as the socket callbacks see it. They are registered once, so
@@ -58,6 +63,34 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
     if (sink) termSinks.current.set(id, sink);
     else termSinks.current.delete(id);
   }, []);
+
+  // The open terminal's own re-attach, registered by TerminalView. Held here
+  // because this component owns the socket and is the only thing that knows
+  // when it came back.
+  const termReattachRef = useRef<(() => void) | null>(null);
+  const registerTermReattach = useCallback((reattach: (() => void) | null) => {
+    termReattachRef.current = reattach;
+  }, []);
+
+  /** Re-attach to whatever the current screen is showing.
+   *
+   *  One path for both cases that need it: the socket came back, and the
+   *  workspace behind it came back. It used to cover sessions only, so a
+   *  terminal survived neither. */
+  const reattachRef = useRef<(() => void) | null>(null);
+  reattachRef.current = () => {
+    const current = screenRef.current;
+    if (current.view === "session") {
+      void busRef.current?.send("attach", {
+        workspace: current.workspace.key,
+        session: current.sessionId,
+        wants_ask: true,
+      });
+    } else if (current.view === "terminal") {
+      termReattachRef.current?.();
+    }
+    if (current.view !== "workspaces") void refreshListsRef.current?.(current.workspace);
+  };
 
   // One socket for the whole app, opened once. Every view multiplexes over it.
   useEffect(() => {
@@ -100,16 +133,59 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
       onTermData: (id, bytes) => termSinks.current.get(id)?.(bytes),
       onControl: (frame) => {
         if (frame.control === "snapshot") {
-          // A snapshot is the whole transcript as of now, not a continuation —
-          // rebuild rather than append, or a reconnect duplicates everything.
           const events = (frame.events ?? []) as AgentEvent[];
-          setMessages(events.reduce<ChatMessage[]>(applyEvent, []));
+          // `reset` is the cursor bookkeeping in busClient: false means this
+          // snapshot is exactly what we missed while the screen was locked, so
+          // it folds onto what we already have. Rebuilding every time is what
+          // made a long conversation lose everything older than the last 800
+          // events on each return from a pocket.
+          const reset = Boolean(frame.reset);
+          // `busy` was already trusted for the composer's own flag; the
+          // transcript now agrees with it, so a turn whose `done` we were
+          // offline for stops claiming to be in flight.
+          setMessages((prev) =>
+            reconcileBusy(
+              events.reduce<ChatMessage[]>(applyEvent, reset ? [] : prev),
+              Boolean(frame.busy),
+            ),
+          );
+          setTruncated(reset && Boolean(frame.truncated));
           setTodos((frame.todos ?? []) as TodoItem[]);
           // A session parked on a question renders the prompt immediately.
           // The event that carried it may have been hours ago; the channel
           // keeps it precisely so a client arriving late can still answer.
           setAsk((frame.pending_ask as AskPrompt | null) ?? null);
           setBusy(Boolean(frame.busy));
+        } else if (frame.control === "resync") {
+          // We fell behind far enough that the server dropped events to keep
+          // up — the case `bus.py` calls "a phone on a train". What we hold
+          // has a hole in it, so come back for a clean snapshot rather than
+          // splicing onto it.
+          const current = screenRef.current;
+          if (current.view === "session" && current.sessionId === frame.session) {
+            void (async () => {
+              await busRef.current?.send("detach", {
+                workspace: current.workspace.key,
+                session: current.sessionId,
+              });
+              await busRef.current?.send("attach", {
+                workspace: current.workspace.key,
+                session: current.sessionId,
+                wants_ask: true,
+              });
+            })();
+          }
+        } else if (frame.control === "term_exited") {
+          // The shell ended. Without this it simply stopped producing output,
+          // which is indistinguishable from a wedged connection.
+          const code = frame.code;
+          termSinks.current
+            .get(String(frame.id))
+            ?.(new TextEncoder().encode(
+              `\r\n\x1b[33m[process exited${
+                typeof code === "number" ? ` with ${code}` : ""
+              }]\x1b[0m\r\n`,
+            ));
         } else if (frame.control === "term_snapshot") {
           termSinks.current.get(String(frame.id))?.(decodeSnapshot(frame.data));
         } else if (frame.control === "vault_changed") {
@@ -124,19 +200,71 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           } else if (current.view === "list") {
             void refreshListsRef.current?.(current.workspace);
           }
+        } else if (
+          frame.control === "sessions_changed" &&
+          (frame.change === "busy" ||
+            frame.change === "idle" ||
+            frame.change === "asking" ||
+            frame.change === "answered")
+        ) {
+          // A state change on a session we already know about. Folded in
+          // place rather than refetching the list: the frame carries the two
+          // booleans the badges render, and a round trip per transition over
+          // a tunnel is exactly what the bus exists to avoid.
+          //
+          // Nothing pushed these at all before, so the pulsing "working" dot
+          // and the amber "waiting on you" pill sat frozen at whatever they
+          // were when the list was last fetched.
+          const id = String(frame.session ?? "");
+          setSessions((prev) =>
+            prev.some((s) => s.session_id === id)
+              ? prev.map((s) =>
+                  s.session_id === id
+                    ? { ...s, busy: Boolean(frame.busy), pending_ask: Boolean(frame.pending_ask) }
+                    : s,
+                )
+              : prev,
+          );
+          // And if we are looking at that session, its own composer agrees.
+          const current = screenRef.current;
+          if (current.view === "session" && current.sessionId === id) {
+            setBusy(Boolean(frame.busy));
+          }
         } else if (frame.control === "sessions_changed" || frame.control === "terminals_changed") {
           const current = screenRef.current;
           if (current.view === "list") void refreshListsRef.current?.(current.workspace);
         } else if (frame.control === "workspace_lost") {
-          setError("that workspace's server stopped");
+          // The workspace's agent server restarted or idled out. This used to
+          // set an error string and stop, leaving a live-looking screen
+          // attached to nothing with no way back: the gateway rediscovers on
+          // the next op, but nothing was ever sending one.
+          const current = screenRef.current;
+          if (
+            current.view !== "workspaces" &&
+            current.workspace.key === String(frame.workspace ?? "")
+          ) {
+            setWorkspaceDown(true);
+          }
+        } else if (frame.control === "workspace_found") {
+          // It came back. Reattach to whatever this screen is showing rather
+          // than making the user notice a banner and navigate out and in.
+          const current = screenRef.current;
+          if (
+            current.view === "workspaces" ||
+            current.workspace.key !== String(frame.workspace ?? "")
+          ) {
+            return;
+          }
+          setWorkspaceDown(false);
+          void reattachRef.current?.();
         }
       },
       onReconnect: () => {
-        // Nothing we were attached to is attached any more.
-        const current = screenRef.current;
-        if (current.view === "session") {
-          void bus.send("attach", { workspace: current.workspace.key, session: current.sessionId, wants_ask: true });
-        }
+        // Nothing we were attached to is attached any more — sessions *and*
+        // terminals. Only the session half used to be re-attached, so a
+        // terminal came back looking alive and receiving nothing.
+        setWorkspaceDown(false);
+        reattachRef.current?.();
       },
     });
     busRef.current = bus;
@@ -214,7 +342,14 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
     setMessages([]);
     setTodos([]);
     setAsk(null);
+    setTruncated(false);
     setBusy(session.busy);
+    // The transcript is being thrown away, so the resumption cursor has to go
+    // with it: resuming from a number whose history we no longer hold would
+    // fold "what you missed" onto an empty list and show a conversation that
+    // appears to start mid-sentence. Only this screen keeps one session's
+    // messages at a time, so entering one is always a fresh read.
+    busRef.current?.forget(session.session_id);
     setScreen({
       view: "session",
       workspace,
@@ -280,6 +415,24 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
         </button>
       )}
 
+      {/* The gateway is fine; the workspace's agent server behind it is not.
+          It comes back on its own — the gateway rediscovers and says so — so
+          this states what is happening rather than sending the user off to
+          navigate out and back in. The retry is there for the impatient. */}
+      {workspaceDown && (
+        <div className="mx-3 mt-2 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          <span className="min-w-0 flex-1">
+            that workspace's server stopped — waiting for it to come back
+          </span>
+          <button
+            onClick={() => reattachRef.current?.()}
+            className="shrink-0 rounded-lg border border-amber-400/30 px-2 py-0.5 text-amber-200"
+          >
+            retry
+          </button>
+        </div>
+      )}
+
       {screen.view === "workspaces" && (
         <WorkspaceList workspaces={workspaces} onOpen={goToList} />
       )}
@@ -305,6 +458,8 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           messages={messages}
           todos={todos}
           busy={busy}
+          stalled={!connected && busy}
+          truncated={truncated}
           onStop={() => {
             void busRef.current?.send("interrupt", {
               workspace: screen.workspace.key,
@@ -367,6 +522,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           workspace={screen.workspace.key}
           id={screen.id}
           onData={routeTermData}
+          onRegisterReattach={registerTermReattach}
         />
       )}
     </div>
@@ -590,12 +746,18 @@ function SessionView({
   messages,
   todos,
   busy,
+  stalled,
+  truncated,
   onSend,
   onStop,
 }: {
   messages: ChatMessage[];
   todos: TodoItem[];
   busy: boolean;
+  /** The socket is down while the newest turn is still open. */
+  stalled: boolean;
+  /** Replay could not reach the start of this conversation. */
+  truncated: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
 }) {
@@ -606,8 +768,8 @@ function SessionView({
           empty state with `flex-1`, which does nothing outside a flex parent —
           so "Ask Daimon anything" collapsed to its own height and sat at the
           top of the screen. */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-        <MessageList messages={messages} />
+      <div className="flex min-h-0 flex-1 flex-col">
+        <MessageList messages={messages} stalled={stalled} truncated={truncated} />
       </div>
       {todos.length > 0 && (
         <div className="border-t border-white/10 px-3 py-2">

@@ -4,6 +4,8 @@ import { setInsertTarget, clearInsertTarget } from "../lib/voice";
 interface Props {
   onSend: (text: string) => void;
   disabled: boolean;
+  /** Stop the running turn. Absent when there is nothing to stop. */
+  onStop?: () => void;
 }
 
 // Roughly 5-6 lines at text-sm before the input starts scrolling internally
@@ -11,7 +13,7 @@ interface Props {
 // or two without the input eating the whole panel.
 const MAX_DRAFT_INPUT_HEIGHT = 120;
 
-export function ChatInput({ onSend, disabled }: Props) {
+export function ChatInput({ onSend, disabled, onStop }: Props) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -81,6 +83,22 @@ export function ChatInput({ onSend, disabled }: Props) {
         disabled={disabled}
         className="max-h-32 w-full resize-none overflow-y-auto bg-transparent py-0 font-mono text-sm leading-5 text-neutral-100 outline-none placeholder:text-neutral-500 disabled:opacity-50"
       />
+      {/* The phone has had this since it shipped; here there was nothing to do
+          about a turn gone wrong but wait it out or quit the app — and the
+          composer is locked while it runs, so you could not even redirect it.
+          The server has always been able to stop a turn on request: closing
+          the socket stopped being the way to do it once a phone hanging up
+          could no longer end work the laptop was watching. */}
+      {disabled && onStop && (
+        <button
+          type="button"
+          onClick={onStop}
+          title="stop this turn"
+          className="shrink-0 rounded-full border border-white/15 bg-white/5 px-2.5 py-0.5 font-mono text-xs text-neutral-300 transition hover:border-red-400/40 hover:text-red-300 active:scale-95"
+        >
+          stop
+        </button>
+      )}
     </div>
   );
 }

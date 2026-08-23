@@ -10,8 +10,8 @@ import {
   startChat,
   voiceModelStatus,
 } from "./api";
-import { applyEvent, applyTodoEvent, isSessionBusy } from "./sessionEvents";
-import { bus, onBusControl, onBusReconnect, onSessionEvent } from "./lib/bus";
+import { applyEvent, applyTodoEvent, isSessionBusy, reconcileBusy } from "./sessionEvents";
+import { bus, onBusControl, onBusReconnect, onBusStatus, onSessionEvent } from "./lib/bus";
 import { collapseToPill, expandToPanel } from "./lib/window";
 import type { AskPrompt } from "./components/AskPrompt";
 import type {
@@ -127,6 +127,22 @@ export default function App() {
   // Green "success" dot: a turn finished while the panel was collapsed.
   // Cleared when the user expands — they've seen the result.
   const [unreadCompletion, setUnreadCompletion] = useState(false);
+  // Whether the bus socket is up. A turn that was open when it went down is
+  // *stalled*, not finished and not visibly working: the server runs turns
+  // detached from the client that started them, so the work is probably still
+  // going — we simply cannot see it. Saying that beats a spinner that means
+  // nothing and a bubble that looks complete.
+  const [connected, setConnected] = useState(true);
+  useEffect(() => onBusStatus(setConnected), []);
+  // Sent, but the `user` event that opens the exchange hasn't come back yet.
+  // Per session, because you can send in one tab and switch to another.
+  const [pendingSends, setPendingSends] = useState<Record<string, string>>({});
+  // Bumped on send so the transcript snaps back to the bottom however far up
+  // the user had scrolled — see MessageList.
+  const [snapToken, setSnapToken] = useState(0);
+  // Sessions whose replay could not reach back to the beginning — the
+  // transcript starts mid-conversation and should admit it.
+  const [truncated, setTruncated] = useState<Record<string, boolean>>({});
   // External (CLI) sessions the app doesn't own — surfaced as read-only chips
   // in the panel so the user sees CLI activity in the dashboard.
   const cliSessions = (status?.sessions ?? []).filter((sid) => !(sid in sessionsRef.current));
@@ -266,6 +282,18 @@ export default function App() {
   // could pick it up). There is no kill-the-turn endpoint, by design.
   const closeChat = useCallback(
     (id: string) => {
+      // Let go of the subscription and the resumption cursor together. Keeping
+      // the cursor while dropping the transcript is the worst combination: a
+      // later reattach would resume from a number whose history we no longer
+      // hold and show a conversation that appears to begin mid-sentence.
+      if (attachedRef.current.delete(id)) void bus().send("detach", { session: id });
+      bus().forget(id);
+      setTruncated((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       commitSessions((prev) => {
         const next = { ...prev };
         delete next[id];
@@ -384,6 +412,13 @@ export default function App() {
         setSessionAsks((prev) => ({ ...prev, [sid]: null }));
         return;
       }
+      // The bus has echoed back the message we were holding — the real
+      // exchange is about to open, so let go of the provisional one. Matched
+      // on text rather than cleared on any `user` event, so a message someone
+      // sent from a phone at the same moment doesn't drop ours early.
+      if (event.type === "user") {
+        setPendingSends((prev) => (prev[sid] === event.text ? { ...prev, [sid]: "" } : prev));
+      }
       commitSessions((prev) => ({ ...prev, [sid]: applyEvent(prev[sid], event) }));
       if (event.type === "todo") {
         setSessionTodos((prev) => ({ ...prev, [sid]: applyTodoEvent(prev[sid] ?? [], event) }));
@@ -441,13 +476,52 @@ export default function App() {
         void restoreTerminals();
         return;
       }
+      if (frame.control === "resync") {
+        // We fell far enough behind that the server dropped events to keep up.
+        // What we hold has a hole in it, so splicing the rest onto it would be
+        // quietly wrong — detach and come back for a clean snapshot. The
+        // server has been sending this frame all along; nothing listened.
+        const sid = String(frame.session ?? "");
+        if (!(sid in sessionsRef.current)) return;
+        void (async () => {
+          await bus().send("detach", { session: sid });
+          await bus().send("attach", { session: sid, wants_ask: true });
+        })();
+        return;
+      }
       if (frame.control !== "snapshot") return;
       const sid = String(frame.session ?? "");
       if (!(sid in sessionsRef.current)) return;
-      // A snapshot is the whole transcript as of now, not a continuation:
-      // rebuild rather than append, or reattaching duplicates everything.
       const events = (frame.events ?? []) as AgentEvent[];
-      commitSessions((prev) => ({ ...prev, [sid]: events.reduce(applyEvent, [] as ChatMessage[]) }));
+      // `busy` is the server counting its own active turns, so it is the
+      // authority — the phone has always used it and this window ignored it,
+      // which is how the two could disagree about the same session. It also
+      // closes out a turn whose `done` we were not connected to hear.
+      const busyNow = Boolean(frame.busy);
+      // `reset` is the client's cursor bookkeeping (see busClient): false means
+      // this snapshot is precisely what we missed since we last heard, so it
+      // folds onto what we already hold. Rebuilding unconditionally is what
+      // made every reconnect throw away everything older than the last 800
+      // events — a long conversation quietly lost its head each time.
+      const reset = Boolean(frame.reset);
+      commitSessions((prev) => ({
+        ...prev,
+        [sid]: reconcileBusy(
+          events.reduce(applyEvent, reset ? [] : (prev[sid] ?? [])),
+          busyNow,
+        ),
+      }));
+      // The server could not reach back as far as we asked, so what it sent
+      // does not join up with what came before it. Say so rather than letting
+      // the transcript appear to begin there.
+      setTruncated((prev) => ({ ...prev, [sid]: reset && Boolean(frame.truncated) }));
+      // A snapshot carries the whole exchange, so anything we were holding for
+      // this session has either arrived in it or is never coming.
+      setPendingSends((prev) => {
+        if (!(sid in prev)) return prev;
+        const { [sid]: _dropped, ...rest } = prev;
+        return rest;
+      });
       setSessionTodos((prev) => ({ ...prev, [sid]: (frame.todos ?? []) as TodoItem[] }));
       // A session parked on a question renders it immediately: the event that
       // carried it may have been hours ago.
@@ -575,10 +649,35 @@ export default function App() {
     };
   }, [refreshStatus, openNewTerminalTab, restoreTerminals, restoreSessions]);
 
+  /** Stop the active session's turn.
+   *
+   *  A turn parked on a question takes two: the server answers it with nothing
+   *  first (cancelling a suspended graph mid-node is how its checkpoint gets
+   *  corrupted), and a second stop cancels the turn that resumed. That is the
+   *  server's business — from here it is one button either way.
+   */
+  const stop = async () => {
+    const sid = activeSessionId;
+    if (!sid) return;
+    try {
+      await bus().send("interrupt", { session: sid, by: "app" });
+    } catch {
+      // Nothing useful to say: if the socket is down the turn is unreachable,
+      // and the stalled footer is already saying so.
+    }
+  };
+
   const send = async (text: string) => {
     const sid = activeSessionId;
     if (!sid || busy || !text.trim()) return;
     setUnreadCompletion(false); // new turn starting → busy blue takes over
+    // Held, not rendered into the transcript: the `user` event opens the real
+    // exchange a moment later and drawing one here too would show every sent
+    // message twice. Until then the composer has cleared and the message is
+    // nowhere on screen, which over a slow link reads as the send being lost.
+    setPendingSends((prev) => ({ ...prev, [sid]: text }));
+    // Asking about the newest thing means wanting to be at the newest thing.
+    setSnapToken((n) => n + 1);
     // Deliberately not rendered optimistically. The `user` event comes back
     // over the bus a moment later and opens the exchange itself — drawing it
     // here as well would show every message you send twice, and only for the
@@ -593,6 +692,10 @@ export default function App() {
       // The prompt never reached the agent, so no `user` event is coming to
       // carry it: put the failure on screen ourselves, with the text that was
       // lost, rather than swallowing what the user typed.
+      setPendingSends((prev) => {
+        const { [sid]: _dropped, ...rest } = prev;
+        return rest;
+      });
       commitSessions((prev) => ({
         ...prev,
         [sid]: [
@@ -642,6 +745,13 @@ export default function App() {
           messages={messages}
           todos={todos}
           onSend={send}
+          onStop={() => void stop()}
+          pending={activeSessionId ? (pendingSends[activeSessionId] ?? null) : null}
+          snapToken={snapToken}
+          // Only a turn we cannot currently see is stalled. With the socket up,
+          // an open turn is simply a running one.
+          stalled={!connected && busy}
+          truncated={activeSessionId ? (truncated[activeSessionId] ?? false) : false}
           terminalTabs={terminalTabs}
           activeTerminalId={activeTerminalId}
           initialTerminalCommands={initialTerminalCommands}
