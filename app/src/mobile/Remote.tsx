@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageList } from "../components/MessageList";
 import { TodoList } from "../components/TodoList";
-import { applyEvent, applyTodoEvent, foldSnapshot } from "../sessionEvents";
+import { applyEvent, applyTodoEvent } from "../sessionEvents";
 import type { AgentEvent, ChatMessage, TodoItem } from "../types";
 import type { BusClient } from "../lib/busClient";
 import { AskSheet, type AskPrompt } from "./AskSheet";
@@ -62,6 +62,13 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
         // same split `applyTodoEvent` makes, and the same one cli/live.py
         // makes with LiveState.ask. A question is a thing the session is
         // waiting on, not a line in the transcript.
+        if (type === "user") {
+          // Someone typed — here or on another device. Fold it like any other
+          // event so the exchange opens in the right place.
+          setMessages((prev) => applyEvent(prev, agentEvent));
+          setBusy(true);
+          return;
+        }
         if (type === "ask") {
           setAsk(event as AskPrompt);
           setBusy(false);
@@ -85,7 +92,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           // A snapshot is the whole transcript as of now, not a continuation —
           // rebuild rather than append, or a reconnect duplicates everything.
           const events = (frame.events ?? []) as AgentEvent[];
-          setMessages(events.reduce<ChatMessage[]>(foldSnapshot, []));
+          setMessages(events.reduce<ChatMessage[]>(applyEvent, []));
           setTodos((frame.todos ?? []) as TodoItem[]);
           // A session parked on a question renders the prompt immediately.
           // The event that carried it may have been hours ago; the channel
@@ -280,11 +287,8 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           onSend={(text) => {
             const bus = busRef.current;
             if (!bus) return;
-            setMessages((prev) => [
-              ...prev,
-              { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false },
-              { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: true, startedAt: Date.now() },
-            ]);
+            // Not rendered here: the `user` event arrives over the socket and
+            // opens the exchange, the same way one sent from the desktop does.
             setBusy(true);
             void bus.send("prompt", {
               workspace: screen.workspace.key,

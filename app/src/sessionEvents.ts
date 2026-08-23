@@ -109,6 +109,23 @@ function addUsage(usage: TurnUsage | undefined, ev: Extract<AgentEvent, { type: 
  * clients that advertise the capability on /task.
  */
 export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMessage[] {
+  // A `user` event opens a new exchange rather than folding into the current
+  // one — it is the only event that appends rather than updating.
+  //
+  // This is what makes a shared session work. Without it the prompt someone
+  // typed on another device is dropped by the default arm below, and the
+  // assistant deltas that follow fold into the *previous* turn's bubble: the
+  // reply appears to overwrite an older message, with the question that
+  // prompted it nowhere on screen.
+  if ((event as { type: string }).type === "user") {
+    const text = String((event as unknown as { text?: string }).text ?? "");
+    return [
+      ...messages,
+      { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false },
+      { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: false },
+    ];
+  }
+
   const idx = lastAssistant(messages);
   if (idx < 0) {
     // No assistant message yet — only done/error can meaningfully start one.
@@ -126,7 +143,17 @@ export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMess
   switch (event.type) {
     case "step":
       if (event.label === "Thinking") {
-        next = { ...next, thinking: event.status === "running" };
+        next = {
+          ...next,
+          thinking: event.status === "running",
+          // Wall clock for the status bar's "took Ns". Set from the event that
+          // *starts* the turn rather than by the client that sent it, since a
+          // turn can now be started somewhere else entirely. On a replayed
+          // history this is the moment of replay, so an old turn reports a
+          // near-zero duration — wrong, but only cosmetically and only for
+          // turns that already finished.
+          startedAt: event.status === "running" ? Date.now() : next.startedAt,
+        };
       } else {
         next = { ...next, steps: upsertStep(next.steps, event) };
       }
@@ -235,26 +262,4 @@ export function sessionTotals(messages: ChatMessage[]): {
     if (message.usage.contextTokens) usage.contextTokens = message.usage.contextTokens;
   }
   return { turns, usage, lastElapsedMs };
-}
-
-
-/**
- * Rebuild a transcript from a recorded event stream.
- *
- * `applyEvent` folds events into the *current* turn; this folds a whole
- * session's history, which differs in one place: a `user` event opens a new
- * exchange rather than being ignored. That event exists precisely so a client
- * replaying a session it never saw gets both halves of the conversation
- * instead of a monologue.
- */
-export function foldSnapshot(messages: ChatMessage[], event: AgentEvent): ChatMessage[] {
-  if ((event as { type: string }).type === "user") {
-    const text = String((event as unknown as { text?: string }).text ?? "");
-    return [
-      ...messages,
-      { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false },
-      { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: false },
-    ];
-  }
-  return applyEvent(messages, event);
 }

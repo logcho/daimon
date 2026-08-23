@@ -10,7 +10,7 @@ import {
   startChat,
   voiceModelStatus,
 } from "./api";
-import { applyEvent, applyTodoEvent, foldSnapshot, isSessionBusy } from "./sessionEvents";
+import { applyEvent, applyTodoEvent, isSessionBusy } from "./sessionEvents";
 import { bus, onBusControl, onBusReconnect, onSessionEvent } from "./lib/bus";
 import { collapseToPill, expandToPanel } from "./lib/window";
 import type {
@@ -27,6 +27,11 @@ import { insertText } from "./lib/voice";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { Panel } from "./components/Panel";
 import { Pill } from "./components/Pill";
+
+//: How many existing conversations to reopen on launch. The tab strip is a
+//: working set, not an archive — the rest stay in the session directory and
+//: are reachable from another device.
+const MAX_RESTORED_CHATS = 5;
 
 export default function App() {
   // Chat sessions are a map keyed by session uuid plus a stable order and
@@ -199,6 +204,31 @@ export default function App() {
     }
   }, [commitSessions]);
 
+  /** Open the conversations that already exist, rather than a fresh empty one.
+   *
+   *  Sessions live in the agent server, not in this window: one started on a
+   *  phone is just as real as one started here. Minting a new id on every
+   *  launch meant the app opened onto an empty chat nothing else knew about,
+   *  and a conversation you had begun elsewhere was invisible unless you
+   *  happened to guess its id. Falls back to creating one when there are
+   *  genuinely none. */
+  const restoreSessions = useCallback(async (): Promise<boolean> => {
+    const ack = await bus().send("sessions");
+    if (!ack.ok) return ensureSession();
+    const rows = (ack.sessions ?? []) as { session_id: string; last_active_at?: number }[];
+    // Most recently active first, and only a handful: the tab strip is a
+    // working set, not an archive.
+    const recent = rows.slice(0, MAX_RESTORED_CHATS).map((r) => r.session_id);
+    if (recent.length === 0) return ensureSession();
+    commitSessions((prev) => ({
+      ...prev,
+      ...Object.fromEntries(recent.filter((id) => !(id in prev)).map((id) => [id, []])),
+    }));
+    setSessionOrder((order) => [...order, ...recent.filter((id) => !order.includes(id))]);
+    setActiveSessionId((current) => current ?? recent[0]);
+    return true;
+  }, [commitSessions, ensureSession]);
+
   // Closing a chat tab is a UI decision only: the server keeps running the
   // turn, and its result lands in the checkpointer thread (`daimon -n <uuid>`
   // could pick it up). There is no kill-the-turn endpoint, by design.
@@ -326,7 +356,7 @@ export default function App() {
       // A snapshot is the whole transcript as of now, not a continuation:
       // rebuild rather than append, or reattaching duplicates everything.
       const events = (frame.events ?? []) as AgentEvent[];
-      commitSessions((prev) => ({ ...prev, [sid]: events.reduce(foldSnapshot, [] as ChatMessage[]) }));
+      commitSessions((prev) => ({ ...prev, [sid]: events.reduce(applyEvent, [] as ChatMessage[]) }));
       setSessionTodos((prev) => ({ ...prev, [sid]: (frame.todos ?? []) as TodoItem[] }));
     });
     return unlistenControl;
@@ -423,11 +453,11 @@ export default function App() {
     let cancelled = false;
     const retry = setInterval(() => {
       if (cancelled) return;
-      void ensureSession().then((ok) => {
+      void restoreSessions().then((ok) => {
         if (ok) clearInterval(retry);
       });
     }, 2000);
-    void ensureSession().then((ok) => {
+    void restoreSessions().then((ok) => {
       if (ok) clearInterval(retry);
     });
     openNewTerminalTab();
@@ -442,28 +472,28 @@ export default function App() {
     const sid = activeSessionId;
     if (!sid || busy || !text.trim()) return;
     setUnreadCompletion(false); // new turn starting → busy blue takes over
-    const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false };
-    const asstMsg: ChatMessage = {
-      id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: true,
-      // Wall clock, so the status bar can report how long the turn took.
-      startedAt: Date.now(),
-    };
-    commitSessions((prev) => ({ ...prev, [sid]: [...(prev[sid] ?? []), userMsg, asstMsg] }));
+    // Deliberately not rendered optimistically. The `user` event comes back
+    // over the bus a moment later and opens the exchange itself — drawing it
+    // here as well would show every message you send twice, and only for the
+    // device that sent it. The bus is the one source of truth for what a
+    // session contains, which is the whole reason two devices can share one.
     try {
       // `ask` is advertised: this window can show a question and answer it,
       // and the agent is only offered the ask tools when somebody can.
       const ack = await bus().send("prompt", { session: sid, instruction: text, origin: "app" });
       if (!ack.ok) throw new Error(ack.error ?? "the agent did not accept that");
     } catch (err) {
-      // Invoke failed before the stream could start (agent down, etc.).
-      commitSessions((prev) => {
-        const list = prev[sid] ?? [];
-        const last = list[list.length - 1];
-        if (last?.role === "assistant") {
-          return { ...prev, [sid]: [...list.slice(0, -1), { ...last, thinking: false, error: String(err) }] };
-        }
-        return prev;
-      });
+      // The prompt never reached the agent, so no `user` event is coming to
+      // carry it: put the failure on screen ourselves, with the text that was
+      // lost, rather than swallowing what the user typed.
+      commitSessions((prev) => ({
+        ...prev,
+        [sid]: [
+          ...(prev[sid] ?? []),
+          { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false },
+          { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: false, error: String(err) },
+        ],
+      }));
     }
   };
 
