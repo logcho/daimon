@@ -42,6 +42,9 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
   const screenRef = useRef(screen);
   screenRef.current = screen;
   const termSinks = useRef(new Map<string, (bytes: Uint8Array) => void>());
+  // The socket callbacks are registered once, so they reach the current
+  // refreshLists through a ref rather than closing over the first render's.
+  const refreshListsRef = useRef<((w: WorkspaceInfo) => Promise<void>) | null>(null);
 
   const routeTermData = useCallback((id: string, sink: ((b: Uint8Array) => void) | null) => {
     if (sink) termSinks.current.set(id, sink);
@@ -101,6 +104,9 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           setBusy(Boolean(frame.busy));
         } else if (frame.control === "term_snapshot") {
           termSinks.current.get(String(frame.id))?.(decodeSnapshot(frame.data));
+        } else if (frame.control === "terminals_changed") {
+          const current = screenRef.current;
+          if (current.view === "list") void refreshListsRef.current?.(current.workspace);
         } else if (frame.control === "workspace_lost") {
           setError("that workspace's server stopped");
         }
@@ -153,6 +159,8 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
     setScreen({ view: "list", workspace });
     await refreshLists(workspace);
   }, []);
+
+  refreshListsRef.current = refreshLists;
 
   async function refreshLists(workspace: WorkspaceInfo) {
     const bus = busRef.current;

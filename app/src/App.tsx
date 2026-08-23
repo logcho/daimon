@@ -153,6 +153,28 @@ export default function App() {
     setActiveTerminalId(id);
   }, []);
 
+  /** Open a tab for every shell the server is running.
+   *
+   *  Terminals live in the agent server — that is what lets one outlive this
+   *  window and be shared with a phone — but the tab strip was still purely
+   *  local, minted here and never compared against what actually exists. So a
+   *  shell opened on a phone was running, watchable, and invisible: there was
+   *  no tab to click. Called on launch and after a reconnect, when what we
+   *  believe about the server is stale by definition.
+   *
+   *  Additive: it never closes a tab. A tab whose shell has exited is a thing
+   *  the user can see the exit code of and restart, and yanking it out from
+   *  under them would be worse than leaving it. */
+  const restoreTerminals = useCallback(async () => {
+    const ack = await bus().send("term.list");
+    if (!ack.ok) return;
+    const live = (ack.terminals ?? []) as { id: string; exited: boolean }[];
+    const ids = live.filter((t) => !t.exited).map((t) => t.id);
+    if (ids.length === 0) return;
+    setTerminalTabs((tabs) => [...tabs, ...ids.filter((id) => !tabs.includes(id))]);
+    setActiveTerminalId((current) => current ?? ids[0]);
+  }, []);
+
   // Closing a tab both ends its real shell process (fired and forgotten —
   // nothing here needs to wait for the kill to land before dropping it from
   // the list) and picks a new active tab if the closed one was it, falling
@@ -350,6 +372,13 @@ export default function App() {
   // transcript the snapshot brings with it.
   useEffect(() => {
     const unlistenControl = onBusControl((frame) => {
+      if (frame.control === "terminals_changed") {
+        // A shell opened or closed somewhere else. Re-read the list rather
+        // than trusting the delta: it is one round trip and it converges even
+        // if we missed a frame.
+        void restoreTerminals();
+        return;
+      }
       if (frame.control !== "snapshot") return;
       const sid = String(frame.session ?? "");
       if (!(sid in sessionsRef.current)) return;
@@ -360,7 +389,7 @@ export default function App() {
       setSessionTodos((prev) => ({ ...prev, [sid]: (frame.todos ?? []) as TodoItem[] }));
     });
     return unlistenControl;
-  }, [commitSessions]);
+  }, [commitSessions, restoreTerminals]);
 
   useEffect(() => {
     let cancelled = false;
@@ -384,7 +413,10 @@ export default function App() {
       attachedRef.current.add(sid);
       void bus().send("attach", { session: sid });
     }
-  }), []);
+    // The server may have gained terminals while we were away — a phone can
+    // open one, and the desktop should not have to be restarted to see it.
+    void restoreTerminals();
+  }), [restoreTerminals]);
 
   // Dictation event subscription — driven by the Fn-key gesture monitor and
   // the cpal recording thread (both Rust-side). Routes transcribed text to the
@@ -460,13 +492,20 @@ export default function App() {
     void restoreSessions().then((ok) => {
       if (ok) clearInterval(retry);
     });
-    openNewTerminalTab();
+    void restoreTerminals().then(() => {
+      // Only mint one when the server has none: opening a shell nobody asked
+      // for, every launch, is how you end up with a drawer full of them.
+      setTerminalTabs((tabs) => {
+        if (tabs.length === 0) openNewTerminalTab();
+        return tabs;
+      });
+    });
     return () => {
       cancelled = true;
       clearInterval(retry);
       clearInterval(poll);
     };
-  }, [refreshStatus, openNewTerminalTab, ensureSession]);
+  }, [refreshStatus, openNewTerminalTab, restoreTerminals, restoreSessions]);
 
   const send = async (text: string) => {
     const sid = activeSessionId;

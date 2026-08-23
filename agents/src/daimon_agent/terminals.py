@@ -333,6 +333,23 @@ class TerminalManager:
 
     def __init__(self) -> None:
         self._terminals: dict[str, TerminalSession] = {}
+        #: Told when a terminal appears or goes away. Separate from a
+        #: terminal's own output listeners, which you can only register once
+        #: you know its id — and the thing a client needs to hear about is
+        #: precisely the terminal it has never heard of.
+        self._watchers: set[Callable[[str, str], None]] = set()
+
+    def watch(self, fn: Callable[[str, str], None]) -> Callable[[], None]:
+        """Observe the set of terminals changing. Returns an unsubscribe."""
+        self._watchers.add(fn)
+        return lambda: self._watchers.discard(fn)
+
+    def _announce(self, change: str, term_id: str) -> None:
+        for watcher in tuple(self._watchers):
+            try:
+                watcher(change, term_id)
+            except Exception:
+                pass  # a watcher must never be able to break a terminal
 
     def get(self, term_id: str) -> TerminalSession | None:
         return self._terminals.get(term_id)
@@ -369,6 +386,7 @@ class TerminalManager:
         except Exception:
             del self._terminals[term_id]
             raise
+        self._announce("opened", term_id)
         return term
 
     def close(self, term_id: str) -> bool:
@@ -377,6 +395,7 @@ class TerminalManager:
         if term is None:
             return False
         term.kill()
+        self._announce("closed", term_id)
         return True
 
     def close_all(self) -> None:

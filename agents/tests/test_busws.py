@@ -674,3 +674,29 @@ async def test_attaching_replays_a_conversation_this_client_never_saw(client: Te
     assert types[0] == "user"
     assert snapshot["events"][0]["text"] == "something earlier"
     assert snapshot["events"][-1]["result"] == "remembered"
+
+
+async def test_a_terminal_opened_elsewhere_is_announced(client: TestClient) -> None:
+    """A client cannot subscribe to a terminal it has never heard of, so the
+    set changing has to be pushed rather than discovered."""
+    async with client.ws_connect("/bus/ws") as watcher, client.ws_connect("/bus/ws") as other:
+        ack, _ = await _call(other, "term.open")
+        term_id = ack["terminal"]["id"]
+
+        frame = await asyncio.wait_for(watcher.receive_json(), timeout=5)
+        assert frame["control"] == "terminals_changed"
+        assert (frame["change"], frame["id"]) == ("opened", term_id)
+
+        await _call(other, "term.close", id=term_id)
+        frame = await asyncio.wait_for(watcher.receive_json(), timeout=5)
+        assert (frame["change"], frame["id"]) == ("closed", term_id)
+
+
+async def test_a_closed_socket_stops_hearing_about_terminals(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "ping")
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if not client.app["terminals"]._watchers:
+            break
+    assert not client.app["terminals"]._watchers

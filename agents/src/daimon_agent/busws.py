@@ -87,6 +87,14 @@ def make_bus_ws_handler(app: web.Application):
         attachments: dict[str, _Attachment] = {}
         watched_terminals: set[str] = set()
         watching: Any = None  # unsubscribe for the all-sessions observer
+
+        # Every socket hears about terminals appearing and disappearing, so a
+        # client can show a shell somebody opened on another device without
+        # being restarted or polling for it.
+        def on_terminal_change(change: str, term_id: str) -> None:
+            send(_frame("control", control="terminals_changed", change=change, id=term_id))
+
+        unwatch_terminals = terminals.watch(on_terminal_change)
         # One outbound queue and one writer: aiohttp forbids concurrent sends,
         # and session pumps and terminal callbacks both produce frames. The
         # queue is also what lets a synchronous PTY read callback hand work to
@@ -587,6 +595,7 @@ def make_bus_ws_handler(app: web.Application):
             for att in list(attachments.values()):
                 await _drop(att)
             attachments.clear()
+            unwatch_terminals()
             if watching is not None:
                 watching()
                 watching = None
