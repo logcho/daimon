@@ -112,8 +112,13 @@ def make_bus_ws_handler(app: web.Application):
         # started on another device is not in any list this client already
         # holds, and it cannot attach to an id it has never seen.
         def on_session_change(change: str, session_id: str) -> None:
+            # The state rides along, so a list can update a badge in place
+            # instead of refetching the whole thing to learn one boolean.
+            chan = bus.peek(session_id)
             send(_frame("control", control="sessions_changed",
-                        change=change, session=session_id))
+                        change=change, session=session_id,
+                        busy=bool(chan.busy) if chan is not None else False,
+                        pending_ask=bool(chan.pending_ask) if chan is not None else False))
 
         unwatch_sessions = bus.watch_sessions(on_session_change)
 

@@ -48,6 +48,12 @@ PUBLIC_PATHS = {"/", "/health", "/pair", "/manifest.webmanifest", "/favicon.ico"
 #: since we last looked, not to poll for anything.
 WATCH_REDISCOVER_S = 30.0
 
+#: How long between checks for a workspace a connected client just lost.
+#: Much shorter than WATCH_REDISCOVER_S: somebody is looking at a screen that
+#: says "waiting for it to come back", and an agent server restarting takes
+#: seconds. The loop only runs while a socket is actually missing something.
+RECOVER_POLL_S = 3.0
+
 #: Ops the gateway answers itself; everything else is forwarded to a workspace.
 LOCAL_OPS = {"workspaces", "ping"}
 
@@ -366,6 +372,12 @@ async def _serve_socket(request: web.Request, gateway: Gateway) -> web.WebSocket
     await ws.prepare(request)
     http: aiohttp.ClientSession = request.app["http"]
     upstreams: dict[str, _Upstream] = {}
+    #: Workspaces this socket was talking to that went away. Watched until they
+    #: come back, because `workspace_lost` on its own is a dead end: the client
+    #: is left attached to nothing, and the gateway will happily rediscover on
+    #: the next op — but nothing was ever going to send one.
+    lost: set[str] = set()
+    recover: asyncio.Task | None = None
     send_lock = asyncio.Lock()
 
     async def send(frame: dict) -> None:
@@ -388,14 +400,43 @@ async def _serve_socket(request: web.Request, gateway: Gateway) -> web.WebSocket
                 frame["workspace"] = key
             await send(frame)
         # The workspace server went away — restarted, or idled out. Say so
-        # rather than leaving the client attached to nothing.
+        # rather than leaving the client attached to nothing, and start
+        # watching for it to come back.
         upstreams.pop(key, None)
         await send(_frame("control", control="workspace_lost", workspace=key))
+        lost.add(key)
+        _ensure_recover()
+
+    async def watch_recovery() -> None:
+        """Tell the client when a workspace it lost is answering again.
+
+        Only the client can decide what to do about it — re-attach to a
+        session, repaint a terminal — so this says nothing more than "it is
+        back". Opening the upstream is left to the op that follows.
+        """
+        while lost:
+            await asyncio.sleep(RECOVER_POLL_S)
+            if not lost:
+                return
+            try:
+                found = {w.key for w in await discover(http, root=gateway.run_root)}
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                continue
+            for key in sorted(lost & found):
+                lost.discard(key)
+                await send(_frame("control", control="workspace_found", workspace=key))
+
+    def _ensure_recover() -> None:
+        nonlocal recover
+        if recover is None or recover.done():
+            recover = asyncio.create_task(watch_recovery())
 
     async def upstream_for(key: str) -> _Upstream | None:
         existing = upstreams.get(key)
         if existing is not None:
             return existing
+        # Whatever happens next, this key is no longer waiting to be noticed.
+        lost.discard(key)
         found = await discover(http, root=gateway.run_root)
         target = next((w for w in found if w.key == key), None)
         if target is None:
@@ -451,6 +492,11 @@ async def _serve_socket(request: web.Request, gateway: Gateway) -> web.WebSocket
             except (ConnectionResetError, RuntimeError):
                 await send(_frame("ack", op_id=op_id, ok=False, error="workspace went away"))
     finally:
+        lost.clear()
+        if recover is not None:
+            recover.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await recover
         for upstream in list(upstreams.values()):
             await upstream.close()
         upstreams.clear()
@@ -515,26 +561,39 @@ async def _watch_one(app: web.Application, gateway: Gateway, workspace: Workspac
                 if frame.get("control") != "watch":
                     continue
                 event = frame.get("event") or {}
-                if event.get("type") != "ask":
+                if event.get("type") not in ("ask", "done", "error"):
                     continue
-                await _notify_ask(gateway, workspace, str(frame.get("session") or ""), event)
+                await _notify(gateway, workspace, str(frame.get("session") or ""), event)
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return  # the server went away; rediscovery will find it again
 
 
-async def _notify_ask(
+async def _notify(
     gateway: Gateway, workspace: Workspace, session_id: str, event: dict
 ) -> None:
-    """Tell the phone a session wants an answer.
+    """Tell the phone a session wants an answer, or has finished.
 
-    Deliberately without the question itself. A push payload passes through a
-    service run by Apple or Google, and a plan the agent is asking you to
-    approve can quote anything in the workspace — a file, a credential it
-    found, a customer's name. The notification says *which* session wants you;
-    reading it means opening the app.
+    Deliberately without the question, and without the result. A push payload
+    passes through a service run by Apple or Google, and both a plan the agent
+    is asking you to approve and the answer it eventually gives can quote
+    anything in the workspace — a file, a credential it found, a customer's
+    name. The notification says *which* session wants you; reading it means
+    opening the app.
+
+    Turn endings were forwarded by `busws.do_watch` from the start and dropped
+    here, so the one notification worth having on a long unattended run — "the
+    thing you left running is done" — was the one that never arrived.
     """
-    header = str(event.get("header") or "").strip()
-    title = f"{workspace.name} is waiting on you"
-    body = header or ("Approve a plan" if event.get("kind") == "plan" else "Answer a question")
+    etype = event.get("type")
+    if etype == "ask":
+        header = str(event.get("header") or "").strip()
+        title = f"{workspace.name} is waiting on you"
+        body = header or ("Approve a plan" if event.get("kind") == "plan" else "Answer a question")
+    elif etype == "error":
+        title = f"{workspace.name} stopped"
+        body = "A turn ended with an error"
+    else:
+        title = f"{workspace.name} finished"
+        body = "A turn is done"
     # pywebpush is synchronous, and there may be several endpoints.
     await asyncio.to_thread(gateway.push.notify, title, body, url="/")

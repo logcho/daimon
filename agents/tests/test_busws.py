@@ -538,6 +538,14 @@ async def test_a_turn_started_over_the_socket_outlives_the_socket(client: TestCl
     assert events[-1]["result"] == "finished anyway"
 
 
+async def _next_control(ws, control: str, timeout: float = 5.0) -> dict:
+    """The next frame of one kind, skipping whatever else is in flight."""
+    while True:
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
+        if frame.get("control") == control:
+            return frame
+
+
 # --- watching every session --------------------------------------------------
 
 async def test_watching_reports_asks_on_sessions_never_attached_to(client: TestClient) -> None:
@@ -551,8 +559,10 @@ async def test_watching_reports_asks_on_sessions_never_attached_to(client: TestC
 
         client.app["bus"].publisher("never-seen")(ask_event("a1", "question", "which?", []))
 
-        frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
-        assert frame["control"] == "watch"
+        # An ask also flips the session's own state, which every socket is told
+        # about — so the watch frame is not necessarily the first thing to
+        # arrive, only the thing this test is about.
+        frame = await _next_control(ws, "watch")
         assert frame["session"] == "never-seen"
         assert frame["event"]["id"] == "a1"
 
@@ -748,7 +758,40 @@ async def test_only_the_first_prompt_announces_a_session(client: TestClient) -> 
         # A round trip as a fence: anything the server had to say arrives
         # before its answer to this. Sent raw, because `_call` would swallow
         # the ack we are using as the marker.
-        assert await _quiet_since(ws) == []
+        #
+        # Turns starting and ending *are* announced now — a list has to be told
+        # when a session starts working and stops, or its badges sit frozen at
+        # whatever they were when it was last fetched. What must not repeat is
+        # the "started" announcement, which is what this test is about.
+        # The single frame read above was the "started" one; this session's
+        # first turn going busy is still queued behind it.
+        changes = [f["change"] for f in await _quiet_since(ws)]
+        assert "started" not in changes
+        assert changes == ["busy", "idle", "busy", "idle"]
+
+
+async def test_a_turn_starting_and_ending_is_announced(client: TestClient) -> None:
+    """A session list renders two things — "working" and "waiting on you" — and
+    was told about neither, so it showed whatever it had been fetched with."""
+    from daimon_agent.events import ask_event, done_event, user_event
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "ping")
+        emit = client.app["bus"].publisher("watched")
+
+        emit(user_event("go"))
+        started = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        assert started["change"] == "started"
+        busy = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        assert (busy["change"], busy["busy"]) == ("busy", True)
+
+        # Parked on a question is the opposite of working, and a list says so
+        # with its own badge.
+        emit(ask_event("a1", "question", "which?", []))
+        assert [f["change"] for f in await _quiet_since(ws)] == ["idle", "asking"]
+
+        emit(done_event("finished"))
+        assert [f["change"] for f in await _quiet_since(ws)] == ["answered"]
 
 
 async def test_merely_attaching_does_not_invent_a_session(client: TestClient) -> None:

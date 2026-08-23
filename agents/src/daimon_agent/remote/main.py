@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -153,6 +155,55 @@ def main(argv: list[str] | None = None) -> int:
     async def close_tunnel(_app) -> None:
         if tunnel is not None:
             await tunnel.stop()
+
+    async def listen_for_pair_requests(_app) -> None:
+        """SIGUSR1 opens a new pairing window and prints the code.
+
+        Pairing a second device used to mean restarting the gateway, which
+        dropped every connected phone and tore down the tailnet mapping to mint
+        eight characters that come from pure in-memory state. A signal costs
+        none of that, adds no network surface, and needs no credential — only
+        the process's parent can send it, which is exactly who is asking.
+
+        The code goes to the log and nowhere else, the same way the one in the
+        banner does: it lives in the gateway's memory for ten minutes, and the
+        log is already how a human reads it.
+        """
+
+        def on_revoke_request() -> None:
+            """SIGHUP revokes whatever the drop-file names.
+
+            The app that supervises this process wants to show and un-pair
+            devices without holding a gateway credential of its own, and
+            without becoming a second writer of `tokens.json` — this file has
+            exactly one writer by design, and that is worth keeping. So the
+            supervisor writes a list of ids and asks; this does the work.
+            """
+            drop = gateway.tokens.path.parent / "revoke"
+            try:
+                wanted = [line.strip() for line in drop.read_text("utf-8").splitlines()]
+            except OSError:
+                return
+            for device_id in filter(None, wanted):
+                gateway.tokens.revoke(device_id)
+            with contextlib.suppress(OSError):
+                drop.unlink()
+
+        def on_pair_request() -> None:
+            fresh = gateway.pairing.start()
+            ttl = int(gateway.pairing.ttl_s / 60)
+            print(
+                f"\n  pairing code:  {fresh}     (valid {ttl} minutes, one use)",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        with contextlib.suppress(NotImplementedError, ValueError):
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGUSR1, on_pair_request)
+            loop.add_signal_handler(signal.SIGHUP, on_revoke_request)
+
+    app.on_startup.append(listen_for_pair_requests)
 
     if tunnel is not None:
         # The banner waits for the URL, so it can print it.

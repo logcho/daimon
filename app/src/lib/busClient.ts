@@ -16,6 +16,13 @@
  *   subscribe once and stay subscribed; this reopens underneath them with
  *   backoff and replays the subscriptions, and tells them so via `onReconnect`
  *   so they can re-snapshot rather than splice onto a stream with a hole.
+ * - **Resumption.** Every event carries a monotonic per-session `seq`. This
+ *   remembers the highest one seen, sends it back as `since` on the next
+ *   `attach`, and drops anything at or below it. That turns a reconnect from
+ *   "throw the transcript away and rebuild it from the last 800 events" into
+ *   "send me what I missed" — which is the difference between a long
+ *   conversation surviving a screen lock and silently losing its head. The
+ *   server has always implemented its half; this is the half that was missing.
  */
 
 export interface AgentEventFrame {
@@ -38,6 +45,12 @@ export interface ControlFrame {
   v: number;
   kind: "control";
   control: string;
+  /** Snapshots only. True when the client must rebuild its transcript from
+   *  `events` rather than append them: either it had no cursor, or the server
+   *  says its cursor no longer reaches back far enough (`truncated`), or the
+   *  session's sequence restarted underneath it. Computed here so both
+   *  clients cannot disagree about it. */
+  reset?: boolean;
   [key: string]: unknown;
 }
 
@@ -84,6 +97,9 @@ export class BusClient {
   private nextOpId = 1;
   private attempt = 0;
   private closed = false;
+  /** Highest `seq` seen per session — the resumption cursor. Deliberately
+   *  survives a reconnect: resuming from it is the entire point. */
+  private cursors = new Map<string, number>();
   private opening: Promise<void> | null = null;
 
   /**
@@ -167,10 +183,37 @@ export class BusClient {
       return;
     }
     if (frame.kind === "event") {
+      // The server subscribes before it sends a snapshot, precisely so an
+      // event published in between is queued rather than lost — and relies on
+      // the client using `seq` to drop the overlap. Nothing did, so a mid-turn
+      // reattach could render the same events twice.
+      const seen = this.cursors.get(frame.session) ?? 0;
+      if (frame.seq <= seen) return;
+      this.cursors.set(frame.session, frame.seq);
       this.handlers.onEvent?.(frame.session, frame.seq, frame.event);
     } else if (frame.kind === "term") {
       this.handlers.onTermData?.(frame.id, decodeBase64(frame.data));
     } else if (frame.kind === "control") {
+      if (frame.control === "snapshot") {
+        const session = String(frame.session ?? "");
+        const cursor = typeof frame.seq === "number" ? frame.seq : 0;
+        const had = this.cursors.get(session);
+        // Three ways a snapshot cannot be appended to what we hold:
+        //   - we hold nothing, so there is nothing to append to;
+        //   - the server says its ring no longer reaches our cursor;
+        //   - the cursor went *backwards*, which means this is a fresh channel
+        //     (the agent server restarted) and our old numbers are meaningless.
+        //     Without this check we would send a `since` from the dead channel,
+        //     be handed nothing, and sit showing an empty session forever.
+        frame.reset = had === undefined || Boolean(frame.truncated) || cursor < had;
+        this.cursors.set(session, cursor);
+      } else if (frame.control === "resync") {
+        // We fell far enough behind that the server dropped events to keep up
+        // (`bus.py` — "a phone on a train is a slow subscriber"). What we hold
+        // has a hole in it, so the cursor is no longer trustworthy: forget it
+        // and let the reattach come back with a clean snapshot.
+        this.cursors.delete(String(frame.session ?? ""));
+      }
       this.handlers.onControl?.(frame);
     }
   }
@@ -182,6 +225,14 @@ export class BusClient {
     await this.connect().catch(() => {});
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return { ok: false, error: "not connected" };
+
+    // `attach` resumes from wherever this client got to, unless the caller
+    // has an opinion of its own. Injected here rather than at each call site
+    // so the desktop and the phone cannot drift apart on it.
+    if (op === "attach" && fields.since === undefined) {
+      const cursor = this.cursors.get(String(fields.session ?? ""));
+      if (cursor !== undefined) fields = { ...fields, since: cursor };
+    }
 
     const opId = `op-${this.nextOpId++}`;
     return new Promise<AckResult>((resolve) => {
@@ -210,6 +261,13 @@ export class BusClient {
     } catch {
       // The close handler will reconnect; a dropped keystroke is recoverable.
     }
+  }
+
+  /** Forget a session's cursor — it was deleted, or its transcript is being
+   *  dropped, and resuming from a stale number would be worse than starting
+   *  clean. */
+  forget(session: string): void {
+    this.cursors.delete(session);
   }
 
   close(): void {

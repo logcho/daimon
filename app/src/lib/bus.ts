@@ -19,12 +19,18 @@ const termData = new Map<string, (bytes: Uint8Array) => void>();
 const sessionEventListeners = new Set<(session: string, seq: number, event: unknown) => void>();
 const controlListeners = new Set<(frame: Record<string, unknown>) => void>();
 const reconnectListeners = new Set<() => void>();
+const statusListeners = new Set<(connected: boolean) => void>();
+let connected = false;
 
 handlers.onTermData = (id, bytes) => termData.get(id)?.(bytes);
 handlers.onEvent = (session, seq, event) =>
   sessionEventListeners.forEach((fn) => fn(session, seq, event));
 handlers.onControl = (frame) => controlListeners.forEach((fn) => fn(frame));
 handlers.onReconnect = () => reconnectListeners.forEach((fn) => fn());
+handlers.onStatus = (up) => {
+  connected = up;
+  statusListeners.forEach((fn) => fn(up));
+};
 
 /** `agentStatus` also ensures the server is up, so this doubles as "wait for
  *  the agent to be ready" — the same guarantee `send_message` relies on. */
@@ -69,4 +75,17 @@ export function onBusControl(handler: (frame: Record<string, unknown>) => void):
 export function onBusReconnect(handler: () => void): () => void {
   reconnectListeners.add(handler);
   return () => reconnectListeners.delete(handler);
+}
+
+/** Whether the socket is up right now.
+ *
+ *  The phone has always tracked this (`mobile/Remote.tsx`'s `connected`); the
+ *  desktop threw it away, which is part of why a turn whose stream died went
+ *  on claiming to be in flight. Returns an unsubscribe, and reports the
+ *  current state immediately so a late subscriber isn't left guessing.
+ */
+export function onBusStatus(handler: (connected: boolean) => void): () => void {
+  statusListeners.add(handler);
+  handler(connected);
+  return () => statusListeners.delete(handler);
 }

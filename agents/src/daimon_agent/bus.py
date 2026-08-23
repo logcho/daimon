@@ -119,6 +119,12 @@ class SessionChannel:
         #: as a conversation existing — the first prompt is what makes it real
         #: and worth telling other clients about.
         self.started = False
+        #: Whether a turn is in flight, derived from the stream rather than
+        #: read from the turn registry — the registry lives in the server and
+        #: this has to be knowable from inside `publish`, which is where the
+        #: transition happens. `ask` counts as *not* busy: the turn is parked
+        #: waiting for a person, which is the opposite of working.
+        self.busy = False
 
     # --- publishing ---------------------------------------------------------
 
@@ -140,6 +146,12 @@ class SessionChannel:
         etype = event.get("type")
         if etype == "user":
             self.started = True
+            self.busy = True
+        elif etype in ("done", "error", "ask"):
+            self.busy = False
+        elif etype == "ask_resolved":
+            # Answered, so the turn is running again. Not an ending.
+            self.busy = True
         if etype == "ask":
             self.pending_ask = event
         elif etype in ("done", "error"):
@@ -247,9 +259,23 @@ class EventBus:
 
         def emit(event: dict) -> None:
             was_started = chan.started
+            was_busy = chan.busy
+            was_asking = chan.pending_ask is not None
             seq = chan.publish(event, sink=self.sink)
             if chan.started and not was_started:
                 self._announce_session("started", session_id)
+            # A session list that only hears about conversations beginning and
+            # being forgotten shows badges frozen at whatever they were when it
+            # was last fetched. These are the two transitions a list renders —
+            # "working" and "waiting on you" — so they are the two it has to be
+            # told about. The desktop papered over this with a 1.5s poll of
+            # /status; nothing over a tunnel can afford that.
+            if chan.busy != was_busy:
+                self._announce_session("busy" if chan.busy else "idle", session_id)
+            if (chan.pending_ask is not None) != was_asking:
+                self._announce_session(
+                    "asking" if chan.pending_ask is not None else "answered", session_id
+                )
             for observer in tuple(self._observers):
                 try:
                     observer(session_id, seq, event)

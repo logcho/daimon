@@ -14,7 +14,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from daimon_agent.remote import push as push_mod
-from daimon_agent.remote.gateway import Gateway, _notify_ask, create_gateway_app
+from daimon_agent.remote.gateway import Gateway, _notify, create_gateway_app
 from daimon_agent.remote.discovery import Workspace
 from daimon_agent.remote.push import PushStore, Subscription
 
@@ -147,7 +147,7 @@ async def test_a_notification_names_the_session_but_not_the_question(monkeypatch
         lambda title, body, url="/": sent.append((title, body)) or 1,
     )
 
-    await _notify_ask(
+    await _notify(
         gateway,
         Workspace(key="k", path="/Users/me/secret-project", port=1, pid=1),
         "session-1",
@@ -338,3 +338,51 @@ def test_the_vapid_subject_is_one_a_push_service_will_accept(tmp_path: Path) -> 
 def test_the_subject_can_be_pointed_at_a_real_contact(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("DAIMON_PUSH_SUBJECT", "mailto:someone@example.org")
     assert PushStore(tmp_path / "remote").subject == "mailto:someone@example.org"
+
+
+async def test_a_finished_turn_notifies_without_quoting_the_result(monkeypatch, tmp_path) -> None:
+    """The one notification worth having on a long unattended run is "the thing
+    you left running is done" — and it was the one that never arrived, because
+    the gateway dropped every event that was not an ask.
+
+    The result is withheld for the same reason the question is: it goes through
+    somebody else's push service and can quote anything in the workspace.
+    """
+    gateway = Gateway(state_dir=tmp_path / "remote", run_root=tmp_path / "run")
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        gateway.push, "notify",
+        lambda title, body, url="/": sent.append((title, body)) or 1,
+    )
+
+    await _notify(
+        gateway,
+        Workspace(key="k", path="/Users/me/secret-project", port=1, pid=1),
+        "session-1",
+        {"type": "done", "result": "the admin password is hunter2"},
+    )
+
+    (title, body) = sent[0]
+    assert "secret-project" in title
+    assert "finished" in title
+    assert "hunter2" not in f"{title} {body}"
+
+
+async def test_an_errored_turn_says_so(monkeypatch, tmp_path) -> None:
+    gateway = Gateway(state_dir=tmp_path / "remote", run_root=tmp_path / "run")
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        gateway.push, "notify",
+        lambda title, body, url="/": sent.append((title, body)) or 1,
+    )
+
+    await _notify(
+        gateway,
+        Workspace(key="k", path="/Users/me/proj", port=1, pid=1),
+        "session-1",
+        {"type": "error", "message": "provider refused the request"},
+    )
+
+    (title, body) = sent[0]
+    assert "stopped" in title
+    assert "refused" not in f"{title} {body}"

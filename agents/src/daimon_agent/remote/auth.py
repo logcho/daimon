@@ -166,6 +166,17 @@ class TokenStore:
     def touch(self) -> None:
         self._save()
 
+    def reload(self) -> None:
+        """Re-read the file, discarding what is held in memory.
+
+        For the supervisor's revoke path: the app on this machine asks for a
+        device to be dropped, and this process — still the only writer — makes
+        the change and reloads. `_load` merges rather than replaces, which is
+        right at construction and wrong here.
+        """
+        self._devices.clear()
+        self._load()
+
 
 @dataclass
 class PairingCode:
