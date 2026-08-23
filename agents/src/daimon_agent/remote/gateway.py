@@ -110,6 +110,21 @@ class Gateway:
 
 
 @web.middleware
+async def no_cache_assets(request: web.Request, handler):
+    """Make the client's own files revalidate.
+
+    Their names are stable rather than content-hashed, so that committing the
+    built client does not add a fresh blob to history on every rebuild. That
+    trade moves cache-busting here: without this a phone keeps serving the
+    bundle it first loaded, and a fix looks like it did not ship.
+    """
+    response = await handler(request)
+    if request.path == "/" or request.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+@web.middleware
 async def auth_middleware(request: web.Request, handler):
     gateway: Gateway = request.app["gateway"]
     path = request.path
@@ -125,7 +140,7 @@ async def auth_middleware(request: web.Request, handler):
 
 
 def create_gateway_app(gateway: Gateway) -> web.Application:
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[no_cache_assets, auth_middleware])
     app["gateway"] = gateway
 
     async def startup(app: web.Application) -> None:

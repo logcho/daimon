@@ -30,6 +30,23 @@ export default defineConfig({
   build: {
     outDir: OUT_DIR,
     emptyOutDir: true,
-    rollupOptions: { input: resolve(__dirname, "mobile.html") },
+    rollupOptions: {
+      input: resolve(__dirname, "mobile.html"),
+      // Stable names, no content hash. The built client is committed — the
+      // Python package ships it and there is no CI to build it on the way
+      // past — so a hashed name means every rebuild adds a fresh ~700 KB blob
+      // to history rather than replacing the last one. Thirty-three of them
+      // accumulated before this was noticed, and the push that found it
+      // failed on payload size.
+      //
+      // Cache-busting is handled by the gateway instead, which serves these
+      // with `no-cache` (see remote/gateway.py): revalidating one small file
+      // per load is cheaper than an unbounded repository.
+      output: {
+        entryFileNames: "assets/mobile.js",
+        chunkFileNames: "assets/[name].js",
+        assetFileNames: "assets/[name][extname]",
+      },
+    },
   },
 });
