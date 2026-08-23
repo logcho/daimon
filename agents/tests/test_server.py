@@ -739,8 +739,15 @@ async def test_move_will_not_clobber_or_escape(client: TestClient) -> None:
     await client.put("/vault/two.md", json={"content": "two"})
 
     assert (await client.post("/vault/move", json={"from": "one.md", "to": "two.md"})).status == 409
-    assert (await client.post("/vault/move", json={"from": "one.md", "to": "x.txt"})).status == 400
     assert (await client.post("/vault/move", json={"from": "nope.md", "to": "x.md"})).status == 404
+    # Into `skills/` or a dot-dir is refused: both are invisible to every
+    # listing, so the file would be filed where nothing can show it again.
+    assert (
+        await client.post("/vault/move", json={"from": "one.md", "to": ".daimon/hidden.md"})
+    ).status == 400
+    assert (
+        await client.post("/vault/move", json={"from": "one.md", "to": "skills/hidden.md"})
+    ).status == 400
     assert (
         await client.post("/vault/move", json={"from": "one.md", "to": "../../etc/evil.md"})
     ).status == 400
@@ -952,3 +959,120 @@ async def test_an_injected_builder_still_shares_one_graph(settings) -> None:
 
         assert app["make_session_graph"] is None
         assert app["graphs"] == {}  # nothing per-session was ever built
+
+
+# --- the vault as a folder of files ------------------------------------------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+async def test_listing_is_markdown_only_by_default(client: TestClient) -> None:
+    """A phone and the agent's own tools both mean "markdown" by "note", so
+    widening the default would have widened them too."""
+    vault = client.app["settings"].vault_dir
+    (vault / "note.md").write_text("a note")
+    (vault / "shot.png").write_bytes(PNG)
+
+    names = {n["name"] for n in await (await client.get("/vault")).json()}
+    assert names == {"note.md"}
+
+
+async def test_listing_all_includes_every_file(client: TestClient) -> None:
+    vault = client.app["settings"].vault_dir
+    (vault / "note.md").write_text("a note")
+    (vault / "shot.png").write_bytes(PNG)
+    (vault / "sub").mkdir()
+    (vault / "sub" / "data.csv").write_text("a,b\n")
+
+    entries = {n["name"]: n for n in await (await client.get("/vault?all=1")).json()}
+    assert set(entries) == {"note.md", "shot.png", "sub/data.csv"}
+    assert entries["shot.png"]["ext"] == "png"
+    assert entries["shot.png"]["sizeBytes"] == len(PNG)
+
+
+async def test_listing_all_still_hides_internal_paths(client: TestClient) -> None:
+    """`?all=1` widens which *files* are shown, not which directories — skills
+    have their own view and dot-dirs hold this workspace's databases."""
+    vault = client.app["settings"].vault_dir
+    _skill(vault / "skills", "changelog")
+    (vault / ".daimon").mkdir(exist_ok=True)
+    (vault / ".daimon" / "memory.db").write_bytes(b"sqlite")
+    (vault / "note.md").write_text("a note")
+
+    names = {n["name"] for n in await (await client.get("/vault?all=1")).json()}
+    assert names == {"note.md"}
+
+
+async def test_upload_writes_bytes_verbatim(client: TestClient) -> None:
+    resp = await client.put("/vaultfile/shots/screen.png", data=PNG)
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["ok"] and body["name"] == "shots/screen.png"
+    # Byte-for-byte: an image that came back re-encoded would be a corrupt file
+    # that still looked like a successful import.
+    assert (client.app["settings"].vault_dir / "shots" / "screen.png").read_bytes() == PNG
+
+
+async def test_upload_does_not_index_non_markdown(client: TestClient) -> None:
+    """A PNG's bytes in the FTS table would have `recall` citing binary noise."""
+    await client.put("/vaultfile/shot.png", data=PNG)
+    await client.put("/vaultfile/read.md", data=b"the quick brown fox")
+
+    memory = client.app["memory"]
+    assert [hit["filename"] for hit in memory.search_notes("quick brown", 3)] == ["read.md"]
+    assert memory.search_notes("PNG", 3) == []
+
+
+async def test_upload_refuses_internal_and_escaping_paths(client: TestClient) -> None:
+    assert (await client.put("/vaultfile/skills/evil.sh", data=b"x")).status == 400
+    assert (await client.put("/vaultfile/.daimon/evil.db", data=b"x")).status == 400
+    # 400 or 404 like the read/write escape test: some of these the client
+    # normalises away before the server ever sees them, which is a fine way
+    # for an escape to fail but not one this route can take credit for.
+    for path in ("/vaultfile/../escaped.png", "/vaultfile/..%2F..%2Fescaped.png"):
+        assert (await client.put(path, data=PNG)).status in (400, 404)
+    assert not (client.app["settings"].vault_dir.parent / "escaped.png").exists()
+
+
+async def test_reading_a_binary_file_says_so(client: TestClient) -> None:
+    """It used to decode with errors="replace", so asking for a PNG filled the
+    editor with replacement characters instead of failing."""
+    await client.put("/vaultfile/shot.png", data=PNG)
+
+    resp = await client.get("/vault/shot.png")
+    assert resp.status == 415
+    assert (await resp.json())["ext"] == "png"
+
+
+async def test_a_note_with_one_stray_byte_still_opens(client: TestClient) -> None:
+    """The strict decode must not lock a user out of a damaged note — they can
+    only fix what they can see."""
+    (client.app["settings"].vault_dir / "damaged.md").write_bytes(b"before \xff after")
+
+    resp = await client.get("/vault/damaged.md")
+    assert resp.status == 200
+    assert "before" in (await resp.json())["content"]
+
+
+async def test_folder_delete_counts_files_that_are_not_notes(client: TestClient) -> None:
+    """The guard used to count `*.md`, so a folder of nothing but images
+    reported itself empty and was deleted on the first confirm click."""
+    await client.put("/vaultfile/album/one.png", data=PNG)
+    await client.put("/vaultfile/album/two.png", data=PNG)
+
+    resp = await client.delete("/vault/folders/album")
+    assert resp.status == 409
+    body = await resp.json()
+    assert body["files"] == 2 and body["notes"] == 0
+    assert (client.app["settings"].vault_dir / "album" / "one.png").is_file()
+
+    assert (await client.delete("/vault/folders/album?recursive=1")).status == 200
+    assert not (client.app["settings"].vault_dir / "album").exists()
+
+
+async def test_move_accepts_any_suffix(client: TestClient) -> None:
+    await client.put("/vaultfile/notes.txt", data=b"plain")
+
+    resp = await client.post("/vault/move", json={"from": "notes.txt", "to": "kept/notes.txt"})
+    assert resp.status == 200
+    assert (client.app["settings"].vault_dir / "kept" / "notes.txt").read_text() == "plain"

@@ -57,7 +57,7 @@ from .tools.files import forget_reads
 from .tools.repl import close_all_repls, close_repl
 from .terminals import TerminalManager
 from .tools.todo import clear_todos
-from .vault import is_internal, vault_file
+from .vault import is_internal, scan_vault, vault_file
 from .tools.search import aclose_search_provider
 from .tools.web import aclose_web_fetcher
 
@@ -293,7 +293,12 @@ async def create_app(
     pidfile: Path | None = None,
 ) -> web.Application:
     settings = settings or Settings.from_env()
-    app = web.Application()
+    # aiohttp defaults to a 1 MiB body, which every upload worth making is
+    # bigger than — and it rejects them before a handler runs, so the error
+    # would arrive with nothing the UI could say about it. The desktop caps
+    # imports below this; the ceiling is here so the cap is the thing users
+    # actually hit.
+    app = web.Application(client_max_size=64 * 1024 * 1024)
     app["settings"] = settings
     app["graph"] = None
     # session_id -> its own graph, built on first use. An OrderedDict so the
@@ -1073,26 +1078,20 @@ async def create_app(
     # the wrong files.
 
     async def vault_list_handler(request: web.Request) -> web.Response:
-        """GET /vault — every note, newest first.
+        """GET /vault — every note, newest first. `?all=1` for every *file*.
 
         Recursive: the agent writes to `vault/notes/`, and a top-level-only
         listing showed none of them.
+
+        Markdown-only by default, and deliberately so. A vault is a folder of
+        files and the desktop browses it as one, but "a note" still means
+        markdown — to the agent's tools, to the recall index, and to a phone.
+        Widening the default would have changed all three at once; `?all=1`
+        widens only the caller that asks.
         """
+        include_all = request.query.get("all") in ("1", "true", "yes")
         root = Path(request.app["settings"].vault_dir)
-        if not root.is_dir():
-            return web.json_response([])
-        notes = []
-        for path in root.rglob("*.md"):
-            if is_internal(path.relative_to(root)):
-                continue  # skills have their own view; dot-dirs are plumbing
-            stat = path.stat()
-            notes.append({
-                "name": str(path.relative_to(root)),
-                "sizeBytes": stat.st_size,
-                "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
-            })
-        notes.sort(key=lambda n: n["modifiedAt"], reverse=True)
-        return web.json_response(notes)
+        return web.json_response(scan_vault(root, include_all=include_all))
 
     async def vault_folders_handler(request: web.Request) -> web.Response:
         """GET /vault/folders — every folder, so the client can show empty ones.
@@ -1151,15 +1150,26 @@ async def create_app(
             return web.json_response({"error": "cannot delete the vault root"}, status=400)
         if not target.is_dir():
             return web.json_response({"error": "no such folder"}, status=404)
-        contained = [p for p in target.rglob("*.md")]
+        # Every file, not just the notes. This guard used to count `*.md`,
+        # which was the same number back when markdown was all a vault could
+        # hold — but a folder of nothing but images would have reported itself
+        # empty and been deleted on the first confirm click, without ever
+        # showing the count.
+        contained = [p for p in target.rglob("*") if p.is_file()]
+        notes = [p for p in contained if p.suffix.lower() == ".md"]
         recursive = request.query.get("recursive") in ("1", "true", "yes")
         if contained and not recursive:
             return web.json_response(
-                {"error": f"folder is not empty ({len(contained)} note(s))", "notes": len(contained)},
+                {
+                    "error": f"folder is not empty ({len(contained)} file(s))",
+                    "files": len(contained),
+                    "notes": len(notes),
+                },
                 status=409,
             )
         memory_store = request.app["memory"]
-        for note in contained:
+        # Only notes are in the index, so only notes come out of it.
+        for note in notes:
             if memory_store is not None:
                 with contextlib.suppress(Exception):
                     memory_store.delete_note(str(note.relative_to(root)))
@@ -1167,7 +1177,9 @@ async def create_app(
             shutil.rmtree(target)
         except OSError as exc:
             return web.json_response({"error": str(exc)}, status=500)
-        return web.json_response({"ok": True, "deleted": name, "notes": len(contained)})
+        return web.json_response(
+            {"ok": True, "deleted": name, "files": len(contained), "notes": len(notes)}
+        )
 
     async def vault_move_handler(request: web.Request) -> web.Response:
         """POST /vault/move — move or rename a note *or* a folder.
@@ -1199,8 +1211,14 @@ async def create_app(
             return web.json_response({"error": f"{dst_name} already exists"}, status=409)
 
         is_folder = src.is_dir()
-        if not is_folder and dst.suffix.lower() != ".md":
-            return web.json_response({"error": "note names must end in .md"}, status=400)
+        # Any suffix moves — the vault is a folder of files. What a move must
+        # not do is file something where no view will ever show it again:
+        # `skills/` has its own tab and dot-dirs hold this workspace's own
+        # databases, so both are invisible to every listing.
+        if is_internal(dst.relative_to(root)):
+            return web.json_response(
+                {"error": "cannot move into skills/ or a dot-directory"}, status=400
+            )
         # Moving a folder into itself (or into its own descendant) would move
         # the destination out from under the move as it runs.
         if is_folder and (dst == src or src in dst.parents):
@@ -1209,7 +1227,9 @@ async def create_app(
         # Note names to re-key, gathered before the move while they still
         # resolve.
         moved_notes = (
-            [str(p.relative_to(root)) for p in src.rglob("*.md")] if is_folder else [src_name]
+            [str(p.relative_to(root)) for p in src.rglob("*.md")]
+            if is_folder
+            else ([src_name] if src.suffix.lower() == ".md" else [])
         )
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1242,15 +1262,86 @@ async def create_app(
         })
 
     async def vault_read_handler(request: web.Request) -> web.Response:
+        """GET /vault/{name} — one file's text.
+
+        Text only. Bytes for display do not come through here at all: the
+        desktop streams media straight off disk through the webview's asset
+        protocol, which is the only way a video can be seeked. What this route
+        owes a caller is to say so rather than pretend — it used to decode with
+        `errors="replace"`, so asking it for a PNG filled the editor with
+        replacement characters instead of failing.
+        """
+        name = request.match_info.get("name", "")
         try:
-            path = vault_file(request.app["settings"], request.match_info.get("name", ""))
+            path = vault_file(request.app["settings"], name)
         except ValueError as exc:
             return web.Response(status=400, text=str(exc))
         if not path.is_file():
             return web.Response(status=404, text="no such note")
+        raw = path.read_bytes()
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # A note with one stray byte still opens, exactly as before — the
+            # user can see the damage and fix it. Anything else is binary and
+            # says so.
+            if path.suffix.lower() != ".md":
+                return web.json_response(
+                    {"error": "binary file", "ext": path.suffix.lower().lstrip(".")},
+                    status=415,
+                )
+            content = raw.decode("utf-8", errors="replace")
+        return web.json_response({"name": name, "content": content})
+
+    async def vault_upload_handler(request: web.Request) -> web.Response:
+        """PUT /vaultfile/{name} — write raw bytes, any file type.
+
+        Separate from `PUT /vault/{name}` on purpose. That route is backed by
+        `write_note`, which the bus's `vault.write` shares, and which refuses
+        anything but markdown — a guarantee a paired phone relies on. Widening
+        it would have widened both. This is the desktop's own door, and it is
+        `application/octet-stream` rather than base64-in-JSON because a file
+        that has to survive a round trip byte-for-byte should not be re-encoded
+        on the way.
+
+        Top-level rather than under `/vault/` because every literal segment
+        there shadows a real file of that name — see the routing table.
+        """
+        name = request.match_info.get("name", "")
+        try:
+            path = vault_file(request.app["settings"], name)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        root = Path(request.app["settings"].vault_dir).resolve()
+        if path == root:
+            return web.json_response({"error": "no file name given"}, status=400)
+        if is_internal(path.relative_to(root)):
+            return web.json_response(
+                {"error": "cannot write into skills/ or a dot-directory"}, status=400
+            )
+        if path.is_dir():
+            return web.json_response({"error": "that name is a directory"}, status=400)
+        body = await request.read()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        except OSError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+        memory_store = request.app["memory"]
+        # Notes are indexed; files are not. A PNG's bytes in the FTS table
+        # would poison `recall` with binary noise, which is the whole reason
+        # non-markdown stays out of it.
+        if memory_store is not None and path.suffix.lower() == ".md":
+            with contextlib.suppress(Exception, UnicodeDecodeError):
+                memory_store.index_note(name, body.decode("utf-8"))
+        announce_vault("written", name)
+        stat = path.stat()
         return web.json_response({
-            "name": request.match_info.get("name", ""),
-            "content": path.read_text(encoding="utf-8", errors="replace"),
+            "ok": True,
+            "name": name,
+            "sizeBytes": stat.st_size,
+            "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
         })
 
     # Told when a note is written or removed. Same shape as the terminal and
@@ -1543,10 +1634,17 @@ async def create_app(
     app.router.add_get("/registry/item/{slug}", registry_item_handler)
     app.router.add_get("/registry/preview/{slug}", registry_preview_handler)
     app.router.add_get("/vault", vault_list_handler)
+    # Raw bytes in, any file type — deliberately NOT under `/vault/`, see
+    # below.
+    app.router.add_put("/vaultfile/{name:.*}", vault_upload_handler)
     # Registered BEFORE the `/vault/{name:.*}` catch-all below — aiohttp
     # resolves in registration order, so these would otherwise be read as a
-    # request for a note literally named "folders" or "move". Note names always
-    # end in .md, so nothing real is shadowed.
+    # request for a file literally named "folders" or "move". That used to cost
+    # nothing, because note names always ended in .md and neither of these
+    # does. It is a real (if unlikely) shadow now that the vault holds
+    # arbitrary files: a file named exactly `folders` or `move` at the vault
+    # root is unreachable through this route. Which is the reason not to add a
+    # third one — anything new goes at the top level, as `/vaultfile` does.
     app.router.add_get("/vault/folders", vault_folders_handler)
     app.router.add_post("/vault/folders", vault_folder_create_handler)
     app.router.add_delete("/vault/folders/{path:.*}", vault_folder_delete_handler)

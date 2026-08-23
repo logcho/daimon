@@ -1,23 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   createVaultFolder,
   deleteVaultFile,
   deleteVaultFolder,
-  listVaultFiles,
+  listVaultEntries,
   listVaultFolders,
+  revealInFinder,
+  vaultRoot,
+  writeVaultBytes,
   moveVaultFile,
   moveVaultFolder,
   readVaultFile,
   writeVaultFile,
 } from "../api";
+import { forgetNote, indexNotes, noteTexts, rememberNote } from "../vaultIndex";
+import { extensionOf, isEditable, kindOf, MAX_IMPORT_BYTES } from "../fileKind";
+import { collectDrop, isFileDrag, uniqueName, type DroppedTree } from "../vaultDrop";
+import { useResizableSidebar } from "../hooks/useResizableSidebar";
 import { onBusControl } from "../lib/bus";
 import { allFolderPaths, basename, buildTree, joinPath, parentFolder } from "../noteTree";
 import type { VaultFile } from "../types";
-import { findBacklinks, findWikiLinks, resolveWikiLink, wikiLinkToNoteName } from "../wikilinks";
+import { findBacklinks, resolveWikiLink, wikiLinkToNoteName } from "../wikilinks";
 import { DeleteButton } from "./DeleteButton";
 import { NoteTree } from "./NoteTree";
+import { FilePreview } from "./vault/FilePreview";
+import { ContextMenu, type MenuItem } from "./vault/ContextMenu";
+import { MarkdownView } from "./vault/MarkdownView";
 
 type ListState = "loading" | "ready" | "error";
 type DetailState = "idle" | "loading" | "ready" | "error";
@@ -55,59 +63,6 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-/** Split note text on `[[wikilinks]]` so the plain stretches can go through
- *  ReactMarkdown untouched and the links become buttons. Markdown doesn't know
- *  the syntax — left alone it renders as literal brackets — and rewriting them
- *  into `[]()` links first would break any that appear inside a code fence. */
-function renderWithWikiLinks(
-  text: string,
-  noteNames: string[],
-  onFollow: (target: string) => void,
-) {
-  const links = findWikiLinks(text);
-  if (links.length === 0) {
-    return (
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-    );
-  }
-  const parts: React.ReactNode[] = [];
-  let cursor = 0;
-  links.forEach((link, i) => {
-    if (link.start > cursor) {
-      parts.push(
-        <ReactMarkdown key={`t${i}`} remarkPlugins={[remarkGfm]}>
-          {text.slice(cursor, link.start)}
-        </ReactMarkdown>,
-      );
-    }
-    const resolved = resolveWikiLink(link.target, noteNames);
-    parts.push(
-      <button
-        key={`l${i}`}
-        type="button"
-        onClick={() => onFollow(link.target)}
-        title={resolved ? `open ${resolved}` : `create ${wikiLinkToNoteName(link.target)}`}
-        className={`mx-0.5 rounded px-1 transition ${
-          resolved
-            ? "text-[#4f8dff] hover:bg-[#4f8dff]/10 hover:underline"
-            : "text-amber-400/80 hover:bg-amber-400/10 hover:underline"
-        }`}
-      >
-        {link.label}
-        {!resolved && <span className="ml-0.5 text-[10px] opacity-70">+</span>}
-      </button>,
-    );
-    cursor = link.end;
-  });
-  if (cursor < text.length) {
-    parts.push(
-      <ReactMarkdown key="tail" remarkPlugins={[remarkGfm]}>
-        {text.slice(cursor)}
-      </ReactMarkdown>,
-    );
-  }
-  return parts;
-}
 
 /** Two-pane Obsidian-style notes browser: browse, edit, create, and link.
  *
@@ -134,9 +89,15 @@ export function VaultPanel() {
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  /** Note text cache, for backlinks — computing them needs every note's body,
-   *  not just the open one. Filled as notes are opened plus one bulk load. */
-  const [contents, setContents] = useState<Map<string, string>>(new Map());
+  /** Bumped when the background scan caches another note's body, to
+   *  recompute backlinks. The bodies themselves live in `vaultIndex`, outside
+   *  React — this panel unmounts on every tab switch, and a cache that went
+   *  with it made the scan restart every time. */
+  const [indexTick, setIndexTick] = useState(0);
+
+  /** The vault's absolute path, for the asset URLs media streams from. From
+   *  the agent config, so there is still one answer to where the vault is. */
+  const [vaultDir, setVaultDir] = useState("");
 
   const [folders, setFolders] = useState<string[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -146,22 +107,48 @@ export function VaultPanel() {
    *  panel itself — with a prompt, every create silently did nothing. */
   const [pending, setPending] = useState<{ kind: "note" | "folder"; parent: string } | null>(null);
   const [draft, setDraft] = useState("");
+  /** An OS drop in progress: which folder it lands in, and how far along.
+   *  A strip rather than a modal — the import runs while the panel stays
+   *  usable, and Tauri's webview has no dialog to put it in anyway. */
+  const [importing, setImporting] = useState<{ done: number; total: number; label: string } | null>(
+    null,
+  );
+  /** Folder an OS drag is hovering. Separate from `dropTarget`, which is a
+   *  note being moved *inside* the vault — the two drops do different things
+   *  and must not look alike. */
+  const [fileDropTarget, setFileDropTarget] = useState<string | null>(null);
+
+  /** The row currently being renamed, and the open right-click menu. Both
+   *  exist because Tauri's webview has no `window.prompt` or `confirm` — a
+   *  rename is an inline input and a confirm is a second click. */
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+
   /** Folder whose delete is armed — the first click arms, the second commits. */
   const [armedFolder, setArmedFolder] = useState<string | null>(null);
   const draftRef = useRef<HTMLInputElement | null>(null);
+
+  const {
+    width: sidebarWidth,
+    dragging,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    reset: resetSidebar,
+  } = useResizableSidebar();
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const dirty = content !== saved;
 
   const noteNames = useMemo(() => files.map((f) => f.name), [files]);
 
+  /** Record a body we already have in hand, so the background scan doesn't
+   *  re-fetch what was just on screen. `modifiedAt` is deliberately a
+   *  placeholder here: a listing refresh carries the real one and supersedes
+   *  this, and being re-read once is cheaper than being missed. */
   const cacheContent = useCallback((name: string, text: string) => {
-    setContents((prev) => {
-      if (prev.get(name) === text) return prev;
-      const next = new Map(prev);
-      next.set(name, text);
-      return next;
-    });
+    rememberNote(name, text, "");
+    setIndexTick((n) => n + 1);
   }, []);
 
   const openFile = useCallback(
@@ -169,6 +156,15 @@ export function VaultPanel() {
       setSelectedFile(name);
       setActionErrorMessage("");
       setMode("preview");
+      // Media and unknown binaries have nothing to fetch: they stream off
+      // disk through the asset protocol, and asking the server for their text
+      // is a round trip that now correctly ends in a refusal.
+      if (!isEditable(kindOf(name))) {
+        setContent("");
+        setSaved("");
+        setDetailState("ready");
+        return;
+      }
       setDetailState("loading");
       readVaultFile(name)
         .then((text) => {
@@ -184,6 +180,12 @@ export function VaultPanel() {
     },
     [cacheContent],
   );
+
+  useEffect(() => {
+    // Best-effort: without it media has no URL to point at and shows a
+    // loading line, which is a better failure than a broken image.
+    vaultRoot().then(setVaultDir).catch(() => {});
+  }, []);
 
   const refreshFolders = useCallback(() => {
     listVaultFolders()
@@ -201,13 +203,13 @@ export function VaultPanel() {
     () =>
       onBusControl((frame) => {
         if (frame.control !== "vault_changed") return;
-        void listVaultFiles().then(setFiles).catch(() => {});
+        void listVaultEntries().then(setFiles).catch(() => {});
       }),
     [],
   );
 
   useEffect(() => {
-    listVaultFiles()
+    listVaultEntries()
       .then((f) => {
         setFiles(f);
         setListState("ready");
@@ -233,39 +235,30 @@ export function VaultPanel() {
     refreshFolders();
   }, [openFile, refreshFolders]);
 
-  /** Backlinks need every note's text, so pull the bodies in once in the
-   *  background. Best-effort and non-blocking: an unreadable note just doesn't
-   *  contribute backlinks rather than failing the panel. */
+  /** Backlinks need every note's text, so pull the bodies in in the
+   *  background. The cache, and the skip-what-hasn't-changed logic, live in
+   *  `vaultIndex` outside React: this panel unmounts on every tab switch, and
+   *  keeping them here restarted the whole scan on every visit.
+   *
+   *  Markdown only, now that the listing includes images — asking the server
+   *  for a PNG's text is n round trips ending in n refusals. */
   useEffect(() => {
     if (listState !== "ready" || files.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      for (const file of files) {
-        if (cancelled) return;
-        if (contents.has(file.name)) continue;
-        try {
-          const text = await readVaultFile(file.name);
-          if (cancelled) return;
-          cacheContent(file.name, text);
-        } catch {
-          /* skip — one unreadable note must not stop the scan */
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // Deliberately keyed on the *names*: re-running whenever `contents`
-    // changed would restart the scan on every note it just cached.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [listState, noteNames.join(" "), cacheContent]);
+    return indexNotes(files, () => setIndexTick((n) => n + 1));
+  }, [listState, files]);
 
   const save = useCallback(
     async (name: string, text: string) => {
       setSaving(true);
       setActionErrorMessage("");
       try {
-        const meta = await writeVaultFile(name, text);
+        // Markdown goes through the note write, which indexes it for recall.
+      // Anything else goes through the byte write — the note route refuses a
+      // non-.md name, and a .txt has no business in the recall index anyway.
+      const meta =
+        kindOf(name) === "markdown"
+          ? await writeVaultFile(name, text)
+          : await writeVaultBytes(name, new TextEncoder().encode(text));
         setSaved(text);
         cacheContent(name, text);
         setFiles((prev) => {
@@ -292,12 +285,19 @@ export function VaultPanel() {
     // A name typed into a folder's own "+" is relative to that folder unless
     // it already carries a path of its own.
     const withFolder = inFolder && !trimmed.includes("/") ? joinPath(inFolder, trimmed) : trimmed;
-    const name = /\.md$/i.test(withFolder) ? withFolder : `${withFolder}.md`;
+    // An extension the user typed is one they meant — `todo.txt` used to
+    // become `todo.txt.md`. Only a bare name gets `.md` assumed for it.
+    const name = extensionOf(withFolder) ? withFolder : `${withFolder}.md`;
     if (noteNames.includes(name)) {
       openFile(name);
       return;
     }
-    const seed = `# ${name.slice(name.lastIndexOf("/") + 1).replace(/\.md$/i, "")}\n\n`;
+    // A heading seeds a note; anything else starts empty, because a `#` line
+    // is not a helpful first line of a CSV.
+    const seed =
+      kindOf(name) === "markdown"
+        ? `# ${basename(name).replace(/\.md$/i, "")}\n\n`
+        : "";
     setSelectedFile(name);
     setContent(seed);
     setSaved(""); // nothing on disk yet, so this counts as unsaved
@@ -368,13 +368,9 @@ export function VaultPanel() {
     try {
       const meta = await moveVaultFile(from, to);
       setFiles((prev) => [meta, ...prev.filter((f) => f.name !== from)]);
-      setContents((prev) => {
-        const next = new Map(prev);
-        const text = next.get(from);
-        next.delete(from);
-        if (text !== undefined) next.set(to, text);
-        return next;
-      });
+      // The body is unchanged but its name is not, and the index is keyed
+      // by name — drop the old entry and let the next scan pick the new one up.
+      forgetNote(from);
       if (selectedFile === from) setSelectedFile(to);
       refreshFolders();
     } catch (err) {
@@ -398,9 +394,9 @@ export function VaultPanel() {
       await moveVaultFolder(from, to);
       // Every path under the folder shifted, so re-read rather than trying to
       // patch each one — the listing is cheap next to getting it wrong.
-      const [refreshedFiles] = await Promise.all([listVaultFiles()]);
+      const [refreshedFiles] = await Promise.all([listVaultEntries()]);
       setFiles(refreshedFiles);
-      setContents(new Map());
+
       if (selectedFile?.startsWith(`${from}/`)) {
         setSelectedFile(selectedFile.replace(from, to));
       }
@@ -417,6 +413,191 @@ export function VaultPanel() {
     } catch (err) {
       setActionErrorMessage(`couldn't move ${from}: ${errText(err)}`);
     }
+  }
+
+  /** Open the tree down to a folder — what a breadcrumb segment does. */
+  function revealFolder(path: string) {
+    setQuery("");
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      let walk = path;
+      while (walk) {
+        next.add(walk);
+        walk = parentFolder(walk);
+      }
+      return next;
+    });
+  }
+
+  /** Rename in place. A rename and a move are the same operation on disk and
+   *  the same call here — only the part of the path that changes differs. */
+  async function commitRename(path: string, rawName: string) {
+    setRenaming(null);
+    const next = rawName.trim();
+    if (!next || next === basename(path)) return;
+    if (next.includes("/")) {
+      setActionErrorMessage("a name can't contain a slash — drag it instead to move it");
+      return;
+    }
+    const to = joinPath(parentFolder(path), next);
+    const isFolder = folders.includes(path) || files.some((f) => f.name.startsWith(`${path}/`));
+    setActionErrorMessage("");
+    try {
+      if (isFolder) {
+        // Not `moveFolder`, which files a folder *into* another and keeps its
+        // own name — a rename changes exactly the last segment.
+        await moveVaultFolder(path, to);
+        const refreshed = await listVaultEntries();
+        setFiles(refreshed);
+        if (selectedFile?.startsWith(`${path}/`)) {
+          setSelectedFile(selectedFile.replace(path, to));
+        }
+        setExpanded((prev) => {
+          const nextSet = new Set<string>();
+          for (const open of prev) {
+            nextSet.add(open === path || open.startsWith(`${path}/`) ? open.replace(path, to) : open);
+          }
+          return nextSet;
+        });
+        refreshFolders();
+      } else {
+        await moveNote(path, to);
+      }
+    } catch (err) {
+      setActionErrorMessage(`couldn't rename ${path}: ${errText(err)}`);
+    }
+  }
+
+  /** Build the menu for whatever was right-clicked. */
+  function openContextMenu(e: React.MouseEvent, path: string, kind: "note" | "folder") {
+    e.preventDefault();
+    e.stopPropagation();
+    const items: MenuItem[] =
+      kind === "folder"
+        ? [
+            { label: "New file", onSelect: () => startDraft("note", path) },
+            { label: "New folder", onSelect: () => startDraft("folder", path) },
+            { label: "Rename", onSelect: () => setRenaming(path), separated: true },
+            { label: "Reveal in Finder", onSelect: () => void reveal(path) },
+            {
+              label: "Delete folder",
+              destructive: true,
+              separated: true,
+              onSelect: () => void deleteFolderNow(path),
+            },
+          ]
+        : [
+            { label: "Open", onSelect: () => selectAnother(path) },
+            { label: "Rename", onSelect: () => setRenaming(path) },
+            { label: "Reveal in Finder", onSelect: () => void reveal(path), separated: true },
+            {
+              label: "Delete",
+              destructive: true,
+              separated: true,
+              onSelect: () => handleDelete(path),
+            },
+          ];
+    setMenu({ x: e.clientX, y: e.clientY, items });
+  }
+
+  const reveal = (path: string) =>
+    revealInFinder(path).catch((err) => setActionErrorMessage(errText(err)));
+
+  /** The menu's delete skips the arm step the sidebar button uses — the menu
+   *  item does its own arming, so a second confirm would be one too many. */
+  async function deleteFolderNow(path: string) {
+    const inside = files.filter((f) => f.name.startsWith(`${path}/`));
+    setActionErrorMessage("");
+    try {
+      await deleteVaultFolder(path, inside.length > 0);
+      setFiles((prev) => prev.filter((f) => !f.name.startsWith(`${path}/`)));
+      if (selectedFile?.startsWith(`${path}/`)) {
+        setSelectedFile(null);
+        setContent("");
+        setSaved("");
+        setDetailState("idle");
+      }
+      refreshFolders();
+    } catch (err) {
+      setActionErrorMessage(`couldn't delete ${path}: ${errText(err)}`);
+    }
+  }
+
+  /** Bring dropped files (and folders) into the vault.
+   *
+   *  Folders first, including empty ones — the same reason the vault lists
+   *  folders separately from notes: one you just made holds nothing, and
+   *  inferring it from file paths would make it vanish. Then the files, one at
+   *  a time so the count means something and 200 of them don't open 200
+   *  sockets at once.
+   *
+   *  A failure is collected, not thrown: nineteen files landing and one
+   *  failing is a far better outcome than the drop aborting halfway with no
+   *  way to tell what made it in.
+   */
+  async function importDrop(tree: DroppedTree, intoFolder: string) {
+    if (tree.files.length === 0 && tree.folders.length === 0) return;
+    setActionErrorMessage("");
+
+    for (const folder of tree.folders) {
+      try {
+        await createVaultFolder(joinPath(intoFolder, folder));
+      } catch {
+        /* the file writes below create parents anyway; only an empty folder
+           is actually lost, and that must not stop the import */
+      }
+    }
+
+    // Claimed names include the ones taken earlier in this same batch —
+    // without that, two files of the same name both get offered "shot 1.png".
+    const taken = new Set(files.map((f) => f.name));
+    const failures: string[] = [];
+    let done = 0;
+    setImporting({ done: 0, total: tree.files.length, label: "" });
+
+    for (const { relPath, file } of tree.files) {
+      setImporting({ done, total: tree.files.length, label: relPath });
+      const target = uniqueName(joinPath(intoFolder, relPath), taken);
+      try {
+        if (file.size > MAX_IMPORT_BYTES) {
+          throw new Error(
+            `${formatBytes(file.size)} — too large to import, copy it into the vault in Finder instead`,
+          );
+        }
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const meta = await writeVaultBytes(target, bytes);
+        taken.add(target);
+        setFiles((prev) => [meta, ...prev.filter((f) => f.name !== target)]);
+      } catch (err) {
+        failures.push(`${relPath}: ${errText(err)}`);
+      }
+      done++;
+    }
+
+    setImporting(null);
+    refreshFolders();
+    if (failures.length > 0) {
+      setActionErrorMessage(
+        `${failures.length} of ${tree.files.length} couldn't be imported — ${failures[0]}${
+          failures.length > 1 ? ` (and ${failures.length - 1} more)` : ""
+        }`,
+      );
+    }
+  }
+
+  /** The drop itself. Branching on which kind of drag this is comes first:
+   *  an OS drop imports, an internal one moves, and treating either as the
+   *  other loses data. */
+  function handleFileDrop(e: React.DragEvent, intoFolder: string) {
+    if (!isFileDrag(e.dataTransfer)) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    setFileDropTarget(null);
+    // Collect synchronously — `dataTransfer` is dead the moment this returns.
+    void collectDrop(e.dataTransfer)
+      .then((tree) => importDrop(tree, intoFolder))
+      .catch((err) => setActionErrorMessage(`couldn't read the drop: ${errText(err)}`));
+    return true;
   }
 
   /** Drop handler for the tree. The payload carries which kind was dragged,
@@ -519,7 +700,9 @@ export function VaultPanel() {
         if (selectedFile && dirty && !saving) void save(selectedFile, content);
       } else if (e.key === "e") {
         e.preventDefault();
-        if (selectedFile) setMode((m) => (m === "edit" ? "preview" : "edit"));
+        if (selectedFile && isEditable(kindOf(selectedFile))) {
+          setMode((m) => (m === "edit" ? "preview" : "edit"));
+        }
       }
     }
     window.addEventListener("keydown", onKey);
@@ -535,6 +718,8 @@ export function VaultPanel() {
   }
 
   const selectedFileMeta = selectedFile ? files.find((f) => f.name === selectedFile) : undefined;
+  /** What the open file is — which editor, which preview, which icon. */
+  const selectedKind = selectedFile ? kindOf(selectedFile) : undefined;
 
   const visibleFiles = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -545,16 +730,26 @@ export function VaultPanel() {
   const tree = useMemo(() => buildTree(files, folders), [files, folders]);
 
   const backlinks = useMemo(
-    () => (selectedFile ? findBacklinks(selectedFile, contents, noteNames) : []),
-    [selectedFile, contents, noteNames],
+    () => (selectedFile ? findBacklinks(selectedFile, noteTexts(), noteNames) : []),
+    // `indexTick` is the dependency that matters — the bodies live outside
+    // React, so this is how a newly-scanned note reaches the list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedFile, noteNames, indexTick],
   );
 
   return (
     <div className="flex min-h-0 flex-1">
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
+      )}
       <div
-        className={`themed-scroll shrink-0 overflow-y-auto border-r border-white/10 transition-[width,opacity,padding] duration-200 ${
-          sidebarCollapsed ? "w-0 overflow-hidden p-0 opacity-0" : "w-52 p-3 opacity-100"
-        }`}
+        // Width is inline rather than a class because it is a dragged value.
+        // The transition is suppressed mid-drag — animating toward a target
+        // that moves every pointer event lags behind the cursor.
+        style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+        className={`themed-scroll shrink-0 overflow-y-auto border-r border-white/10 ${
+          dragging ? "" : "transition-[width,opacity,padding] duration-200"
+        } ${sidebarCollapsed ? "overflow-hidden p-0 opacity-0" : "p-3 opacity-100"}`}
       >
         <div className="flex items-center justify-between px-1">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">vault</h3>
@@ -582,9 +777,28 @@ export function VaultPanel() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="search notes"
+            placeholder="search files"
             className="mt-2 w-full rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-[#4f8dff]/40 focus:outline-none"
           />
+        )}
+
+        {importing && (
+          <div className="mt-2 rounded-md border border-emerald-400/20 bg-emerald-400/5 p-1.5">
+            <p className="px-0.5 text-[10px] uppercase tracking-wider text-emerald-300/70">
+              importing {importing.done}/{importing.total}
+            </p>
+            <p className="truncate px-0.5 text-[10px] text-neutral-400" title={importing.label}>
+              {importing.label}
+            </p>
+            <div className="mt-1 h-0.5 overflow-hidden rounded bg-white/10">
+              <div
+                className="h-full bg-emerald-400/60 transition-all"
+                style={{
+                  width: `${importing.total ? (importing.done / importing.total) * 100 : 0}%`,
+                }}
+              />
+            </div>
+          </div>
         )}
 
         {listState === "loading" && <p className="mt-2 px-1 text-xs text-neutral-500">loading…</p>}
@@ -612,7 +826,7 @@ export function VaultPanel() {
               // Committing on blur would fire when the click lands on the
               // cancel button, creating the thing the user just cancelled.
               onBlur={() => setPending(null)}
-              placeholder={pending.kind === "note" ? "name.md" : "folder name"}
+              placeholder={pending.kind === "note" ? "name.md, notes.txt, …" : "folder name"}
               className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-neutral-100 placeholder:text-neutral-600 focus:border-[#4f8dff]/50 focus:outline-none"
             />
             <p className="mt-1 px-0.5 text-[10px] text-neutral-600">enter to create · esc to cancel</p>
@@ -620,10 +834,12 @@ export function VaultPanel() {
         )}
 
         {listState === "ready" && files.length === 0 && folders.length === 0 && !pending && (
-          <p className="mt-2 px-1 text-xs text-neutral-500">○ empty — press + to write your first note</p>
+          <p className="mt-2 px-1 text-xs leading-relaxed text-neutral-500">
+            ○ empty — press + to write a note, or drop files here from Finder.
+          </p>
         )}
         {listState === "ready" && query.trim() && visibleFiles.length === 0 && (
-          <p className="mt-2 px-1 text-xs text-neutral-500">no notes match “{query}”</p>
+          <p className="mt-2 px-1 text-xs text-neutral-500">nothing matches “{query}”</p>
         )}
 
         {/* While searching, a flat list of full paths beats a tree: the whole
@@ -652,16 +868,32 @@ export function VaultPanel() {
         {listState === "ready" && !query.trim() && tree.length > 0 && (
           <div
             className={`mt-2 rounded-md transition ${
-              dropTarget === "" ? "bg-[#4f8dff]/10 ring-1 ring-[#4f8dff]/30" : ""
+              fileDropTarget === ""
+                ? "bg-emerald-400/10 ring-1 ring-dashed ring-emerald-400/50"
+                : dropTarget === ""
+                  ? "bg-[#4f8dff]/10 ring-1 ring-[#4f8dff]/30"
+                  : ""
             }`}
             // The gap around the tree is the vault root as a drop target, so a
             // note can be dragged back out of a folder.
             onDragOver={(e) => {
               e.preventDefault();
+              // An OS drop copies files in; an internal one moves a note.
+              // Different cursors so which is about to happen is visible
+              // before the mouse is released.
+              if (isFileDrag(e.dataTransfer)) {
+                e.dataTransfer.dropEffect = "copy";
+                if (fileDropTarget !== "") setFileDropTarget("");
+                return;
+              }
               if (dropTarget !== "") setDropTarget("");
             }}
-            onDragLeave={() => setDropTarget((t) => (t === "" ? null : t))}
+            onDragLeave={() => {
+              setDropTarget((t) => (t === "" ? null : t));
+              setFileDropTarget((t) => (t === "" ? null : t));
+            }}
             onDrop={(e) => {
+              if (handleFileDrop(e, "")) return;
               e.preventDefault();
               const from = e.dataTransfer.getData("text/plain");
               setDropTarget(null);
@@ -691,12 +923,56 @@ export function VaultPanel() {
               onDeleteFolder={(path) => void handleDeleteFolder(path)}
               onMoveNote={handleDrop}
               onDropTargetChange={setDropTarget}
+              fileDropTarget={fileDropTarget}
+              onFileDrop={handleFileDrop}
+              onFileDropTargetChange={setFileDropTarget}
+              renaming={renaming}
+              onRenameCommit={(path, next) => void commitRename(path, next)}
+              onRenameCancel={() => setRenaming(null)}
+              onContextMenu={openContextMenu}
             />
           </div>
         )}
       </div>
 
-      <div className="themed-scroll min-h-0 flex-1 overflow-y-auto p-4">
+      {/* The resize handle. Sits between the panes and is only a few pixels
+          wide, so it gets a generous cursor target and a visible hover. */}
+      {!sidebarCollapsed && (
+        <div
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onDoubleClick={resetSidebar}
+          title="drag to resize · double-click to reset"
+          className={`w-1 shrink-0 cursor-col-resize transition ${
+            dragging ? "bg-[#4f8dff]/50" : "hover:bg-[#4f8dff]/30"
+          }`}
+        />
+      )}
+
+      <div
+        className={`themed-scroll relative min-h-0 flex-1 overflow-y-auto p-4 transition ${
+          fileDropTarget === "__pane__" ? "ring-1 ring-dashed ring-emerald-400/50" : ""
+        }`}
+        // Dropping onto the reading pane files things beside whatever is
+        // open, which is where you nearly always mean when you drag an image
+        // in while writing.
+        onDragOver={(e) => {
+          if (!isFileDrag(e.dataTransfer)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          if (fileDropTarget !== "__pane__") setFileDropTarget("__pane__");
+        }}
+        onDragLeave={() => setFileDropTarget((t) => (t === "__pane__" ? null : t))}
+        onDrop={(e) => handleFileDrop(e, selectedFile ? parentFolder(selectedFile) : "")}
+      >
+        {fileDropTarget === "__pane__" && (
+          <div className="pointer-events-none absolute inset-2 z-10 flex items-center justify-center rounded-md border border-dashed border-emerald-400/50 bg-emerald-400/5">
+            <p className="text-xs text-emerald-300">
+              drop to add to {selectedFile ? parentFolder(selectedFile) || "the vault" : "the vault"}
+            </p>
+          </div>
+        )}
         <div className="mb-2 flex items-center gap-2">
           <button
             type="button"
@@ -707,9 +983,32 @@ export function VaultPanel() {
             <SidebarToggleIcon collapsed={sidebarCollapsed} />
           </button>
           {selectedFile && (
-            <h3 className="truncate text-sm font-semibold tracking-tight text-neutral-100">
-              {selectedFile}
-              {dirty && <span className="ml-1 text-amber-400">•</span>}
+            <h3 className="flex min-w-0 items-center gap-1 truncate text-sm tracking-tight">
+              {/* Path as breadcrumb — each folder expands the tree to it, so
+                  a note found through search can be located in the tree. */}
+              {parentFolder(selectedFile)
+                .split("/")
+                .filter(Boolean)
+                .map((segment, i, all) => {
+                  const path = all.slice(0, i + 1).join("/");
+                  return (
+                    <span key={path} className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => revealFolder(path)}
+                        title={`show ${path}`}
+                        className="rounded px-0.5 text-neutral-500 transition hover:text-neutral-200"
+                      >
+                        {segment}
+                      </button>
+                      <span className="text-neutral-700">/</span>
+                    </span>
+                  );
+                })}
+              <span className="truncate font-semibold text-neutral-100">
+                {basename(selectedFile)}
+              </span>
+              {dirty && <span className="text-amber-400">•</span>}
             </h3>
           )}
           {selectedFile && detailState === "ready" && (
@@ -725,14 +1024,18 @@ export function VaultPanel() {
                   {saving ? "saving…" : "save"}
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => setMode((m) => (m === "edit" ? "preview" : "edit"))}
-                title="toggle edit/preview (⌘E)"
-                className="rounded-md px-2 py-0.5 text-xs text-neutral-500 transition hover:bg-white/5 hover:text-neutral-100"
-              >
-                {mode === "edit" ? "preview" : "edit"}
-              </button>
+              {/* Only where there is something to edit — a video has no
+                  edit mode, and offering one is a button that does nothing. */}
+              {selectedKind !== undefined && isEditable(selectedKind) && (
+                <button
+                  type="button"
+                  onClick={() => setMode((m) => (m === "edit" ? "preview" : "edit"))}
+                  title="toggle edit/preview (⌘E)"
+                  className="rounded-md px-2 py-0.5 text-xs text-neutral-500 transition hover:bg-white/5 hover:text-neutral-100"
+                >
+                  {mode === "edit" ? "preview" : "edit"}
+                </button>
+              )}
               {/* Keyboard-reachable equivalent of dragging onto a folder —
                   and the only way to move a note when the tree is filtered by
                   a search, where there are no folders on screen to drop onto. */}
@@ -765,15 +1068,22 @@ export function VaultPanel() {
         )}
 
         {!selectedFile && (
-          <p className="text-sm text-neutral-500">
-            Select a note to read, or press + to write one. Link notes with{" "}
-            <code className="rounded bg-white/5 px-1">[[name]]</code>.
-          </p>
+          <div className="text-sm leading-relaxed text-neutral-500">
+            <p>Select a file to read, or press + to write a note.</p>
+            <p className="mt-2 text-xs">
+              Link notes with <code className="rounded bg-white/5 px-1">[[name]]</code>, show an
+              image with <code className="rounded bg-white/5 px-1">![[shot.png]]</code>. Drag files
+              or folders in from Finder to add them.
+            </p>
+          </div>
         )}
         {selectedFile && detailState === "loading" && <p className="text-sm text-neutral-500">loading…</p>}
         {selectedFile && detailState === "error" && <p className="text-sm text-red-400">{detailErrorMessage}</p>}
 
-        {selectedFile && detailState === "ready" && mode === "edit" && (
+        {/* Editable text — markdown and code alike. Same editor either way:
+            the difference is what preview mode does with it. */}
+        {selectedFile && detailState === "ready" && selectedKind !== undefined &&
+          isEditable(selectedKind) && mode === "edit" && (
           <textarea
             ref={textareaRef}
             value={content}
@@ -782,19 +1092,58 @@ export function VaultPanel() {
               if (dirty && !saving) void save(selectedFile, content);
             }}
             spellCheck={false}
-            placeholder="Write in markdown. Link other notes with [[name]]."
+            placeholder={
+              selectedKind === "markdown"
+                ? "Write in markdown. Link other notes with [[name]]."
+                : ""
+            }
             className="themed-scroll min-h-[60vh] w-full resize-none rounded-md border border-white/10 bg-black/20 p-3 font-mono text-sm leading-relaxed text-neutral-200 placeholder:text-neutral-600 focus:border-[#4f8dff]/40 focus:outline-none"
           />
         )}
 
-        {selectedFile && detailState === "ready" && mode === "preview" && (
+        {selectedFile && detailState === "ready" && selectedKind === "markdown" &&
+          mode === "preview" && (
           <article
             className="daimon-prose prose prose-invert prose-sm max-w-none"
             onDoubleClick={() => setMode("edit")}
             title="double-click to edit"
           >
-            {renderWithWikiLinks(content, noteNames, handleFollowLink)}
+            <MarkdownView
+              text={content}
+              noteName={selectedFile}
+              files={files}
+              vaultDir={vaultDir}
+              onFollow={handleFollowLink}
+            />
           </article>
+        )}
+
+        {/* Code and data read better as themselves than as prose — no
+            highlighting, which would mean a new dependency this doesn't need. */}
+        {selectedFile && detailState === "ready" && selectedKind === "text" &&
+          mode === "preview" && (
+          <pre
+            onDoubleClick={() => setMode("edit")}
+            title="double-click to edit"
+            className="themed-scroll overflow-x-auto rounded-md border border-white/10 bg-black/20 p-3 font-mono text-xs leading-relaxed text-neutral-300"
+          >
+            {content}
+          </pre>
+        )}
+
+        {/* Everything else: streamed off disk, or an honest dead end. */}
+        {selectedFile && detailState === "ready" && selectedKind !== undefined &&
+          !isEditable(selectedKind) && (
+          <FilePreview
+            name={selectedFile}
+            kind={selectedKind}
+            sizeBytes={selectedFileMeta?.sizeBytes ?? 0}
+            modifiedAt={selectedFileMeta?.modifiedAt ?? ""}
+            vaultDir={vaultDir}
+            onReveal={() => void revealInFinder(selectedFile).catch((err) =>
+              setActionErrorMessage(errText(err)),
+            )}
+          />
         )}
 
         {selectedFile && detailState === "ready" && backlinks.length > 0 && (

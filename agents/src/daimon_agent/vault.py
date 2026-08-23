@@ -9,6 +9,7 @@ two copies of a path check is how one of them ends up subtly weaker.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import Settings
@@ -37,3 +38,37 @@ def is_internal(relative: Path) -> bool:
     meaningfully use but can delete.
     """
     return any(part == "skills" or part.startswith(".") for part in relative.parts)
+
+
+def scan_vault(root: Path, *, include_all: bool = False) -> list[dict]:
+    """Every file in the vault, newest first, as listing entries.
+
+    One implementation because there are two views onto the same directory —
+    the HTTP route the desktop reads and the bus op a phone reads — and two
+    copies of "what counts as being in the vault" is how they drift into
+    disagreeing. They differ only in `include_all`: the desktop shows the whole
+    folder, a phone shows notes.
+
+    `ext` is additive on top of the shape clients already parse (`name`,
+    `sizeBytes`, `modifiedAt`), so nothing that predates it has to branch.
+    """
+    if not root.is_dir():
+        return []
+    entries = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root)
+        if is_internal(relative):
+            continue
+        if not include_all and path.suffix.lower() != ".md":
+            continue
+        stat = path.stat()
+        entries.append({
+            "name": str(relative),
+            "sizeBytes": stat.st_size,
+            "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+            "ext": path.suffix.lower().lstrip("."),
+        })
+    entries.sort(key=lambda entry: entry["modifiedAt"], reverse=True)
+    return entries

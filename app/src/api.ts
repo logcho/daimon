@@ -104,6 +104,49 @@ export const onVoiceModelDownload = (handler: (payload: VoiceModelDownloadPayloa
 
 export const listVaultFiles = (): Promise<VaultFile[]> => invoke<VaultFile[]>("list_notes");
 
+/** Every file in the vault, not just the notes — what the browser lists.
+ *
+ *  Separate from `listVaultFiles` rather than a flag on it: "note" still means
+ *  markdown to the agent's tools and to a paired phone, and this is the one
+ *  surface that wants the whole folder. */
+export const listVaultEntries = (): Promise<VaultFile[]> =>
+  invoke<VaultFile[]>("list_vault_entries");
+
+/** Write raw bytes — the import path, and how any non-markdown file is saved.
+ *
+ *  `writeVaultFile` cannot do this: it is backed by the server's markdown-only
+ *  write, which the bus op a phone writes through also shares. Bytes go over
+ *  as base64 because that is what survives the JSON hop intact. */
+export const writeVaultBytes = (name: string, bytes: Uint8Array): Promise<VaultFile> =>
+  invoke<VaultFile>("write_vault_bytes", { name, data: toBase64(bytes) });
+
+/** Show a vault file in Finder — the escape hatch for anything the panel
+ *  cannot preview, edit, or import. */
+export const revealInFinder = (name: string): Promise<void> =>
+  invoke<void>("reveal_in_finder", { name });
+
+/** Base64 without blowing the stack.
+ *
+ *  `String.fromCharCode(...bytes)` on a multi-megabyte file spreads millions
+ *  of arguments into one call and throws — chunking is what makes this work on
+ *  a real image rather than only on a test fixture. */
+function toBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/** The vault's absolute path on disk, for building asset-protocol URLs.
+ *
+ *  Media is streamed off disk by the webview rather than read through IPC —
+ *  the only path where range requests work, and therefore the only one where a
+ *  video can be seeked. Comes from the agent config so there is still exactly
+ *  one answer to where the vault is. */
+export const vaultRoot = (): Promise<string> => fetchConfig().then((c) => c.vault);
+
 export const readVaultFile = (name: string): Promise<string> =>
   invoke<{ content: string }>("read_note", { name }).then((n) => n.content);
 

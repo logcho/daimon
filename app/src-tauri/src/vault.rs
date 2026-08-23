@@ -29,8 +29,54 @@ pub fn vault_path() -> PathBuf {
     path
 }
 
+/// Resolve a UI-supplied vault-relative name to a real path, or refuse.
+///
+/// Same discipline as `agents/src/daimon_agent/vault.py:vault_file` — resolve
+/// first, then check containment, so `..` and symlinks cannot walk out. Local
+/// does not mean trusted: this name reaches the app from a webview, and the
+/// only thing standing between it and `open -R /etc/…` is this function.
+fn resolve_in_vault(name: &str) -> Result<PathBuf, String> {
+    let root = vault_path()
+        .canonicalize()
+        .map_err(|e| format!("vault is unreadable: {e}"))?;
+    let target = root
+        .join(name)
+        .canonicalize()
+        .map_err(|_| "no such file".to_string())?;
+    if target != root && !target.starts_with(&root) {
+        return Err("path is outside the vault".into());
+    }
+    Ok(target)
+}
+
+/// Show a vault file in Finder, selected in its folder.
+///
+/// The escape hatch for everything the panel cannot do itself — a file type it
+/// has no preview for, one too large to import, or just wanting the real thing
+/// on disk. `open -R` rather than a plugin: the app carries none, and this is
+/// one line of the one platform it ships on.
 #[tauri::command]
-pub async fn set_vault_path(
+pub async fn reveal_in_finder(name: String) -> Result<(), String> {
+    let target = resolve_in_vault(&name)?;
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("could not open Finder: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target;
+        Err("revealing a file is macOS-only".into())
+    }
+}
+
+#[tauri::command]
+pub async fn set_vault_path<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     path: String,
     state: tauri::State<'_, crate::agent::AgentManager>,
 ) -> Result<(), String> {
@@ -47,6 +93,18 @@ pub async fn set_vault_path(
     }
 
     workspace::set_env_var("DAIMON_VAULT_DIR", path)?;
+    // The asset scope was granted for the *old* directory at launch, and
+    // nothing restarts the app — without this, media in the new vault would
+    // fail to load until the next launch, silently and with the panel
+    // otherwise working. Scope grants are additive, so the stale entry is
+    // harmless; canonicalized for the same /var -> /private/var reason as the
+    // grant in lib.rs.
+    if let Ok(resolved) = candidate.canonicalize() {
+        use tauri::Manager as _;
+        if let Err(err) = app.asset_protocol_scope().allow_directory(&resolved, true) {
+            eprintln!("[daimon] could not scope the new vault for media: {err}");
+        }
+    }
     // The running server (if any) confined itself to the old directory at
     // spawn time — restart so the change takes effect on the next message
     // instead of silently continuing against the stale root.
@@ -98,6 +156,48 @@ mod tests {
         assert!(
             !message.contains("not allowed"),
             "set_vault_path should be ACL-allowed even though this call errors for other reasons, got: {message}"
+        );
+    }
+
+    /// Same reachability check for the file-browser commands. Each of these
+    /// needs its name in three places (build.rs, generate_handler!,
+    /// capabilities/default.json) and only the first is caught at compile
+    /// time — so this covers the other two.
+    #[test]
+    fn the_vault_file_commands_clear_the_acl() {
+        let app = mock_builder()
+            .invoke_handler(tauri::generate_handler![super::reveal_in_finder])
+            .build(mock_context(noop_assets()))
+            .expect("error while building test app");
+        let webview = WebviewWindowBuilder::new(&app, "pill", Default::default())
+            .build()
+            .expect("failed to build mock webview");
+
+        // No such file, so this errors — the point is which error.
+        let result = get_ipc_response(
+            &webview,
+            invoke_request("reveal_in_finder", serde_json::json!({ "name": "nope.png" })),
+        );
+        let message = result.unwrap_err();
+        let message = message.as_str().unwrap_or_default();
+        assert!(
+            !message.contains("not allowed"),
+            "reveal_in_finder should be ACL-allowed, got: {message}"
+        );
+    }
+
+    /// A name from the webview is untrusted even locally: `open -R` on a path
+    /// that resolved out of the vault would show the user any file on disk.
+    #[test]
+    fn reveal_refuses_a_path_outside_the_vault() {
+        let err = tauri::async_runtime::block_on(super::reveal_in_finder(
+            "../../../../etc/passwd".into(),
+        ))
+        .expect_err("an escaping path must be refused");
+        // Either it never resolved, or it resolved outside and was caught.
+        assert!(
+            err.contains("outside the vault") || err.contains("no such file"),
+            "unexpected error: {err}"
         );
     }
 }

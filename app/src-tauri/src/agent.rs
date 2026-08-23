@@ -337,6 +337,39 @@ pub async fn read_note(port: u16, name: &str) -> Result<serde_json::Value, Strin
     get_json(port, &format!("vault/{}", encode_path(name))).await
 }
 
+/// GET /vault?all=1 — every file in the vault, not just the notes.
+///
+/// A separate call rather than a flag on `list_notes`: markdown-only is what
+/// the agent's tools and a paired phone both mean by "note", and this is the
+/// one surface that wants the whole folder.
+pub async fn list_vault_entries(port: u16) -> Result<serde_json::Value, String> {
+    get_json(port, "vault?all=1").await
+}
+
+/// PUT /vaultfile/{name} — write raw bytes, any file type.
+///
+/// Not `/vault/{name}`: that route is markdown-only, and shared with the bus
+/// op a phone writes through. `application/octet-stream` rather than base64 so
+/// an imported file survives the trip byte-for-byte without being re-encoded
+/// at either end.
+pub async fn write_vault_bytes(
+    port: u16,
+    name: &str,
+    bytes: Vec<u8>,
+) -> Result<serde_json::Value, String> {
+    let resp = reqwest::Client::new()
+        .put(format!(
+            "http://127.0.0.1:{port}/vaultfile/{}",
+            encode_path(name)
+        ))
+        .header("content-type", "application/octet-stream")
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    unwrap_vault_response(resp, "could not write the file").await
+}
+
 pub async fn delete_note(port: u16, name: &str) -> Result<serde_json::Value, String> {
     delete_json(port, &format!("vault/{}", encode_path(name))).await
 }
