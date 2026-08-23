@@ -700,3 +700,62 @@ async def test_a_closed_socket_stops_hearing_about_terminals(client: TestClient)
         if not client.app["terminals"]._watchers:
             break
     assert not client.app["terminals"]._watchers
+
+
+async def _quiet_since(ws) -> list[dict]:
+    """Frames the server had queued, using one round trip as a fence: whatever
+    it had to say arrives before the answer to a ping sent after it."""
+    await ws.send_json({"op": "ping", "op_id": "fence"})
+    seen = []
+    while True:
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        if frame.get("kind") == "ack" and frame.get("op_id") == "fence":
+            return [f for f in seen if f.get("control") == "sessions_changed"]
+        seen.append(frame)
+
+
+async def test_a_conversation_started_elsewhere_is_announced(client: TestClient) -> None:
+    """A client cannot attach to a session id it has never seen, so a new
+    conversation has to be pushed rather than discovered."""
+    from daimon_agent.events import step_event, user_event
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "ping")  # the socket is up and watching
+
+        emit = client.app["bus"].publisher("started-on-a-phone")
+        emit(user_event("hello from somewhere else"))
+
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        assert frame["control"] == "sessions_changed"
+        assert frame["session"] == "started-on-a-phone"
+
+
+async def test_only_the_first_prompt_announces_a_session(client: TestClient) -> None:
+    """Otherwise every turn is a "new session" and clients re-read the
+    directory for the rest of time."""
+    from daimon_agent.events import done_event, user_event
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "ping")
+        emit = client.app["bus"].publisher("chatty")
+        emit(user_event("first"))
+        await asyncio.wait_for(ws.receive_json(), timeout=5)  # the announcement
+
+        emit(done_event("answered"))
+        emit(user_event("second"))
+        emit(done_event("answered again"))
+
+        # A round trip as a fence: anything the server had to say arrives
+        # before its answer to this. Sent raw, because `_call` would swallow
+        # the ack we are using as the marker.
+        assert await _quiet_since(ws) == []
+
+
+async def test_merely_attaching_does_not_invent_a_session(client: TestClient) -> None:
+    """A channel exists as soon as somebody attaches; a conversation does not
+    exist until somebody says something."""
+    async with client.ws_connect("/bus/ws") as watcher, client.ws_connect("/bus/ws") as other:
+        await _call(watcher, "ping")
+        await _call(other, "attach", session="empty-one")
+
+        assert await _quiet_since(watcher) == []

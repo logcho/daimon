@@ -372,6 +372,17 @@ export default function App() {
   // transcript the snapshot brings with it.
   useEffect(() => {
     const unlistenControl = onBusControl((frame) => {
+      if (frame.control === "sessions_changed") {
+        // Adopt exactly the session that was announced, rather than re-reading
+        // the directory: closing a chat tab is a UI decision that leaves the
+        // conversation on the server, so a full restore would resurrect every
+        // tab the user had deliberately closed.
+        const sid = String(frame.session ?? "");
+        if (!sid || sid in sessionsRef.current) return;
+        commitSessions((prev) => ({ ...prev, [sid]: [] }));
+        setSessionOrder((order) => (order.includes(sid) ? order : [...order, sid]));
+        return;
+      }
       if (frame.control === "terminals_changed") {
         // A shell opened or closed somewhere else. Re-read the list rather
         // than trusting the delta: it is one round trip and it converges even

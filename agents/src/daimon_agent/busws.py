@@ -95,6 +95,14 @@ def make_bus_ws_handler(app: web.Application):
             send(_frame("control", control="terminals_changed", change=change, id=term_id))
 
         unwatch_terminals = terminals.watch(on_terminal_change)
+
+        # And about conversations beginning, for the same reason: a session
+        # started on another device is not in any list this client already
+        # holds, and it cannot attach to an id it has never seen.
+        def on_session_started(session_id: str) -> None:
+            send(_frame("control", control="sessions_changed", session=session_id))
+
+        unwatch_sessions = bus.watch_sessions(on_session_started)
         # One outbound queue and one writer: aiohttp forbids concurrent sends,
         # and session pumps and terminal callbacks both produce frames. The
         # queue is also what lets a synchronous PTY read callback hand work to
@@ -596,6 +604,7 @@ def make_bus_ws_handler(app: web.Application):
                 await _drop(att)
             attachments.clear()
             unwatch_terminals()
+            unwatch_sessions()
             if watching is not None:
                 watching()
                 watching = None

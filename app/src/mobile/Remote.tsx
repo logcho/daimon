@@ -104,7 +104,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           setBusy(Boolean(frame.busy));
         } else if (frame.control === "term_snapshot") {
           termSinks.current.get(String(frame.id))?.(decodeSnapshot(frame.data));
-        } else if (frame.control === "terminals_changed") {
+        } else if (frame.control === "sessions_changed" || frame.control === "terminals_changed") {
           const current = screenRef.current;
           if (current.view === "list") void refreshListsRef.current?.(current.workspace);
         } else if (frame.control === "workspace_lost") {
@@ -578,7 +578,11 @@ function SessionView({
   const [draft, setDraft] = useState("");
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      {/* A flex column, not a plain scrolling block: MessageList centres its
+          empty state with `flex-1`, which does nothing outside a flex parent —
+          so "Ask Daimon anything" collapsed to its own height and sat at the
+          top of the screen. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         <MessageList messages={messages} />
       </div>
       {todos.length > 0 && (
