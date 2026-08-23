@@ -67,7 +67,7 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
         const current = screenRef.current;
         if (current.view !== "session" || current.sessionId !== session) return;
         const agentEvent = event as AgentEvent;
-        const type = (event as { type: string }).type;
+        const type = agentEvent.type;
 
         // `ask` and `ask_resolved` are session state, not message state — the
         // same split `applyTodoEvent` makes, and the same one cli/live.py

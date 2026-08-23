@@ -20,6 +20,7 @@ is yours end to end.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,19 @@ except ImportError:  # pragma: no cover - exercised by not installing the extra
 
 #: Push services reject anything long, and we deliberately send almost nothing.
 TTL_S = 600
+
+#: The VAPID `sub` claim: who to contact about this application server.
+#:
+#: It must be a `mailto:` — py_vapid refuses anything else — and the domain has
+#: to look routable. `mailto:daimon@localhost` seems reasonable for software
+#: that only ever runs on your own machine, and Apple rejects it outright with
+#: `403 BadJwtToken`, which surfaces as notifications silently never arriving.
+#:
+#: Nothing is ever sent to this address; it is an identifier in a signed token.
+#: Deliberately not the user's real address — that would hand it to Apple and
+#: Google for no benefit. Override with DAIMON_PUSH_SUBJECT if you want a
+#: contact that reaches you.
+DEFAULT_SUBJECT = "mailto:daimon@example.com"
 
 
 @dataclass
@@ -68,9 +82,9 @@ class PushStore:
     it is written once and reused.
     """
 
-    def __init__(self, state_dir: Path, *, subject: str = "mailto:daimon@localhost") -> None:
+    def __init__(self, state_dir: Path, *, subject: str | None = None) -> None:
         self.state_dir = state_dir
-        self.subject = subject
+        self.subject = subject or os.environ.get("DAIMON_PUSH_SUBJECT") or DEFAULT_SUBJECT
         self._subs: dict[str, Subscription] = {}
         self._load()
 

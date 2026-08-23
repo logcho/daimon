@@ -159,3 +159,34 @@ describe("sessionTotals", () => {
     expect(sessionTotals(messages).usage.costUsd).toBeNull();
   });
 });
+
+
+describe("questions", () => {
+  it("keeps an ask out of the transcript", () => {
+    // A question is session state — something the session is *waiting on* —
+    // not a line of history. Both clients render it above the composer.
+    const before = fold([{ type: "user", text: "do the thing" }]);
+    const after = applyEvent(before, ev({ type: "ask", id: "a1", kind: "plan", question: "ok?", options: [] }));
+    expect(after).toBe(before);
+  });
+
+  it("keeps ask_resolved out of the transcript too", () => {
+    const before = fold([{ type: "user", text: "do the thing" }]);
+    const after = applyEvent(before, ev({ type: "ask_resolved", id: "a1", answer: "yes" }));
+    expect(after).toBe(before);
+  });
+
+  it("lets the answered turn carry on in the same exchange", () => {
+    // Resuming continues the turn the question interrupted; it must not open
+    // a second one.
+    const messages = fold([
+      { type: "user", text: "do the thing" },
+      { type: "ask", id: "a1", kind: "plan", question: "ok?", options: [] },
+      { type: "ask_resolved", id: "a1", answer: "Go ahead" },
+      { type: "assistant_delta", text: "doing it" },
+      { type: "done", result: "done it" },
+    ]);
+    expect(messages).toHaveLength(2);
+    expect(messages[1].content).toBe("done it");
+  });
+});

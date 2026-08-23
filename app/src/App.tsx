@@ -13,6 +13,7 @@ import {
 import { applyEvent, applyTodoEvent, isSessionBusy } from "./sessionEvents";
 import { bus, onBusControl, onBusReconnect, onSessionEvent } from "./lib/bus";
 import { collapseToPill, expandToPanel } from "./lib/window";
+import type { AskPrompt } from "./components/AskPrompt";
 import type {
   AgentEvent,
   AgentStatus,
@@ -43,12 +44,20 @@ export default function App() {
   // state: attaching is a side effect that must happen once per session, and
   // re-rendering on it would loop.
   const attachedRef = useRef<Set<string>>(new Set());
+  // Read by answerAsk, which is registered once and would otherwise close over
+  // the first render's value.
+  const sessionAsksRef = useRef<Record<string, AskPrompt | null>>({});
   // Todos are session state, not message state — they describe what the agent
   // is doing *now*. Attached to a message they vanished the moment the next
   // turn started, which is exactly when a checklist earns its keep. Kept as
   // its own map rather than folded into `sessions` so `applyEvent` stays a
   // pure function over messages.
   const [sessionTodos, setSessionTodos] = useState<Record<string, TodoItem[]>>({});
+  // The question a session is parked on, if any. Session state rather than
+  // message state — the same split todos get, and the same one cli/live.py
+  // makes: a question is something the session is waiting on, not a line in
+  // the transcript.
+  const [sessionAsks, setSessionAsks] = useState<Record<string, AskPrompt | null>>({});
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
@@ -109,6 +118,7 @@ export default function App() {
   // — per-session concurrency is the point — while the pill pulses when any
   // session is working OR the server reports global busy (CLI turns, queued
   // turns, etc.). The local check gives instant reactivity between polls.
+  sessionAsksRef.current = sessionAsks;
   const messages = activeSessionId ? (sessions[activeSessionId] ?? []) : [];
   const todos = activeSessionId ? (sessionTodos[activeSessionId] ?? []) : [];
   const busy = isSessionBusy(messages);
@@ -302,6 +312,12 @@ export default function App() {
     [closeChat],
   );
 
+  const answerAsk = useCallback(async (sid: string, answer: string | string[]) => {
+    const ask = sessionAsksRef.current[sid];
+    setSessionAsks((prev) => ({ ...prev, [sid]: null }));
+    await bus().send("answer", { session: sid, ask_id: ask?.id, answer, by: "desktop" });
+  }, []);
+
   const newChat = async () => {
     const before = sessionOrder.length;
     if (await ensureSession()) {
@@ -355,6 +371,19 @@ export default function App() {
       // Unknown/closed session ids are dropped — the turn still runs server-
       // side, this UI just isn't showing it anymore.
       if (!(sid in sessionsRef.current)) return;
+
+      // `ask` and `ask_resolved` are session state, not message state.
+      if (event.type === "ask") {
+        setSessionAsks((prev) => ({ ...prev, [sid]: event as unknown as AskPrompt }));
+        if (!expandedRef.current) setUnreadCompletion(true);
+        return;
+      }
+      if (event.type === "ask_resolved") {
+        // Answered — possibly on the phone. Take the prompt down rather than
+        // leaving it answering a turn that already resumed.
+        setSessionAsks((prev) => ({ ...prev, [sid]: null }));
+        return;
+      }
       commitSessions((prev) => ({ ...prev, [sid]: applyEvent(prev[sid], event) }));
       if (event.type === "todo") {
         setSessionTodos((prev) => ({ ...prev, [sid]: applyTodoEvent(prev[sid] ?? [], event) }));
@@ -420,6 +449,9 @@ export default function App() {
       const events = (frame.events ?? []) as AgentEvent[];
       commitSessions((prev) => ({ ...prev, [sid]: events.reduce(applyEvent, [] as ChatMessage[]) }));
       setSessionTodos((prev) => ({ ...prev, [sid]: (frame.todos ?? []) as TodoItem[] }));
+      // A session parked on a question renders it immediately: the event that
+      // carried it may have been hours ago.
+      setSessionAsks((prev) => ({ ...prev, [sid]: (frame.pending_ask as AskPrompt | null) ?? null }));
     });
     return unlistenControl;
   }, [commitSessions, restoreTerminals, closeChat]);
@@ -429,7 +461,10 @@ export default function App() {
     for (const sid of sessionOrder) {
       if (attachedRef.current.has(sid)) continue;
       attachedRef.current.add(sid);
-      void bus().send("attach", { session: sid }).then((ack) => {
+      // `wants_ask`: this window can show a question and answer it. The agent
+      // is only offered the ask tools when somebody attached says so, which is
+      // why a plan never appeared here — it was never asked for.
+      void bus().send("attach", { session: sid, wants_ask: true }).then((ack) => {
         if (cancelled || !ack.ok) attachedRef.current.delete(sid);
       });
     }
@@ -444,7 +479,7 @@ export default function App() {
     attachedRef.current.clear();
     for (const sid of sessions) {
       attachedRef.current.add(sid);
-      void bus().send("attach", { session: sid });
+      void bus().send("attach", { session: sid, wants_ask: true });
     }
     // The server may have gained terminals while we were away — a phone can
     // open one, and the desktop should not have to be restarted to see it.
@@ -599,6 +634,10 @@ export default function App() {
           config={config}
           onCloseChat={closeChat}
           onForgetChat={forgetChat}
+          ask={activeSessionId ? (sessionAsks[activeSessionId] ?? null) : null}
+          onAnswerAsk={(answer) => {
+            if (activeSessionId) void answerAsk(activeSessionId, answer);
+          }}
           onAddChat={newChat}
           messages={messages}
           todos={todos}

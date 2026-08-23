@@ -117,11 +117,10 @@ export function applyEvent(messages: ChatMessage[], event: AgentEvent): ChatMess
   // assistant deltas that follow fold into the *previous* turn's bubble: the
   // reply appears to overwrite an older message, with the question that
   // prompted it nowhere on screen.
-  if ((event as { type: string }).type === "user") {
-    const text = String((event as unknown as { text?: string }).text ?? "");
+  if (event.type === "user") {
     return [
       ...messages,
-      { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false },
+      { id: crypto.randomUUID(), role: "user", content: event.text, steps: [], thinking: false },
       { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: false },
     ];
   }

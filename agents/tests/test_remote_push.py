@@ -320,3 +320,21 @@ async def test_a_real_ask_with_nobody_attached_reaches_the_notifier(
     (title, body) = notified[0]
     assert "waiting on you" in title
     assert "Which?" not in f"{title} {body}"  # the question never leaves the machine
+
+
+def test_the_vapid_subject_is_one_a_push_service_will_accept(tmp_path: Path) -> None:
+    """Apple answers `403 BadJwtToken` to a `sub` whose domain does not look
+    routable — `mailto:daimon@localhost` among them — and the only symptom is
+    notifications never arriving. py_vapid additionally refuses anything that
+    is not a mailto, so an https URL is not a way out.
+    """
+    subject = PushStore(tmp_path / "remote").subject
+    assert subject.startswith("mailto:")
+    local, _, domain = subject.removeprefix("mailto:").partition("@")
+    assert local and "." in domain, subject
+    assert domain not in ("localhost", "local"), subject
+
+
+def test_the_subject_can_be_pointed_at_a_real_contact(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DAIMON_PUSH_SUBJECT", "mailto:someone@example.org")
+    assert PushStore(tmp_path / "remote").subject == "mailto:someone@example.org"

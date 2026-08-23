@@ -145,7 +145,31 @@ export interface LiveFrameEvent {
   data: string;
 }
 
+/** The prompt that opened a turn.
+ *
+ *  Carried on the stream because a session can be driven from more than one
+ *  device: a client replaying, or watching, a conversation it did not start
+ *  needs both halves of it. */
+export interface UserEvent {
+  type: "user";
+  text: string;
+  mode?: string;
+  origin?: string;
+}
+
+/** Somebody answered the question a session was parked on — possibly on
+ *  another device. Not the answer reaching the agent (that is POST /resume);
+ *  this is so every other client takes its prompt down. */
+export interface AskResolvedEvent {
+  type: "ask_resolved";
+  id: string;
+  answer: unknown;
+  by?: string;
+}
+
 export type AgentEvent =
+  | UserEvent
+  | AskResolvedEvent
   | StepEvent
   | AssistantDeltaEvent
   | UsageEvent
