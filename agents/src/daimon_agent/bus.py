@@ -208,18 +208,20 @@ class EventBus:
         #: cannot answer "did anything, anywhere, start waiting on me?" —
         #: you would have to know which sessions exist before they do.
         self._observers: set[Callable[[str, int, dict], None]] = set()
-        #: Told when a conversation begins. Distinct from `_observers`, which
-        #: sees every event including each streamed token: a client that only
-        #: wants to know a new session exists should not pay per delta for it.
-        self._session_watchers: set[Callable[[str], None]] = set()
+        #: Told when a conversation begins or is forgotten. Distinct from
+        #: `_observers`, which sees every event including each streamed token:
+        #: a client that only wants to know which sessions exist should not
+        #: pay per delta for it.
+        self._session_watchers: set[Callable[[str, str], None]] = set()
 
     def observe(self, fn: Callable[[str, int, dict], None]) -> Callable[[], None]:
         """Watch every session at once. Returns an unsubscribe."""
         self._observers.add(fn)
         return lambda: self._observers.discard(fn)
 
-    def watch_sessions(self, fn: Callable[[str], None]) -> Callable[[], None]:
-        """Be told when a conversation begins. Returns an unsubscribe."""
+    def watch_sessions(self, fn: Callable[[str, str], None]) -> Callable[[], None]:
+        """Be told when a conversation begins or is forgotten, as
+        `fn(change, session_id)`. Returns an unsubscribe."""
         self._session_watchers.add(fn)
         return lambda: self._session_watchers.discard(fn)
 
@@ -247,11 +249,7 @@ class EventBus:
             was_started = chan.started
             seq = chan.publish(event, sink=self.sink)
             if chan.started and not was_started:
-                for watcher in tuple(self._session_watchers):
-                    try:
-                        watcher(session_id)
-                    except Exception:
-                        pass  # a watcher must never be able to break a turn
+                self._announce_session("started", session_id)
             for observer in tuple(self._observers):
                 try:
                     observer(session_id, seq, event)
@@ -273,6 +271,13 @@ class EventBus:
             chan.detach(sub)
         sub.close()
 
+    def _announce_session(self, change: str, session_id: str) -> None:
+        for watcher in tuple(self._session_watchers):
+            try:
+                watcher(change, session_id)
+            except Exception:
+                pass  # a watcher must never be able to break a turn
+
     def release(self, session_id: str) -> None:
         """Drop a channel entirely — DELETE /sessions/{id}. Subscribers are
         closed so their readers unwind rather than hanging on a channel that
@@ -283,6 +288,10 @@ class EventBus:
         for sub in tuple(chan.subs):
             sub.close()
         chan.subs.clear()
+        # Only a conversation that existed is worth reporting gone. Releasing
+        # a channel nobody ever spoke in is bookkeeping, not news.
+        if chan.started:
+            self._announce_session("removed", session_id)
 
     def channels(self) -> Iterable[SessionChannel]:
         return tuple(self._channels.values())

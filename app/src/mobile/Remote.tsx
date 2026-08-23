@@ -104,6 +104,16 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           setBusy(Boolean(frame.busy));
         } else if (frame.control === "term_snapshot") {
           termSinks.current.get(String(frame.id))?.(decodeSnapshot(frame.data));
+        } else if (frame.control === "sessions_changed" && frame.change === "removed") {
+          // Forgotten somewhere else. If we are looking at it, there is
+          // nothing left to look at.
+          const current = screenRef.current;
+          if (current.view === "session" && current.sessionId === frame.session) {
+            setScreen({ view: "list", workspace: current.workspace });
+            void refreshListsRef.current?.(current.workspace);
+          } else if (current.view === "list") {
+            void refreshListsRef.current?.(current.workspace);
+          }
         } else if (frame.control === "sessions_changed" || frame.control === "terminals_changed") {
           const current = screenRef.current;
           if (current.view === "list") void refreshListsRef.current?.(current.workspace);

@@ -287,6 +287,21 @@ export default function App() {
     [commitSessions, ensureSession],
   );
 
+  /** Forget a conversation everywhere, rather than just closing its tab.
+   *
+   *  The tab goes on the announcement the server sends back, not here: that is
+   *  the same path a deletion from a phone takes, so there is one behaviour
+   *  rather than a local shortcut that happens to look the same. */
+  const forgetChat = useCallback(
+    async (id: string) => {
+      const ack = await bus().send("session.delete", { session: id });
+      // Refused while a turn is running — deleting underneath one would wipe
+      // the history and have the turn write it straight back.
+      if (!ack.ok) closeChat(id);
+    },
+    [closeChat],
+  );
+
   const newChat = async () => {
     const before = sessionOrder.length;
     if (await ensureSession()) {
@@ -372,6 +387,13 @@ export default function App() {
   // transcript the snapshot brings with it.
   useEffect(() => {
     const unlistenControl = onBusControl((frame) => {
+      if (frame.control === "sessions_changed" && frame.change === "removed") {
+        // Forgotten, here or elsewhere. Drop the tab: leaving one pointed at a
+        // conversation the server no longer has is worse than it vanishing.
+        const sid = String(frame.session ?? "");
+        if (sid in sessionsRef.current) closeChat(sid);
+        return;
+      }
       if (frame.control === "sessions_changed") {
         // Adopt exactly the session that was announced, rather than re-reading
         // the directory: closing a chat tab is a UI decision that leaves the
@@ -400,7 +422,7 @@ export default function App() {
       setSessionTodos((prev) => ({ ...prev, [sid]: (frame.todos ?? []) as TodoItem[] }));
     });
     return unlistenControl;
-  }, [commitSessions, restoreTerminals]);
+  }, [commitSessions, restoreTerminals, closeChat]);
 
   useEffect(() => {
     let cancelled = false;
@@ -576,6 +598,7 @@ export default function App() {
           onSelectChat={setActiveSessionId}
           config={config}
           onCloseChat={closeChat}
+          onForgetChat={forgetChat}
           onAddChat={newChat}
           messages={messages}
           todos={todos}

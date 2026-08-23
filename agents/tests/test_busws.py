@@ -727,7 +727,7 @@ async def test_a_conversation_started_elsewhere_is_announced(client: TestClient)
 
         frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
         assert frame["control"] == "sessions_changed"
-        assert frame["session"] == "started-on-a-phone"
+        assert (frame["change"], frame["session"]) == ("started", "started-on-a-phone")
 
 
 async def test_only_the_first_prompt_announces_a_session(client: TestClient) -> None:
@@ -759,3 +759,29 @@ async def test_merely_attaching_does_not_invent_a_session(client: TestClient) ->
         await _call(other, "attach", session="empty-one")
 
         assert await _quiet_since(watcher) == []
+
+
+async def test_forgetting_a_conversation_is_announced(client: TestClient) -> None:
+    """The mirror of announcing one starting: a client holding a tab for a
+    session that no longer exists has no way to find out."""
+    client.app["graph"].router._pro.script = [AIMessage(content="done")]
+    await (await client.post("/task", json={
+        "instruction": "some work", "session_id": "doomed",
+    })).read()
+
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "ping")
+        resp = await client.delete("/sessions/doomed")
+        assert resp.status == 200
+
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        assert frame["control"] == "sessions_changed"
+        assert (frame["change"], frame["session"]) == ("removed", "doomed")
+
+
+async def test_forgetting_a_session_nobody_used_is_not_news(client: TestClient) -> None:
+    """Releasing a channel nobody ever spoke in is bookkeeping."""
+    async with client.ws_connect("/bus/ws") as ws:
+        await _call(ws, "attach", session="never-used")
+        await client.delete("/sessions/never-used")
+        assert await _quiet_since(ws) == []
