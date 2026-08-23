@@ -35,7 +35,18 @@ function ConfirmButton({ label, onConfirm }: { label: string; onConfirm: () => v
   );
 }
 
-export function Notes({ bus, workspace }: { bus: BusClient; workspace: string }) {
+export function Notes({
+  bus,
+  workspace,
+  onVaultChanged,
+}: {
+  bus: BusClient;
+  workspace: string;
+  /** Registers this view's refresh so the shell can call it when the server
+   *  says a note changed — the socket's callbacks are registered once, and
+   *  cannot reach into a component that mounted later. */
+  onVaultChanged: (refresh: (() => void) | null) => void;
+}) {
   const [notes, setNotes] = useState<VaultFile[]>([]);
   const [open, setOpen] = useState<{ name: string; content: string } | null>(null);
   const [editing, setEditing] = useState(false);
@@ -54,6 +65,11 @@ export function Notes({ bus, workspace }: { bus: BusClient; workspace: string })
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    onVaultChanged(() => void refresh());
+    return () => onVaultChanged(null);
+  }, [onVaultChanged, refresh]);
 
   async function createNote() {
     const trimmed = newName.trim();

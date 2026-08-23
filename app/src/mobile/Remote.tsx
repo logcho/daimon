@@ -45,6 +45,14 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
   // The socket callbacks are registered once, so they reach the current
   // refreshLists through a ref rather than closing over the first render's.
   const refreshListsRef = useRef<((w: WorkspaceInfo) => Promise<void>) | null>(null);
+  const refreshNotesRef = useRef<(() => void) | null>(null);
+
+  // Hoisted rather than written inline in the JSX: Notes renders
+  // conditionally, and a hook called inside that branch would break the rules
+  // of hooks the first time the view changed.
+  const registerNotesRefresh = useCallback((refresh: (() => void) | null) => {
+    refreshNotesRef.current = refresh;
+  }, []);
 
   const routeTermData = useCallback((id: string, sink: ((b: Uint8Array) => void) | null) => {
     if (sink) termSinks.current.set(id, sink);
@@ -104,6 +112,8 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
           setBusy(Boolean(frame.busy));
         } else if (frame.control === "term_snapshot") {
           termSinks.current.get(String(frame.id))?.(decodeSnapshot(frame.data));
+        } else if (frame.control === "vault_changed") {
+          refreshNotesRef.current?.();
         } else if (frame.control === "sessions_changed" && frame.change === "removed") {
           // Forgotten somewhere else. If we are looking at it, there is
           // nothing left to look at.
@@ -336,7 +346,11 @@ export function Remote({ onUnauthorized }: { onUnauthorized: () => void }) {
       )}
 
       {screen.view === "notes" && busRef.current && (
-        <Notes bus={busRef.current} workspace={screen.workspace.key} />
+        <Notes
+          bus={busRef.current}
+          workspace={screen.workspace.key}
+          onVaultChanged={registerNotesRefresh}
+        />
       )}
 
       {screen.view === "settings" && busRef.current && (

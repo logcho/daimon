@@ -104,6 +104,13 @@ def make_bus_ws_handler(app: web.Application):
                         change=change, session=session_id))
 
         unwatch_sessions = bus.watch_sessions(on_session_change)
+
+        # And about notes, so a list open on one device does not go stale when
+        # another writes or deletes one.
+        def on_vault_change(change: str, name: str) -> None:
+            send(_frame("control", control="vault_changed", change=change, name=name))
+
+        unwatch_vault = app["watch_vault"](on_vault_change)
         # One outbound queue and one writer: aiohttp forbids concurrent sends,
         # and session pumps and terminal callbacks both produce frames. The
         # queue is also what lets a synchronous PTY read callback hand work to
@@ -386,32 +393,7 @@ def make_bus_ws_handler(app: web.Application):
                     "content": path.read_text(encoding="utf-8", errors="replace")}
 
         async def do_vault_write(op: dict) -> dict:
-            name = str(op.get("name") or "")
-            content = op.get("content")
-            if not isinstance(content, str):
-                return {"ok": False, "error": "content must be a string"}
-            try:
-                path = vault_file(app["settings"], name)
-            except ValueError as exc:
-                return {"ok": False, "error": str(exc)}
-            # Only markdown: the listing is rglob("*.md"), so anything else
-            # would be written and then never shown again.
-            if path.suffix.lower() != ".md":
-                return {"ok": False, "error": "note names must end in .md"}
-            if path.is_dir():
-                return {"ok": False, "error": "that name is a directory"}
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(content, encoding="utf-8")
-            except OSError as exc:
-                return {"ok": False, "error": str(exc)}
-            memory_store = app["memory"]
-            if memory_store is not None:
-                # Best-effort, as the HTTP path is: a failed reindex costs
-                # recall accuracy, not the user's note.
-                with contextlib.suppress(Exception):
-                    memory_store.index_note(name, content)
-            return {"ok": True, "name": name}
+            return app["write_note"](str(op.get("name") or ""), op.get("content"))
 
         async def do_vault_delete(op: dict) -> dict:
             return app["delete_note"](str(op.get("name") or ""))
@@ -606,6 +588,7 @@ def make_bus_ws_handler(app: web.Application):
             attachments.clear()
             unwatch_terminals()
             unwatch_sessions()
+            unwatch_vault()
             if watching is not None:
                 watching()
                 watching = None

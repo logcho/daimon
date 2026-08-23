@@ -12,6 +12,7 @@ import {
   readVaultFile,
   writeVaultFile,
 } from "../api";
+import { onBusControl } from "../lib/bus";
 import { allFolderPaths, basename, buildTree, joinPath, parentFolder } from "../noteTree";
 import type { VaultFile } from "../types";
 import { findBacklinks, findWikiLinks, resolveWikiLink, wikiLinkToNoteName } from "../wikilinks";
@@ -191,6 +192,19 @@ export function VaultPanel() {
       // targets; the notes themselves still render from their own paths.
       .catch(() => setFolders([]));
   }, []);
+
+  // A note written or deleted elsewhere — by a phone, or by the agent
+  // mid-turn — changes what this list should show. Re-read rather than
+  // applying the change: the listing is cheap next to getting it wrong, which
+  // is the same reasoning the folder-move path uses.
+  useEffect(
+    () =>
+      onBusControl((frame) => {
+        if (frame.control !== "vault_changed") return;
+        void listVaultFiles().then(setFiles).catch(() => {});
+      }),
+    [],
+  );
 
   useEffect(() => {
     listVaultFiles()

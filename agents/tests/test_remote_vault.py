@@ -186,3 +186,57 @@ async def test_deleting_a_note_that_is_not_there_says_so(client: TestClient) -> 
         ack = await _call(ws, "vault.delete", name="imaginary.md")
         assert ack["ok"] is False
         assert "no such note" in ack["error"]
+
+
+# --- staying in step ---------------------------------------------------------
+
+async def test_writing_a_note_is_announced_to_other_clients(client: TestClient) -> None:
+    """A client holding a list of notes cannot discover that somebody else
+    changed one."""
+    async with client.ws_connect("/bus/ws") as watcher, client.ws_connect("/bus/ws") as other:
+        await _call(watcher, "vault.list")  # the socket is up
+        await _call(other, "vault.write", name="shared.md", content="hello")
+
+        frame = await asyncio.wait_for(watcher.receive_json(), timeout=5)
+        assert frame["control"] == "vault_changed"
+        assert (frame["change"], frame["name"]) == ("written", "shared.md")
+
+
+async def test_deleting_a_note_is_announced(client: TestClient) -> None:
+    (client.app["settings"].vault_dir / "doomed.md").write_text("bye")
+
+    async with client.ws_connect("/bus/ws") as watcher, client.ws_connect("/bus/ws") as other:
+        await _call(watcher, "vault.list")
+        await _call(other, "vault.delete", name="doomed.md")
+
+        frame = await asyncio.wait_for(watcher.receive_json(), timeout=5)
+        assert (frame["change"], frame["name"]) == ("deleted", "doomed.md")
+
+
+async def test_a_note_written_over_http_is_announced_too(client: TestClient) -> None:
+    """The agent's own writes go through the same helper, so a note it saves
+    mid-turn shows up without a refresh."""
+    async with client.ws_connect("/bus/ws") as watcher:
+        await _call(watcher, "vault.list")
+        resp = await client.put("/vault/from-http.md", json={"content": "written by a route"})
+        assert resp.status == 200
+
+        frame = await asyncio.wait_for(watcher.receive_json(), timeout=5)
+        assert (frame["change"], frame["name"]) == ("written", "from-http.md")
+
+
+async def test_a_refused_write_announces_nothing(client: TestClient) -> None:
+    async with client.ws_connect("/bus/ws") as watcher, client.ws_connect("/bus/ws") as other:
+        await _call(watcher, "vault.list")
+        ack = await _call(other, "vault.write", name="../escaped.md", content="nope")
+        assert ack["ok"] is False
+
+        # A fence: anything the server had to say arrives before this answer.
+        await watcher.send_json({"op": "ping", "op_id": "fence"})
+        seen = []
+        while True:
+            frame = await asyncio.wait_for(watcher.receive_json(), timeout=5)
+            if frame.get("kind") == "ack":
+                break
+            seen.append(frame)
+        assert seen == []

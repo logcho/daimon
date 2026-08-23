@@ -1253,51 +1253,74 @@ async def create_app(
             "content": path.read_text(encoding="utf-8", errors="replace"),
         })
 
-    async def vault_write_handler(request: web.Request) -> web.Response:
-        """PUT /vault/{name} — create or overwrite a note, and reindex it.
+    # Told when a note is written or removed. Same shape as the terminal and
+    # session watchers, and for the same reason: a client holding a list of
+    # notes cannot discover that somebody else changed one.
+    vault_watchers: set = set()
 
-        One endpoint for both create and update: the vault is a directory of
-        files, so "create" is just a write to a name that doesn't exist yet,
-        and making the client pick between two endpoints would only invite
-        getting it wrong. Parent directories are created so `folder/note.md`
-        works without a separate mkdir step.
+    def watch_vault(fn):
+        vault_watchers.add(fn)
+        return lambda: vault_watchers.discard(fn)
+
+    def announce_vault(change: str, name: str) -> None:
+        for watcher in tuple(vault_watchers):
+            try:
+                watcher(change, name)
+            except Exception:
+                pass  # a watcher must never be able to break a write
+
+    app["watch_vault"] = watch_vault
+
+    def write_note(name: str, content: object) -> dict:
+        """Create or overwrite a note, and keep recall in step with it.
+
+        One function for both create and update: the vault is a directory of
+        files, so "create" is a write to a name that does not exist yet, and
+        making a caller choose between two paths only invites getting it wrong.
         """
-        name = request.match_info.get("name", "")
-        try:
-            body = await request.json()
-        except json.JSONDecodeError:
-            return web.json_response({"error": "invalid JSON"}, status=400)
-        content = body.get("content")
         if not isinstance(content, str):
-            return web.json_response({"error": "content must be a string"}, status=400)
+            return {"ok": False, "error": "content must be a string"}
         try:
-            path = vault_file(request.app["settings"], name)
+            path = vault_file(app["settings"], name)
         except ValueError as exc:
-            return web.json_response({"error": str(exc)}, status=400)
-        # Only markdown: the listing is `rglob("*.md")`, so anything else
-        # would be written but never shown again.
+            return {"ok": False, "error": str(exc)}
+        # Only markdown: the listing is a glob for it, so anything else would
+        # be written and then never shown again.
         if path.suffix.lower() != ".md":
-            return web.json_response({"error": "note names must end in .md"}, status=400)
+            return {"ok": False, "error": "note names must end in .md"}
         if path.is_dir():
-            return web.json_response({"error": "that name is a directory"}, status=400)
+            return {"ok": False, "error": "that name is a directory"}
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
         except OSError as exc:
-            return web.json_response({"error": str(exc)}, status=500)
-        memory_store = request.app["memory"]
+            return {"ok": False, "error": str(exc)}
+        memory_store = app["memory"]
         if memory_store is not None:
-            # Best-effort, exactly as the delete path: a failed reindex costs
-            # recall accuracy, not the user's note.
+            # Best-effort, as the delete path is: a failed reindex costs recall
+            # accuracy, not the user's note.
             with contextlib.suppress(Exception):
                 memory_store.index_note(name, content)
+        announce_vault("written", name)
         stat = path.stat()
-        return web.json_response({
+        return {
             "ok": True,
             "name": name,
             "sizeBytes": stat.st_size,
             "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
-        })
+        }
+
+    app["write_note"] = write_note
+
+    async def vault_write_handler(request: web.Request) -> web.Response:
+        """PUT /vault/{name} — see `write_note`."""
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        result = write_note(request.match_info.get("name", ""), body.get("content"))
+        return web.json_response(result, status=200 if result["ok"] else 400)
+
 
     def delete_note(name: str) -> dict:
         """Remove a note and its memory index entry.
@@ -1319,6 +1342,7 @@ async def create_app(
         if memory_store is not None:
             with contextlib.suppress(Exception):
                 memory_store.delete_note(name)
+        announce_vault("deleted", name)
         return {"ok": True, "deleted": name}
 
     app["delete_note"] = delete_note
