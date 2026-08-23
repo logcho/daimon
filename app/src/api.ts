@@ -204,6 +204,21 @@ export const readSkill = (name: string): Promise<SkillDetail> =>
 export const deleteSkill = (name: string): Promise<{ ok: boolean }> =>
   invoke<{ ok: boolean }>("delete_skill", { name });
 
+/** Replace a skill's SKILL.md — the whole file, frontmatter included.
+ *
+ *  The name and description live in that frontmatter and are what the agent
+ *  sees before deciding to read the body, so an edit can rename the skill.
+ *  The reply carries the name it ended up with rather than the one asked for,
+ *  and a caller holding a selection needs to follow it. */
+export const writeSkill = (
+  name: string,
+  content: string,
+): Promise<{ ok: boolean; name: string; description: string; source: string }> =>
+  invoke<{ ok: boolean; name: string; description: string; source: string }>("write_skill", {
+    name,
+    content,
+  });
+
 // --- Remote access -----------------------------------------------------------
 
 /** The gateway that fronts this machine for other devices. Off by default and

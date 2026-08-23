@@ -1449,6 +1449,65 @@ async def create_app(
             status_code = 500
         return web.json_response(result, status=status_code)
 
+    async def skill_write_handler(request: web.Request) -> web.Response:
+        """PUT /skills/{name} — replace one skill's SKILL.md.
+
+        The whole file, frontmatter included. A skill's `name` and
+        `description` live in that frontmatter and *are* how the agent finds
+        it — the prompt carries one line per skill and nothing else until it
+        calls `read_skill` — so editing the description is often the point of
+        editing at all. Which also means an edit can change the skill's own
+        identity, and the reply carries the name it ended up with rather than
+        the one it was asked for.
+
+        Only SKILL.md. An installed skill is a directory that can hold scripts
+        and reference documents; those are files on disk, and a real editor is
+        a better place to change them than a preview pane.
+        """
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        content = body.get("content")
+        if not isinstance(content, str):
+            return web.json_response({"error": "content must be a string"}, status=400)
+
+        name = request.match_info.get("name", "")
+        for skill in _discover(request.app["settings"]):
+            if skill.name != name or skill.path is None:
+                continue
+            try:
+                skill.path.write_text(content, encoding="utf-8")
+            except OSError as exc:
+                return web.json_response({"error": str(exc)}, status=500)
+
+            # Re-read rather than trusting what was sent: the frontmatter
+            # decides the name and description, and a malformed block degrades
+            # to the directory name (see injector._parse_frontmatter) instead
+            # of failing. The client is told what it actually got.
+            refreshed = _discover(request.app["settings"])
+            request.app["skills"] = refreshed
+            updated = next((s for s in refreshed if s.path == skill.path), None)
+
+            memory_store = request.app["memory"]
+            if memory_store is not None:
+                with contextlib.suppress(Exception):
+                    # A renamed skill leaves its old key behind, and `recall`
+                    # would go on citing a skill under a name nothing answers
+                    # to.
+                    if updated is None or updated.name != name:
+                        memory_store.delete_skill(name)
+                    if updated is not None and updated.description:
+                        memory_store.upsert_skill(updated.name, updated.description)
+
+            return web.json_response({
+                "ok": True,
+                "name": updated.name if updated else name,
+                "description": updated.description if updated else "",
+                "source": skill.source,
+            })
+        return web.json_response({"error": f'no skill named "{name}"'}, status=404)
+
     async def skill_delete_handler(request: web.Request) -> web.Response:
         """DELETE /skills/{name} — remove a skill directory and everything in
         it (an installed skill is a directory of files, not one file)."""
@@ -1652,6 +1711,7 @@ async def create_app(
     app.router.add_get("/vault/{name:.*}", vault_read_handler)
     app.router.add_put("/vault/{name:.*}", vault_write_handler)
     app.router.add_delete("/vault/{name:.*}", vault_delete_handler)
+    app.router.add_put("/skills/{name}", skill_write_handler)
     app.router.add_delete("/skills/{name}", skill_delete_handler)
     app.router.add_get("/models", models_handler)
     app.router.add_get("/config", config_handler)

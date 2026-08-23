@@ -42,6 +42,7 @@ fn main() {
             "list_vault_entries",
             "write_vault_bytes",
             "reveal_in_finder",
+            "write_skill",
             "get_config",
             "remote_status",
             "start_remote",

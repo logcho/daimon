@@ -1076,3 +1076,67 @@ async def test_move_accepts_any_suffix(client: TestClient) -> None:
     resp = await client.post("/vault/move", json={"from": "notes.txt", "to": "kept/notes.txt"})
     assert resp.status == 200
     assert (client.app["settings"].vault_dir / "kept" / "notes.txt").read_text() == "plain"
+
+
+# --- editing a skill ---------------------------------------------------------
+
+
+async def test_skill_can_be_edited(client: TestClient) -> None:
+    settings = client.app["settings"]
+    _skill(settings.skills_dir, "changelog", "the original body")
+
+    resp = await client.put(
+        "/skills/changelog",
+        json={"content": "---\nname: changelog\ndescription: d\n---\n\nthe edited body\n"},
+    )
+    assert resp.status == 200
+    assert (await resp.json())["name"] == "changelog"
+    assert "the edited body" in (await (await client.get("/skills/changelog")).json())["content"]
+
+
+async def test_editing_the_frontmatter_renames_the_skill(client: TestClient) -> None:
+    """The name lives in the frontmatter and *is* the skill's identity — the
+    reply carries the name it ended up with, not the one it was asked for."""
+    settings = client.app["settings"]
+    _skill(settings.skills_dir, "changelog")
+
+    resp = await client.put(
+        "/skills/changelog",
+        json={"content": "---\nname: release-notes\ndescription: newer\n---\n\nbody\n"},
+    )
+    assert await resp.json() == {
+        "ok": True,
+        "name": "release-notes",
+        "description": "newer",
+        "source": "vault",
+    }
+    names = {s["name"] for s in await (await client.get("/skills")).json()}
+    assert names == {"release-notes"}
+
+    # The old key must not survive in the index, or `recall` goes on citing a
+    # skill under a name nothing answers to.
+    memory = client.app["memory"]
+    assert [s["name"] for s in memory.search_skills("newer", 3)] == ["release-notes"]
+    assert not any(s["name"] == "changelog" for s in memory.search_skills("changelog", 3))
+
+
+async def test_editing_reindexes_the_description(client: TestClient) -> None:
+    settings = client.app["settings"]
+    _skill(settings.skills_dir, "changelog")
+
+    await client.put(
+        "/skills/changelog",
+        json={"content": "---\nname: changelog\ndescription: summarising a release\n---\n\nb\n"},
+    )
+    memory = client.app["memory"]
+    assert [s["name"] for s in memory.search_skills("summarising release", 3)] == ["changelog"]
+
+
+async def test_editing_an_unknown_skill_is_a_404(client: TestClient) -> None:
+    assert (await client.put("/skills/nope", json={"content": "x"})).status == 404
+
+
+async def test_editing_rejects_a_non_string_body(client: TestClient) -> None:
+    settings = client.app["settings"]
+    _skill(settings.skills_dir, "changelog")
+    assert (await client.put("/skills/changelog", json={"content": None})).status == 400

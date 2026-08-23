@@ -454,6 +454,26 @@ async fn unwrap_vault_response(
     Ok(body)
 }
 
+/// PUT /skills/{name} — replace a skill's SKILL.md.
+///
+/// The whole file, frontmatter included: a skill's name and description live
+/// there and are what the agent sees before it decides to read the body. So
+/// the reply carries the name the skill ended up with, which an edit to that
+/// frontmatter can change.
+pub async fn write_skill(
+    port: u16,
+    name: &str,
+    content: &str,
+) -> Result<serde_json::Value, String> {
+    let resp = reqwest::Client::new()
+        .put(format!("http://127.0.0.1:{port}/skills/{}", encode_path(name)))
+        .json(&serde_json::json!({ "content": content }))
+        .send()
+        .await
+        .map_err(|e| format!("failed to reach agent server: {e}"))?;
+    unwrap_vault_response(resp, "could not save the skill").await
+}
+
 pub async fn delete_skill(port: u16, name: &str) -> Result<serde_json::Value, String> {
     delete_json(port, &format!("skills/{}", encode_path(name))).await
 }

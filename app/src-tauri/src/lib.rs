@@ -95,6 +95,17 @@ async fn list_notes(
 
 /// Every file in the vault, not just the notes — what the vault browser lists.
 #[tauri::command]
+async fn write_skill(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::write_skill(status.port, &name, &content).await
+}
+
+#[tauri::command]
 async fn list_vault_entries(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentManager>,
@@ -313,6 +324,7 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             move_note,
             list_vault_entries,
             write_vault_bytes,
+            write_skill,
             vault::reveal_in_finder,
             list_models,
         ])

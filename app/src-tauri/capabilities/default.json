@@ -54,6 +54,7 @@
     "allow-move-note",
     "allow-list-vault-entries",
     "allow-write-vault-bytes",
-    "allow-reveal-in-finder"
+    "allow-reveal-in-finder",
+    "allow-write-skill"
   ]
 }
