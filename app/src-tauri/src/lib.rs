@@ -1,6 +1,7 @@
 mod agent;
 mod fn_key;
 mod paths;
+mod remote;
 mod vault;
 mod vibrancy;
 mod voice;
@@ -231,12 +232,16 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
     workspace::load_persisted_env();
     builder
         .manage(AgentManager::new())
+        .manage(remote::RemoteManager::new())
         // Starts collapsed — App.tsx's mount effect calls collapseToPill(),
         // which pushes the same value straight back down.
         .manage(PanelExpanded(std::sync::atomic::AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             agent_status,
             start_chat,
+            remote::remote_status,
+            remote::start_remote,
+            remote::stop_remote,
             get_config,
             update_config,
             close_agent,

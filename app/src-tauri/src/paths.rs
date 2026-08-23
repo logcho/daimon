@@ -123,3 +123,15 @@ pub fn augmented_path() -> OsString {
     }
     std::env::join_paths(dirs).unwrap_or(inherited)
 }
+
+/// The `daimon-remote` executable, installed alongside `daimon` by
+/// `uv tool install`. Resolved absolutely for the same reason `uv` is: a
+/// Dock launch inherits launchd's minimal PATH, which has no ~/.local/bin.
+pub fn remote_bin() -> Option<PathBuf> {
+    let candidates = [
+        dirs_next::home_dir().map(|h| h.join(".local/bin/daimon-remote")),
+        Some(PathBuf::from("/opt/homebrew/bin/daimon-remote")),
+        Some(PathBuf::from("/usr/local/bin/daimon-remote")),
+    ];
+    candidates.into_iter().flatten().find(|p| p.is_file())
+}

@@ -160,3 +160,24 @@ export const readSkill = (name: string): Promise<SkillDetail> =>
 
 export const deleteSkill = (name: string): Promise<{ ok: boolean }> =>
   invoke<{ ok: boolean }>("delete_skill", { name });
+
+// --- Remote access -----------------------------------------------------------
+
+/** The gateway that fronts this machine for other devices. Off by default and
+ *  supervised separately from the agent server: the agent is what the app is,
+ *  while this exists to put it on a network. */
+export interface RemoteStatus {
+  running: boolean;
+  port: number;
+  url: string | null;
+  pairingCode: string | null;
+  terminals: boolean;
+  error: string | null;
+}
+
+export const remoteStatus = (): Promise<RemoteStatus> => invoke<RemoteStatus>("remote_status");
+
+export const startRemote = (terminals: boolean, pair: boolean): Promise<RemoteStatus> =>
+  invoke<RemoteStatus>("start_remote", { terminals, pair });
+
+export const stopRemote = (): Promise<RemoteStatus> => invoke<RemoteStatus>("stop_remote");

@@ -40,6 +40,9 @@ fn main() {
             "delete_folder",
             "move_note",
             "get_config",
+            "remote_status",
+            "start_remote",
+            "stop_remote",
             "update_config",
         ]));
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
