@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { BusClient } from "../lib/busClient";
 import type { VaultFile } from "../types";
+import { forgetVaultImages, loadVaultImage } from "./vaultImage";
 
 /**
  * The notes vault, read and edited from a phone.
@@ -13,6 +14,56 @@ import type { VaultFile } from "../types";
  * wikilink resolution are deliberately left out here for the same reason;
  * `wikilinks.ts` is ready when they earn their cost.
  */
+/** An image referenced by a note.
+ *
+ *  Notes carry `![](cat.jpeg)` and the phone has no filesystem to resolve it
+ *  against, so the bytes are fetched over the bus and swapped in once they
+ *  land. Non-vault sources (an http URL, an inline data: image) already load
+ *  on their own and are left alone.
+ */
+function VaultImage({
+  bus,
+  workspace,
+  fromFolder,
+  src,
+  alt,
+}: {
+  bus: BusClient;
+  workspace: string;
+  fromFolder: string;
+  src: string;
+  alt: string;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+
+  useEffect(() => {
+    if (/^(https?:|data:|blob:)/i.test(src)) {
+      setUrl(src);
+      return;
+    }
+    let live = true;
+    void loadVaultImage(bus, workspace, src, fromFolder).then((resolved) => {
+      if (!live) return;
+      if (resolved) setUrl(resolved);
+      else setMissing(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [bus, workspace, src, fromFolder]);
+
+  if (missing) {
+    return <span className="text-xs text-amber-400/80">missing image: {alt || src}</span>;
+  }
+  // A stable placeholder rather than nothing, so the note doesn't reflow
+  // under the reader's thumb as each image arrives.
+  if (!url) {
+    return <span className="my-2 block h-24 animate-pulse rounded-xl bg-white/5" />;
+  }
+  return <img src={url} alt={alt} className="my-2 max-w-full rounded-xl" />;
+}
+
 /** Two taps to delete rather than a dialog — see the note in Remote.tsx. */
 function ConfirmButton({ label, onConfirm }: { label: string; onConfirm: () => void }) {
   const [armed, setArmed] = useState(false);
@@ -67,7 +118,12 @@ export function Notes({
   }, [refresh]);
 
   useEffect(() => {
-    onVaultChanged(() => void refresh());
+    onVaultChanged(() => {
+      // An image may have been replaced under the same name, and a cached
+      // object URL would keep showing the old one.
+      forgetVaultImages();
+      void refresh();
+    });
     return () => onVaultChanged(null);
   }, [onVaultChanged, refresh]);
 
@@ -161,7 +217,22 @@ export function Notes({
           />
         ) : (
           <div className="prose prose-invert prose-sm min-h-0 max-w-none flex-1 overflow-y-auto px-4 py-3">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{open.content}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                img: ({ src, alt }) => (
+                  <VaultImage
+                    bus={bus}
+                    workspace={workspace}
+                    fromFolder={open.name.slice(0, Math.max(0, open.name.lastIndexOf("/")))}
+                    src={typeof src === "string" ? src : ""}
+                    alt={alt ?? ""}
+                  />
+                ),
+              }}
+            >
+              {open.content}
+            </ReactMarkdown>
           </div>
         )}
       </div>

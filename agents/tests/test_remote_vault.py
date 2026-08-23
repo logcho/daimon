@@ -9,6 +9,7 @@ into one being weaker.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 
 import pytest
@@ -240,3 +241,53 @@ async def test_a_refused_write_announces_nothing(client: TestClient) -> None:
                 break
             seen.append(frame)
         assert seen == []
+
+
+async def test_an_image_can_be_fetched_as_bytes(client: TestClient) -> None:
+    """A phone has no filesystem and no asset protocol — an image referenced
+    by a note comes down the socket it already has."""
+    root = client.app["settings"].vault_dir
+    (root / "images").mkdir(parents=True, exist_ok=True)
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    (root / "images" / "shot.png").write_bytes(png)
+
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "vault.blob", name="images/shot.png")
+
+    assert ack["ok"] is True
+    assert ack["mime"] == "image/png"
+    assert ack["sizeBytes"] == len(png)
+    assert base64.b64decode(ack["base64"]) == png
+
+
+async def test_blob_reads_cannot_escape_the_vault(client: TestClient) -> None:
+    """Same confinement as every other note op — one resolve-then-check, so
+    the two cannot drift into one being weaker."""
+    async with client.ws_connect("/bus/ws") as ws:
+        for name in ("../escaped.png", "../../etc/passwd"):
+            ack = await _call(ws, "vault.blob", name=name)
+            assert ack["ok"] is False
+
+
+async def test_blob_will_not_reach_into_internal_paths(client: TestClient) -> None:
+    """`.daimon` holds this workspace's own databases and `skills` has its own
+    view; neither is listed, so neither should be readable by guessing."""
+    root = client.app["settings"].vault_dir
+    (root / ".daimon").mkdir(parents=True, exist_ok=True)
+    (root / ".daimon" / "memory.db").write_bytes(b"sqlite")
+
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "vault.blob", name=".daimon/memory.db")
+    assert ack["ok"] is False
+
+
+async def test_an_oversized_file_is_refused_with_its_size(client: TestClient) -> None:
+    """Refused deliberately rather than left to blow the frame limit, which
+    fails the whole socket instead of the one request."""
+    root = client.app["settings"].vault_dir
+    (root / "huge.bin").write_bytes(b"\x00" * (9 * 1024 * 1024))
+
+    async with client.ws_connect("/bus/ws") as ws:
+        ack = await _call(ws, "vault.blob", name="huge.bin")
+    assert ack["ok"] is False
+    assert "too large" in ack["error"]

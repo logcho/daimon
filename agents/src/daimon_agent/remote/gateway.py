@@ -31,6 +31,7 @@ from typing import Any
 import aiohttp
 from aiohttp import WSMsgType, web
 
+from ..busws import MAX_FRAME_BYTES
 from .auth import Pairing, TokenStore, Tickets
 from .discovery import Workspace, discover
 from .push import PushStore, Subscription
@@ -361,7 +362,7 @@ async def _serve_socket(request: web.Request, gateway: Gateway) -> web.WebSocket
     socket per workspace on demand and forwards. That is what lets it be
     restarted freely: everything replayable lives in the workspace servers.
     """
-    ws = web.WebSocketResponse(heartbeat=HEARTBEAT_S)
+    ws = web.WebSocketResponse(heartbeat=HEARTBEAT_S, max_msg_size=MAX_FRAME_BYTES)
     await ws.prepare(request)
     http: aiohttp.ClientSession = request.app["http"]
     upstreams: dict[str, _Upstream] = {}
@@ -400,7 +401,7 @@ async def _serve_socket(request: web.Request, gateway: Gateway) -> web.WebSocket
         if target is None:
             return None
         try:
-            upstream_ws = await http.ws_connect(target.bus_url, heartbeat=HEARTBEAT_S)
+            upstream_ws = await http.ws_connect(target.bus_url, heartbeat=HEARTBEAT_S, max_msg_size=MAX_FRAME_BYTES)
         except (aiohttp.ClientError, asyncio.TimeoutError):
             return None
         upstream = _Upstream(key, upstream_ws, asyncio.create_task(pump(key, upstream_ws)))
@@ -502,7 +503,7 @@ async def _watch_one(app: web.Application, gateway: Gateway, workspace: Workspac
     rediscovery loop reopens it if it comes back."""
     http: aiohttp.ClientSession = app["http"]
     try:
-        async with http.ws_connect(workspace.bus_url, heartbeat=HEARTBEAT_S) as ws:
+        async with http.ws_connect(workspace.bus_url, heartbeat=HEARTBEAT_S, max_msg_size=MAX_FRAME_BYTES) as ws:
             await ws.send_json({"op": "watch", "op_id": "watch"})
             async for msg in ws:
                 if msg.type is not WSMsgType.TEXT:

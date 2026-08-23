@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import mimetypes
 import sys
 import time
 from datetime import UTC, datetime
@@ -47,6 +48,15 @@ PROTOCOL_VERSION = 1
 #: Sent by aiohttp itself; the client is expected to answer. Pings must not
 #: count as activity — see `_idle_shutdown_loop`.
 HEARTBEAT_S = 25.0
+
+#: Biggest WebSocket frame any hop will accept.
+#:
+#: aiohttp's default is 4 MiB, which a base64'd image clears sooner than it
+#: looks — the encoding adds a third on top of the file. The limit applies on
+#: *receive* and fails the socket rather than the message, so every hop the
+#: frame crosses has to agree about it; the gateway imports this rather than
+#: keeping its own number, because the smallest one silently wins.
+MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 #: Events replayed to a client attaching with no usable cursor.
 SNAPSHOT_LIMIT = 800
@@ -77,7 +87,9 @@ def make_bus_ws_handler(app: web.Application):
     """Build the `/bus/ws` handler bound to this app's bus, log and terminals."""
 
     async def handler(request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse(heartbeat=HEARTBEAT_S)
+        # The frame ceiling has to be set on every hop the frame crosses —
+        # see MAX_FRAME_BYTES.
+        ws = web.WebSocketResponse(heartbeat=HEARTBEAT_S, max_msg_size=MAX_FRAME_BYTES)
         await ws.prepare(request)
 
         bus = app["bus"]
@@ -383,6 +395,48 @@ def make_bus_ws_handler(app: web.Application):
             return {"ok": True, "name": name,
                     "content": path.read_text(encoding="utf-8", errors="replace")}
 
+        #: A file read whole into one WebSocket frame, base64'd on the way.
+        #: Deliberately modest: this exists so an image referenced by a note
+        #: renders on a phone, not as a file transfer channel. Anything bigger
+        #: wants range requests and a real HTTP route, which would need an
+        #: auth story an `<img src>` can carry — a query-string ticket — and
+        #: that is a larger change than showing a screenshot in a note.
+        MAX_BLOB_BYTES = 8 * 1024 * 1024
+
+        async def do_vault_blob(op: dict) -> dict:
+            """Bytes of one vault file, for a client with no filesystem.
+
+            The desktop streams media off disk through the webview's asset
+            protocol; a phone is on the other side of a tailnet and has no
+            such path, so the bytes come down the socket it already has.
+            """
+            name = str(op.get("name") or "")
+            try:
+                path = vault_file(app["settings"], name)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            if not path.is_file():
+                return {"ok": False, "error": "no such file"}
+            if is_internal(path.relative_to(Path(app["settings"].vault_dir).resolve())):
+                return {"ok": False, "error": "no such file"}
+            size = path.stat().st_size
+            if size > MAX_BLOB_BYTES:
+                return {
+                    "ok": False,
+                    "error": f"{name} is {size // (1024 * 1024)} MB — too large to send",
+                }
+            try:
+                raw = path.read_bytes()
+            except OSError as exc:
+                return {"ok": False, "error": str(exc)}
+            return {
+                "ok": True,
+                "name": name,
+                "mime": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                "sizeBytes": size,
+                "base64": base64.b64encode(raw).decode("ascii"),
+            }
+
         async def do_vault_write(op: dict) -> dict:
             return app["write_note"](str(op.get("name") or ""), op.get("content"))
 
@@ -531,6 +585,7 @@ def make_bus_ws_handler(app: web.Application):
             "config": do_config,
             "vault.list": do_vault_list,
             "vault.read": do_vault_read,
+            "vault.blob": do_vault_blob,
             "vault.write": do_vault_write,
             "vault.delete": do_vault_delete,
             "session.delete": do_session_delete,
