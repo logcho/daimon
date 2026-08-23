@@ -1,4 +1,6 @@
+import { kindOf } from "../fileKind";
 import type { TreeNode } from "../noteTree";
+import { FileIcon } from "./vault/FileIcon";
 
 function Chevron({ open }: { open: boolean }) {
   return (
@@ -14,7 +16,57 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
+/** The in-place rename field. Selects the stem but not the extension, so
+ *  typing replaces the name and leaves `.md` alone — retyping the extension
+ *  every rename is how a file quietly becomes the wrong type. */
+function RenameInput({
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  onCommit: (next: string) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <input
+      autoFocus
+      defaultValue={initial}
+      onFocus={(e) => {
+        const dot = initial.lastIndexOf(".");
+        e.target.setSelectionRange(0, dot > 0 ? dot : initial.length);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onCommit((e.target as HTMLInputElement).value);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+      // Cancel on blur rather than commit: a blur is as likely to be the user
+      // clicking away from a rename they thought better of.
+      onBlur={onCancel}
+      className="w-full rounded-md border border-[#4f8dff]/50 bg-black/30 px-1.5 py-0.5 text-xs text-neutral-100 focus:outline-none"
+    />
+  );
+}
+
 export interface NoteTreeProps {
+  /** Folder an OS file-drag is hovering — a different gesture from moving a
+   *  note inside the tree, so a different highlight. */
+  fileDropTarget: string | null;
+  /** Returns true when it handled an OS drop, so the internal move path can
+   *  bow out. */
+  onFileDrop: (e: React.DragEvent, folder: string) => boolean;
+  onFileDropTargetChange: (folder: string | null) => void;
+  /** Path currently being renamed — its row becomes an input. Renaming has to
+   *  happen in the tree because Tauri's webview has no `window.prompt`. */
+  renaming: string | null;
+  onRenameCommit: (path: string, nextName: string) => void;
+  onRenameCancel: () => void;
+  onContextMenu: (e: React.MouseEvent, path: string, kind: "note" | "folder") => void;
   nodes: TreeNode[];
   selected: string | null;
   /** Folder paths currently expanded. */
@@ -47,6 +99,13 @@ export function NoteTree(props: NoteTreeProps) {
     selected,
     expanded,
     dropTarget,
+    fileDropTarget,
+    onFileDrop,
+    onFileDropTargetChange,
+    renaming,
+    onRenameCommit,
+    onRenameCancel,
+    onContextMenu,
     dirty,
     armedFolder,
     folderPaths,
@@ -68,9 +127,21 @@ export function NoteTree(props: NoteTreeProps) {
 
         if (node.kind === "note") {
           const isSelected = selected === node.path;
+          if (renaming === node.path) {
+            return (
+              <li key={node.path} style={indent}>
+                <RenameInput
+                  initial={node.name}
+                  onCommit={(next) => onRenameCommit(node.path, next)}
+                  onCancel={onRenameCancel}
+                />
+              </li>
+            );
+          }
           return (
             <li key={node.path}>
               <button
+                onContextMenu={(e) => onContextMenu(e, node.path, "note")}
                 type="button"
                 draggable
                 onDragStart={(e) => {
@@ -82,15 +153,18 @@ export function NoteTree(props: NoteTreeProps) {
                 onClick={() => onSelectNote(node.path)}
                 title={node.path}
                 style={indent}
-                className={`w-full truncate rounded-md py-1 pr-2 text-left text-xs transition duration-150 ${
+                className={`flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left text-xs transition duration-150 ${
                   isSelected
                     ? "bg-[#4f8dff]/15 text-[#4f8dff]"
                     : "text-neutral-400 hover:bg-white/5 hover:text-neutral-100"
                 }`}
               >
-                {node.name}
+                {/* Muted against the label: at this size the icon is for
+                    scanning the shape of a folder, not for reading. */}
+                <FileIcon kind={kindOf(node.path)} className={isSelected ? "h-3.5 w-3.5" : "h-3.5 w-3.5 opacity-50"} />
+                <span className="truncate">{node.name}</span>
                 {isSelected && dirty && (
-                  <span className="ml-1 text-amber-400" title="unsaved changes">
+                  <span className="text-amber-400" title="unsaved changes">
                     •
                   </span>
                 )}
@@ -99,12 +173,26 @@ export function NoteTree(props: NoteTreeProps) {
           );
         }
 
+        if (renaming === node.path) {
+          return (
+            <li key={node.path} style={indent}>
+              <RenameInput
+                initial={node.name}
+                onCommit={(next) => onRenameCommit(node.path, next)}
+                onCancel={onRenameCancel}
+              />
+            </li>
+          );
+        }
+
         const isOpen = expanded.has(node.path);
         const isDropTarget = dropTarget === node.path;
+        const isFileDropTarget = fileDropTarget === node.path;
         return (
           <li key={node.path}>
             <div
               draggable
+              onContextMenu={(e) => onContextMenu(e, node.path, "folder")}
               onDragStart={(e) => {
                 e.stopPropagation();
                 e.dataTransfer.setData("text/plain", `folder:${node.path}`);
@@ -113,13 +201,22 @@ export function NoteTree(props: NoteTreeProps) {
               onDragOver={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                // Files from the OS are copied in; a note from the tree is
+                // moved. The cursor says which before anything happens.
+                if (Array.from(e.dataTransfer.types).includes("Files")) {
+                  e.dataTransfer.dropEffect = "copy";
+                  if (fileDropTarget !== node.path) onFileDropTargetChange(node.path);
+                  return;
+                }
                 e.dataTransfer.dropEffect = "move";
                 if (dropTarget !== node.path) onDropTargetChange(node.path);
               }}
               onDragLeave={() => {
                 if (dropTarget === node.path) onDropTargetChange(null);
+                if (fileDropTarget === node.path) onFileDropTargetChange(null);
               }}
               onDrop={(e) => {
+                if (onFileDrop(e, node.path)) return;
                 e.preventDefault();
                 e.stopPropagation();
                 const payload = e.dataTransfer.getData("text/plain");
@@ -128,7 +225,11 @@ export function NoteTree(props: NoteTreeProps) {
               }}
               style={indent}
               className={`group flex items-center gap-1 rounded-md py-1 pr-1 transition ${
-                isDropTarget ? "bg-[#4f8dff]/20 ring-1 ring-[#4f8dff]/40" : "hover:bg-white/5"
+                isFileDropTarget
+                  ? "bg-emerald-400/15 ring-1 ring-dashed ring-emerald-400/50"
+                  : isDropTarget
+                    ? "bg-[#4f8dff]/20 ring-1 ring-[#4f8dff]/40"
+                    : "hover:bg-white/5"
               }`}
             >
               <button

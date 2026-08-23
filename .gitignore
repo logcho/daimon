@@ -2,3 +2,10 @@
 # Per-workspace agent state (checkpoints, memory, the event log). Written
 # wherever a server is run, including the repo root during development.
 .daimon/
+# The dev vault. `./vault` is what an agent server run from the repo root
+# writes into, and testing the vault browser means dropping images and PDFs
+# into it — none of which belongs in the history. The sample note stays.
+/vault/*
+!/vault/notes/
+/vault/notes/*
+!/vault/notes/test.md

@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the pill widget window",
-  "windows": ["pill"],
+  "windows": [
+    "pill"
+  ],
   "permissions": [
     "core:default",
     "allow-agent-status",
@@ -49,6 +51,10 @@
     "allow-list-folders",
     "allow-create-folder",
     "allow-delete-folder",
-    "allow-move-note"
+    "allow-move-note",
+    "allow-list-vault-entries",
+    "allow-write-vault-bytes",
+    "allow-reveal-in-finder",
+    "allow-write-skill"
   ]
 }

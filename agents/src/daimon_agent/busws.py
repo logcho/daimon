@@ -40,7 +40,7 @@ from aiohttp import WSMsgType, web
 
 from .events import ask_resolved_event, user_event
 from .run import resume_turn, run_turn
-from .vault import is_internal, vault_file
+from .vault import is_internal, scan_vault, vault_file
 
 PROTOCOL_VERSION = 1
 
@@ -365,21 +365,12 @@ def make_bus_ws_handler(app: web.Application):
         # markdown, not a shell on the host.
 
         async def do_vault_list(_op: dict) -> dict:
+            # Notes only, even though the desktop can now list the whole
+            # folder: a phone has no way to render or edit a PNG, and the
+            # write op below is markdown-only, so listing more than it can
+            # open would only offer dead ends.
             root = Path(app["settings"].vault_dir)
-            if not root.is_dir():
-                return {"ok": True, "notes": []}
-            notes = []
-            for path in root.rglob("*.md"):
-                if is_internal(path.relative_to(root)):
-                    continue
-                stat = path.stat()
-                notes.append({
-                    "name": str(path.relative_to(root)),
-                    "sizeBytes": stat.st_size,
-                    "modifiedAt": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
-                })
-            notes.sort(key=lambda n: n["modifiedAt"], reverse=True)
-            return {"ok": True, "notes": notes}
+            return {"ok": True, "notes": scan_vault(root, include_all=False)}
 
         async def do_vault_read(op: dict) -> dict:
             name = str(op.get("name") or "")

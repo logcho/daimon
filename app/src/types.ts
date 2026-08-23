@@ -264,6 +264,10 @@ export interface VaultFile {
   name: string;
   sizeBytes: number;
   modifiedAt: string;
+  /** Lowercased, no dot. Additive — the server sends it on every listing now,
+   *  but a client that predates it still parses the rest, so it stays
+   *  optional and `kindOf(name)` is what actually decides anything. */
+  ext?: string;
 }
 
 // --- Skills -----------------------------------------------------------------

@@ -93,6 +93,62 @@ async fn list_notes(
     agent::list_notes(status.port).await
 }
 
+/// Every file in the vault, not just the notes — what the vault browser lists.
+#[tauri::command]
+async fn write_skill(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+    content: String,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::write_skill(status.port, &name, &content).await
+}
+
+#[tauri::command]
+async fn list_vault_entries(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+) -> Result<serde_json::Value, String> {
+    let status = state.ensure(&app).await?;
+    agent::list_vault_entries(status.port).await
+}
+
+/// The ceiling on a single imported file.
+///
+/// Not a storage limit — the vault is a folder on disk and Finder will copy
+/// anything into it. It is the point past which pushing a file through the IPC
+/// channel stalls the UI, so the panel offers Finder instead. The server's own
+/// body limit sits well above this so that this is the cap users actually hit,
+/// with a message that says what to do next.
+const MAX_IMPORT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Write raw bytes into the vault — the import path for any file type.
+///
+/// Bytes arrive as base64 rather than a raw IPC body: `invoke`'s JSON payload
+/// is the shape every other command here uses, and at a 32 MB ceiling the
+/// encoding costs less than a second transport worth maintaining.
+#[tauri::command]
+async fn write_vault_bytes(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentManager>,
+    name: String,
+    data: String,
+) -> Result<serde_json::Value, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let bytes = STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| format!("could not decode {name}: {e}"))?;
+    if bytes.len() > MAX_IMPORT_BYTES {
+        return Err(format!(
+            "{name} is {:.0} MB — too large to import. Copy it into the vault folder in Finder instead.",
+            bytes.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    let status = state.ensure(&app).await?;
+    agent::write_vault_bytes(status.port, &name, bytes).await
+}
+
 #[tauri::command]
 async fn read_note(
     app: tauri::AppHandle,
@@ -266,10 +322,28 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             create_folder,
             delete_folder,
             move_note,
+            list_vault_entries,
+            write_vault_bytes,
+            write_skill,
+            vault::reveal_in_finder,
             list_models,
         ])
         .setup(|app| {
             voice::init(app.handle());
+            // Media in the vault streams straight off disk through the
+            // webview's asset protocol rather than being pushed through IPC:
+            // it is the only path where WKWebView issues range requests, and
+            // without those a <video> cannot be seeked.
+            //
+            // Canonicalized deliberately. On macOS the vault under the app's
+            // data dir resolves /var -> /private/var, and a scope entry that
+            // does not match the resolved request path fails every load
+            // silently, with nothing in the console to explain it.
+            let vault_dir = vault::vault_path();
+            let scoped = vault_dir.canonicalize().unwrap_or(vault_dir);
+            if let Err(err) = app.asset_protocol_scope().allow_directory(&scoped, true) {
+                eprintln!("[daimon] could not scope the vault for media: {err}");
+            }
             #[cfg(target_os = "macos")]
             fn_key::install_fn_key_monitors(app.handle().clone());
 
