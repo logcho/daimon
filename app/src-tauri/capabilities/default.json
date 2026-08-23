@@ -7,7 +7,6 @@
     "core:default",
     "allow-agent-status",
     "allow-start-chat",
-    "allow-send-message",
     "allow-get-config",
     "allow-update-config",
     "allow-close-agent",

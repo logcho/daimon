@@ -160,11 +160,6 @@ export type AgentEvent =
   | HostActionEvent
   | LiveFrameEvent;
 
-export interface SessionStatusPayload {
-  session_id: string;
-  event: AgentEvent;
-}
-
 /** A stored step. Mirrors StepEvent — they drifted once, and the display is
  *  only as good as what it keeps. */
 export interface Step {

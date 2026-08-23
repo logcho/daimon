@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageList } from "../components/MessageList";
 import { TodoList } from "../components/TodoList";
-import { applyEvent, applyTodoEvent } from "../sessionEvents";
+import { applyEvent, applyTodoEvent, foldSnapshot } from "../sessionEvents";
 import type { AgentEvent, ChatMessage, TodoItem } from "../types";
 import type { BusClient } from "../lib/busClient";
 import { AskSheet, type AskPrompt } from "./AskSheet";
@@ -614,21 +614,6 @@ function SessionView({
 }
 
 // --- helpers ----------------------------------------------------------------
-
-/** Replay a recorded event into a transcript. The user's own prompts are in
- *  the stream now (that is what `user_event` is for), so a session someone
- *  else started reads as a conversation rather than a monologue. */
-function foldSnapshot(messages: ChatMessage[], event: AgentEvent): ChatMessage[] {
-  if ((event as { type: string }).type === "user") {
-    const text = String((event as unknown as { text: string }).text ?? "");
-    return [
-      ...messages,
-      { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false },
-      { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: false },
-    ];
-  }
-  return applyEvent(messages, event);
-}
 
 function decodeSnapshot(data: unknown): Uint8Array {
   const binary = atob(String(data ?? ""));

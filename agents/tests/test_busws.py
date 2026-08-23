@@ -617,3 +617,60 @@ async def test_an_unserializable_reply_is_answered_not_silence(client: TestClien
         client.app["bus"].publisher("s")({"type": "step", "id": _Path("/not/json")})
         ack, _ = await _call(ws, "ping")
         assert ack["ok"] is True  # the socket still works
+
+
+async def test_two_clients_on_one_session_each_see_what_the_other_sends(client: TestClient) -> None:
+    """A phone and a desktop on the same conversation. Whoever types, both
+    see it — which is only true because a turn belongs to the session rather
+    than to the connection that started it."""
+    client.app["graph"].router._pro.script = [
+        AIMessage(content="answering the desktop"),
+        AIMessage(content="answering the phone"),
+    ]
+
+    async def next_turn(ws) -> list[dict]:
+        seen = []
+        while True:
+            frame = await asyncio.wait_for(ws.receive_json(), timeout=20)
+            if frame.get("kind") != "event":
+                continue
+            seen.append(frame["event"])
+            if frame["event"]["type"] in ("done", "error"):
+                return seen
+
+    async with client.ws_connect("/bus/ws") as desktop, client.ws_connect("/bus/ws") as phone:
+        await _call(desktop, "attach", session="shared")
+        await _call(phone, "attach", session="shared")
+
+        # Typed on the desktop.
+        await desktop.send_json({"op": "prompt", "session": "shared",
+                                 "instruction": "from the desktop"})
+        on_desktop, on_phone = await asyncio.gather(next_turn(desktop), next_turn(phone))
+        assert on_desktop[0]["text"] == "from the desktop"
+        assert on_phone[0]["text"] == "from the desktop"  # the phone saw it too
+        assert on_desktop[-1]["result"] == on_phone[-1]["result"] == "answering the desktop"
+
+        # And the other way round.
+        await phone.send_json({"op": "prompt", "session": "shared",
+                               "instruction": "from the phone"})
+        on_desktop, on_phone = await asyncio.gather(next_turn(desktop), next_turn(phone))
+        assert on_desktop[0]["text"] == "from the phone"  # the desktop saw it
+        assert on_desktop[-1]["result"] == on_phone[-1]["result"] == "answering the phone"
+
+
+async def test_attaching_replays_a_conversation_this_client_never_saw(client: TestClient) -> None:
+    """Reload the desktop app and the conversation is still there — it used to
+    live only in React state, so a refresh lost it."""
+    client.app["graph"].router._pro.script = [AIMessage(content="remembered")]
+    await (await client.post("/task", json={
+        "instruction": "something earlier", "session_id": "history",
+    })).read()
+
+    async with client.ws_connect("/bus/ws") as ws:
+        _ack, frames = await _call(ws, "attach", session="history")
+        (snapshot,) = [f for f in frames if f.get("control") == "snapshot"]
+
+    types = [e["type"] for e in snapshot["events"]]
+    assert types[0] == "user"
+    assert snapshot["events"][0]["text"] == "something earlier"
+    assert snapshot["events"][-1]["result"] == "remembered"

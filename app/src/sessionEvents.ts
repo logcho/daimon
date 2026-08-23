@@ -236,3 +236,25 @@ export function sessionTotals(messages: ChatMessage[]): {
   }
   return { turns, usage, lastElapsedMs };
 }
+
+
+/**
+ * Rebuild a transcript from a recorded event stream.
+ *
+ * `applyEvent` folds events into the *current* turn; this folds a whole
+ * session's history, which differs in one place: a `user` event opens a new
+ * exchange rather than being ignored. That event exists precisely so a client
+ * replaying a session it never saw gets both halves of the conversation
+ * instead of a monologue.
+ */
+export function foldSnapshot(messages: ChatMessage[], event: AgentEvent): ChatMessage[] {
+  if ((event as { type: string }).type === "user") {
+    const text = String((event as unknown as { text?: string }).text ?? "");
+    return [
+      ...messages,
+      { id: crypto.randomUUID(), role: "user", content: text, steps: [], thinking: false },
+      { id: crypto.randomUUID(), role: "assistant", content: "", steps: [], thinking: false },
+    ];
+  }
+  return applyEvent(messages, event);
+}

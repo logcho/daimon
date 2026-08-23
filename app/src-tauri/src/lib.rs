@@ -1,7 +1,6 @@
 mod agent;
 mod fn_key;
 mod paths;
-mod session;
 mod vault;
 mod vibrancy;
 mod voice;
@@ -9,7 +8,6 @@ mod window_focus;
 mod workspace;
 
 use agent::{AgentManager, AgentStatus};
-use serde::Serialize;
 use tauri::Manager;
 
 /// Whether the panel is expanded or collapsed to the pill.
@@ -21,13 +19,6 @@ use tauri::Manager;
 /// `expandToPanel`/`collapseToPill` in `lib/window.ts`.
 pub(crate) struct PanelExpanded(pub std::sync::atomic::AtomicBool);
 
-/// Every NDJSON event the agent streams is forwarded to the webview wrapped
-/// in this envelope (the legacy `session-status` channel, kept verbatim).
-#[derive(Clone, Serialize)]
-pub(crate) struct SessionStatusPayload {
-    pub session_id: String,
-    pub event: serde_json::Value,
-}
 
 #[tauri::command]
 async fn agent_status(
@@ -50,18 +41,6 @@ fn start_chat() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-#[tauri::command]
-async fn send_message(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AgentManager>,
-    session_id: String,
-    instruction: String,
-    agent: Option<String>,
-) -> Result<(), String> {
-    let status = state.ensure(&app).await?;
-    session::spawn_turn(app, status.port, session_id, instruction, agent.unwrap_or_else(|| "general".to_string()));
-    Ok(())
-}
 
 #[tauri::command]
 async fn get_config(
@@ -258,7 +237,6 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
         .invoke_handler(tauri::generate_handler![
             agent_status,
             start_chat,
-            send_message,
             get_config,
             update_config,
             close_agent,

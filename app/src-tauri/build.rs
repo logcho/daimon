@@ -16,7 +16,6 @@ fn main() {
         .app_manifest(tauri_build::AppManifest::new().commands(&[
             "agent_status",
             "start_chat",
-            "send_message",
             "close_agent",
             "set_window_vibrancy",
             "activate_and_focus_window",

@@ -4,22 +4,20 @@ import {
   agentStatus,
   fetchConfig,
   onDictationStatus,
-  onSessionStatus,
   onUiCommand,
   onVoiceModelDownload,
-  sendMessage,
   setWindowVibrancy,
   startChat,
   voiceModelStatus,
 } from "./api";
-import { applyEvent, applyTodoEvent, isSessionBusy } from "./sessionEvents";
-import { bus } from "./lib/bus";
+import { applyEvent, applyTodoEvent, foldSnapshot, isSessionBusy } from "./sessionEvents";
+import { bus, onBusControl, onBusReconnect, onSessionEvent } from "./lib/bus";
 import { collapseToPill, expandToPanel } from "./lib/window";
 import type {
+  AgentEvent,
   AgentStatus,
   ChatMessage,
   DictationStatus,
-  SessionStatusPayload,
   TodoItem,
   View,
   VoiceModelDownloadPayload,
@@ -36,6 +34,10 @@ export default function App() {
   // session streams independently (the server serializes turns per session,
   // not globally), so switching tabs mid-turn is the point, not an edge.
   const [sessions, setSessions] = useState<Record<string, ChatMessage[]>>({});
+  // Which sessions this window has told the server it is watching. A ref, not
+  // state: attaching is a side effect that must happen once per session, and
+  // re-rendering on it would loop.
+  const attachedRef = useRef<Set<string>>(new Set());
   // Todos are session state, not message state — they describe what the agent
   // is doing *now*. Attached to a message they vanished the moment the next
   // turn started, which is exactly when a checklist earns its keep. Kept as
@@ -267,8 +269,7 @@ export default function App() {
   });
 
   const handleEvent = useCallback(
-    (payload: SessionStatusPayload) => {
-      const event = payload.event;
+    (sid: string, event: AgentEvent) => {
       if (event.type === "ui_action" && event.action === "open_terminal_with_command") {
         // The agent staged a shell command — open a fresh terminal tab with it
         // *typed but not executed* (the user presses Enter to run it). The
@@ -284,7 +285,6 @@ export default function App() {
         expand();
         return; // never turn/chat content — nothing to fold into a session
       }
-      const sid = payload.session_id;
       // Unknown/closed session ids are dropped — the turn still runs server-
       // side, this UI just isn't showing it anymore.
       if (!(sid in sessionsRef.current)) return;
@@ -302,18 +302,59 @@ export default function App() {
     [commitSessions, refreshStatus, expand],
   );
 
+  // Chat rides the bus, like terminals already do.
+  //
+  // It used to arrive down the NDJSON body of the request that started it,
+  // which meant this window saw only the turns it had started itself. On the
+  // bus a turn belongs to the session, so a message sent from a phone streams
+  // in here as if it had been typed at this keyboard — and a session's history
+  // survives a reload, because attaching replays it.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    onSessionStatus(handleEvent).then((u) => {
-      if (cancelled) u();
-      else unlisten = u;
+    const unlisten = onSessionEvent((session, _seq, event) =>
+      handleEvent(session, event as AgentEvent),
+    );
+    return unlisten;
+  }, [handleEvent]);
+
+  // Attach to whichever sessions this window is showing, and take the
+  // transcript the snapshot brings with it.
+  useEffect(() => {
+    const unlistenControl = onBusControl((frame) => {
+      if (frame.control !== "snapshot") return;
+      const sid = String(frame.session ?? "");
+      if (!(sid in sessionsRef.current)) return;
+      // A snapshot is the whole transcript as of now, not a continuation:
+      // rebuild rather than append, or reattaching duplicates everything.
+      const events = (frame.events ?? []) as AgentEvent[];
+      commitSessions((prev) => ({ ...prev, [sid]: events.reduce(foldSnapshot, [] as ChatMessage[]) }));
+      setSessionTodos((prev) => ({ ...prev, [sid]: (frame.todos ?? []) as TodoItem[] }));
     });
+    return unlistenControl;
+  }, [commitSessions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    for (const sid of sessionOrder) {
+      if (attachedRef.current.has(sid)) continue;
+      attachedRef.current.add(sid);
+      void bus().send("attach", { session: sid }).then((ack) => {
+        if (cancelled || !ack.ok) attachedRef.current.delete(sid);
+      });
+    }
     return () => {
       cancelled = true;
-      unlisten?.();
     };
-  }, [handleEvent]);
+  }, [sessionOrder]);
+
+  // A dropped socket means the server no longer has us attached.
+  useEffect(() => onBusReconnect(() => {
+    const sessions = [...attachedRef.current];
+    attachedRef.current.clear();
+    for (const sid of sessions) {
+      attachedRef.current.add(sid);
+      void bus().send("attach", { session: sid });
+    }
+  }), []);
 
   // Dictation event subscription — driven by the Fn-key gesture monitor and
   // the cpal recording thread (both Rust-side). Routes transcribed text to the
@@ -409,7 +450,10 @@ export default function App() {
     };
     commitSessions((prev) => ({ ...prev, [sid]: [...(prev[sid] ?? []), userMsg, asstMsg] }));
     try {
-      await sendMessage(sid, text);
+      // `ask` is advertised: this window can show a question and answer it,
+      // and the agent is only offered the ask tools when somebody can.
+      const ack = await bus().send("prompt", { session: sid, instruction: text, origin: "app" });
+      if (!ack.ok) throw new Error(ack.error ?? "the agent did not accept that");
     } catch (err) {
       // Invoke failed before the stream could start (agent down, etc.).
       commitSessions((prev) => {

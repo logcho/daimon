@@ -3,7 +3,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentStatus,
   DictationStatus,
-  SessionStatusPayload,
   SkillFile,
   VaultFile,
   VoiceModelDownloadPayload,
@@ -11,16 +10,6 @@ import type {
 } from "./types";
 
 export const startChat = (): Promise<string> => invoke<string>("start_chat");
-
-export const sendMessage = (sessionId: string, instruction: string): Promise<void> =>
-  invoke<void>("send_message", { sessionId, instruction });
-
-/** The agent's event stream, wrapped by Rust and re-emitted to the webview.
- *  Lives here rather than in sessionEvents.ts so that the *fold* over these
- *  events stays transport-free and the mobile client can import it. */
-export const onSessionStatus = (
-  handler: (payload: SessionStatusPayload) => void,
-): Promise<UnlistenFn> => listen<SessionStatusPayload>("session-status", (e) => handler(e.payload));
 
 // --- Agent configuration (settings tab) ------------------------------------
 

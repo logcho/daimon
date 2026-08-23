@@ -16,10 +16,13 @@ import { BusClient, type BusHandlers } from "./busClient";
 let client: BusClient | null = null;
 const handlers: BusHandlers = {};
 const termData = new Map<string, (bytes: Uint8Array) => void>();
+const sessionEventListeners = new Set<(session: string, seq: number, event: unknown) => void>();
 const controlListeners = new Set<(frame: Record<string, unknown>) => void>();
 const reconnectListeners = new Set<() => void>();
 
 handlers.onTermData = (id, bytes) => termData.get(id)?.(bytes);
+handlers.onEvent = (session, seq, event) =>
+  sessionEventListeners.forEach((fn) => fn(session, seq, event));
 handlers.onControl = (frame) => controlListeners.forEach((fn) => fn(frame));
 handlers.onReconnect = () => reconnectListeners.forEach((fn) => fn());
 
@@ -41,6 +44,19 @@ export function onTermData(id: string, handler: (bytes: Uint8Array) => void): ()
   return () => {
     if (termData.get(id) === handler) termData.delete(id);
   };
+}
+
+/** Every agent event, for every session this client is attached to.
+ *
+ *  Chat used to arrive down the NDJSON body of the request that started it, so
+ *  this window saw only the turns it had started itself. On the bus a turn
+ *  belongs to the session, which is what lets a message sent from a phone
+ *  stream in here. */
+export function onSessionEvent(
+  handler: (session: string, seq: number, event: unknown) => void,
+): () => void {
+  sessionEventListeners.add(handler);
+  return () => sessionEventListeners.delete(handler);
 }
 
 export function onBusControl(handler: (frame: Record<string, unknown>) => void): () => void {
