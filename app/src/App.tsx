@@ -1,3 +1,4 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentConfig } from "./api";
 import {
@@ -685,6 +686,13 @@ export default function App() {
               url={linkUrl}
               onClose={() => setLinkUrl(null)}
               onOpenExternally={(url) => void openExternal(url).catch(() => {})}
+              // The viewer covers Panel's header, which is the window's drag
+              // handle — same rule as there: a press that started on a button
+              // keeps its click.
+              onBarDrag={(e) => {
+                if ((e.target as HTMLElement).closest("button")) return;
+                void getCurrentWindow().startDragging();
+              }}
             />
           </div>
         )}
