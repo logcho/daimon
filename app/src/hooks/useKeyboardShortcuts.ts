@@ -19,6 +19,16 @@ export interface ShortcutContext {
   selectTerminal: (id: string) => void;
   newTerminal: () => void;
   closeTerminal: (id: string) => void;
+  /** Give the topmost dismissable layer — currently the link viewer — first
+   *  refusal on Escape. Returns whether it consumed the key.
+   *
+   *  It has to be routed through here rather than handled by the layer itself:
+   *  this hook's listener is registered on `window` in the capture phase at App
+   *  mount, and same-target capture listeners fire in registration order, so an
+   *  overlay mounted later can never get there first. Without this, Escape over
+   *  an open viewer collapsed the whole panel to the pill instead of closing
+   *  the layer in front of it. */
+  dismissTop?: () => boolean;
 }
 
 /** Direct-jump order for Cmd+Shift+1..4 — matches the header button order in
@@ -122,6 +132,15 @@ export function useKeyboardShortcuts(ctx: ShortcutContext) {
       // the exact opposite of what this wants.
       const bare = !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
       if (code === "Escape" && bare) {
+        // Innermost layer first. Note this only fires while focus is in the
+        // app's own DOM — a keypress inside a cross-origin iframe never reaches
+        // the parent document, so the viewer's ✕ stays the reliable exit.
+        if (ctx.dismissTop?.()) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+
         // The API-key field in settings binds Escape itself to cancel editing.
         // Narrow on purpose: the chat draft is a <textarea>, and Escape is
         // meant to collapse from there (the draft survives — panel state

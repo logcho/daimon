@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { kindOf } from "../../fileKind";
+import { classifyLink } from "../../links";
 import { parentFolder } from "../../noteTree";
 import type { VaultFile } from "../../types";
 import { assetUrl } from "../../vaultAsset";
@@ -84,6 +85,36 @@ export function MarkdownView({ text, noteName, files, vaultDir, onFollow }: Mark
           alt={alt ?? resolved}
           className="my-2 max-h-[60vh] max-w-full rounded-md border border-white/10"
         />
+      );
+    },
+
+    /** `[other note](other.md)` — the markdown spelling of a wikilink.
+     *
+     *  Only the vault-relative case is handled here, because it is the only one
+     *  that needs to know which note is open. `http(s)` and `mailto:` fall
+     *  through to the app-wide interceptor (`useLinkInterception`), which sends
+     *  them to the viewer or the OS; either way the anchor never navigates.
+     */
+    a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
+      const action = classifyLink(href ?? "");
+      if (action.kind !== "vault") return <a href={href}>{children}</a>;
+
+      // `other.md#section` — resolve the file, drop the heading. Scrolling to a
+      // heading is its own feature; opening the right note is the point here.
+      const [path] = action.target.split("#");
+      const resolved = resolveVaultPath(decodeURIComponent(path), names, folder);
+      return (
+        <a
+          href={href}
+          title={resolved ? `open ${resolved}` : `create ${wikiLinkToNoteName(path)}`}
+          onClick={(e) => {
+            e.preventDefault();
+            onFollow(resolved ?? path);
+          }}
+          className={resolved ? undefined : "text-amber-400/80"}
+        >
+          {children}
+        </a>
       );
     },
   };

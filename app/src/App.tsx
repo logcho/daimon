@@ -6,6 +6,7 @@ import {
   onDictationStatus,
   onUiCommand,
   onVoiceModelDownload,
+  openExternal,
   setWindowVibrancy,
   startChat,
   voiceModelStatus,
@@ -26,6 +27,8 @@ import type {
 } from "./types";
 import { insertText } from "./lib/voice";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useLinkInterception } from "./hooks/useLinkInterception";
+import { LinkViewer } from "./components/LinkViewer";
 import { Panel } from "./components/Panel";
 import { Pill } from "./components/Pill";
 
@@ -71,6 +74,10 @@ export default function App() {
   // point on and merely hidden while collapsed (see the render below), so a
   // collapse no longer destroys the terminals inside it.
   const [everExpanded, setEverExpanded] = useState(false);
+  // The page the in-app link viewer is showing, if any. Lives at the top so
+  // one viewer serves every surface that renders markdown — a note, a chat
+  // message, a skill — and so Escape can reach it (see `dismissTop` below).
+  const [linkUrl, setLinkUrl] = useState<string | null>(null);
   // Which panel view is active — lives here rather than as a Panel-local
   // useState so that it survives, and because the panel's callers set it
   // (a staged terminal command switches to the terminal view).
@@ -349,6 +356,20 @@ export default function App() {
     selectTerminal: setActiveTerminalId,
     newTerminal: openNewTerminalTab,
     closeTerminal: closeTerminalTab,
+    dismissTop: () => {
+      if (!linkUrl) return false;
+      setLinkUrl(null);
+      return true;
+    },
+  });
+
+  // No `<a>` in the app is allowed to navigate the app away — it used to
+  // replace the whole UI with a page that had no way back (#21).
+  useLinkInterception(setLinkUrl, (url) => {
+    // Fire-and-forget: `open` either launches or it doesn't, and there is no
+    // second thing to try. The viewer is not involved — `mailto:` has nothing
+    // to frame.
+    void openExternal(url).catch(() => {});
   });
 
   const handleEvent = useCallback(
@@ -617,7 +638,7 @@ export default function App() {
           Kept out of the DOM until the first expand so a session that never
           opens the panel pays nothing for it. */}
       {everExpanded && (
-        <div className="h-full w-full" style={{ display: expanded ? "block" : "none" }}>
+        <div className="relative h-full w-full" style={{ display: expanded ? "block" : "none" }}>
         <Panel
           expanded={expanded}
           busy={busy}
@@ -654,6 +675,19 @@ export default function App() {
           voiceModelDownload={voiceModelDownload}
           onRefreshVoiceModel={refreshVoiceModel}
         />
+        {/* Over the panel rather than inside it, so one viewer covers every
+            view. The wrapper carries the panel's own corner radius — the
+            viewer is shared with the phone, where rounding it would be
+            wrong. */}
+        {linkUrl && (
+          <div className="absolute inset-0 overflow-hidden rounded-[28px]">
+            <LinkViewer
+              url={linkUrl}
+              onClose={() => setLinkUrl(null)}
+              onOpenExternally={(url) => void openExternal(url).catch(() => {})}
+            />
+          </div>
+        )}
         </div>
       )}
       {!expanded && (

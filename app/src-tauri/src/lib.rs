@@ -265,6 +265,44 @@ async fn deactivate_app<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(
     window_focus::deactivate(&app).await
 }
 
+/// Hand a URL to the user's default browser or mail client.
+///
+/// The escape hatch behind the in-app link viewer (`LinkViewer.tsx`): plenty of
+/// sites refuse to be framed, and the viewer needs somewhere honest to send
+/// them. `open` rather than a plugin, matching `vault::reveal_in_finder` — the
+/// app carries none, and this is one line of the one platform it ships on.
+///
+/// The scheme is checked here and not only in the webview. `open` will happily
+/// launch a `file://` path or a registered custom scheme, and the URL reaching
+/// this command came out of note text — which the agent writes, from sources it
+/// read. So the same four schemes the frontend allows, allowed again.
+#[tauri::command]
+async fn open_external(url: String) -> Result<(), String> {
+    let url = url.trim();
+    let scheme = url
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(scheme.as_str(), "http" | "https" | "mailto" | "tel") {
+        return Err(format!("refusing to open a {scheme:?} URL"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // `--` so a URL starting with a dash cannot be read as a flag.
+        std::process::Command::new("open")
+            .arg("--")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("could not open that link: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("opening a link is macOS-only".into())
+    }
+}
+
 /// Mirrors the frontend's pill/panel state down to Rust so the Fn-key gesture
 /// machine can branch on it. Fire-and-forget from the frontend's side: a
 /// dropped update only means an Fn press is read against a stale state, never
@@ -326,6 +364,7 @@ pub(crate) fn build_app(builder: tauri::Builder<tauri::Wry>) -> tauri::App<tauri
             write_vault_bytes,
             write_skill,
             vault::reveal_in_finder,
+            open_external,
             list_models,
         ])
         .setup(|app| {
@@ -388,4 +427,62 @@ pub fn run() {
             app_handle.state::<AgentManager>().kill_sync();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use tauri::ipc::CallbackFn;
+    use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
+    use tauri::webview::InvokeRequest;
+    use tauri::WebviewWindowBuilder;
+
+    fn invoke_request(cmd: &str, body: serde_json::Value) -> InvokeRequest {
+        InvokeRequest {
+            cmd: cmd.into(),
+            callback: CallbackFn(0),
+            error: CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: body.into(),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        }
+    }
+
+    /// Same ACL-reachability pattern as `vault.rs` — the name has to be in
+    /// build.rs, `generate_handler!` and capabilities/default.json, and only
+    /// the first of those fails at compile time. This covers the other two.
+    #[test]
+    fn open_external_clears_the_acl() {
+        let app = mock_builder()
+            .invoke_handler(tauri::generate_handler![super::open_external])
+            .build(mock_context(noop_assets()))
+            .expect("error while building test app");
+        let webview = WebviewWindowBuilder::new(&app, "pill", Default::default())
+            .build()
+            .expect("failed to build mock webview");
+
+        // A refused scheme, so this errors — the point is which error.
+        let result = get_ipc_response(
+            &webview,
+            invoke_request("open_external", serde_json::json!({ "url": "javascript:alert(1)" })),
+        );
+        let message = result.unwrap_err();
+        let message = message.as_str().unwrap_or_default();
+        assert!(
+            !message.contains("not allowed"),
+            "open_external should be ACL-allowed, got: {message}"
+        );
+    }
+
+    /// The URL arrives from a webview rendering note text the agent wrote, so
+    /// the scheme check cannot live only on the frontend. `open` would launch
+    /// any of these happily.
+    #[test]
+    fn open_external_refuses_schemes_it_was_not_told_to_allow() {
+        for url in ["javascript:alert(1)", "file:///etc/passwd", "daimon://x", "not-a-url"] {
+            let err = tauri::async_runtime::block_on(super::open_external(url.into()))
+                .expect_err("only http, https, mailto and tel may be opened");
+            assert!(err.contains("refusing to open"), "unexpected error for {url}: {err}");
+        }
+    }
 }

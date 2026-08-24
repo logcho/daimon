@@ -55,6 +55,7 @@
     "allow-list-vault-entries",
     "allow-write-vault-bytes",
     "allow-reveal-in-finder",
+    "allow-open-external",
     "allow-write-skill"
   ]
 }

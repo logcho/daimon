@@ -125,6 +125,11 @@ export const writeVaultBytes = (name: string, bytes: Uint8Array): Promise<VaultF
 export const revealInFinder = (name: string): Promise<void> =>
   invoke<void>("reveal_in_finder", { name });
 
+/** Open a link in the user's own browser or mail client — what the in-app link
+ *  viewer falls back to for a site that refuses to be framed. */
+export const openExternal = (url: string): Promise<void> =>
+  invoke<void>("open_external", { url });
+
 /** Base64 without blowing the stack.
  *
  *  `String.fromCharCode(...bytes)` on a multi-megabyte file spreads millions
