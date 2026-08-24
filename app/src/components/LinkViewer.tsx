@@ -14,6 +14,13 @@ export interface LinkViewerProps {
   onOpenExternally: (url: string) => void;
   /** Pad the bottom past the home indicator. Phone only. */
   safeArea?: boolean;
+  /** Start a window drag from the bar, the way `Panel`'s own header does.
+   *
+   *  The viewer covers that header, so without this the window becomes
+   *  undraggable for as long as a page is open — an ambient always-on-top
+   *  widget you cannot move out of the way. Desktop only; the phone passes
+   *  nothing and the bar is inert. */
+  onBarDrag?: (event: React.MouseEvent<HTMLElement>) => void;
 }
 
 /**
@@ -44,7 +51,13 @@ export interface LinkViewerProps {
  * silently wrong, the browser button is always present and a neutral line
  * points at it once a working page would already have painted.
  */
-export function LinkViewer({ url, onClose, onOpenExternally, safeArea }: LinkViewerProps) {
+export function LinkViewer({
+  url,
+  onClose,
+  onOpenExternally,
+  safeArea,
+  onBarDrag,
+}: LinkViewerProps) {
   // Bumped to remount the iframe. Cheaper and more reliable than reaching into
   // `contentWindow.location`, which is write-only across origins and silently
   // does nothing when the frame is mid-navigation.
@@ -65,42 +78,50 @@ export function LinkViewer({ url, onClose, onOpenExternally, safeArea }: LinkVie
     // `new URL` objects to is still fine to display.
   }
 
-  const iconButton =
-    "shrink-0 rounded-md px-2 py-0.5 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-100";
+  // The panel's own chip vocabulary (Panel.tsx's view tabs): pill-shaped, xs,
+  // tracking-tight, quiet until hovered. Reused verbatim rather than
+  // approximated, so the bar reads as the same app one layer down.
+  const chip =
+    "shrink-0 rounded-full px-2.5 py-1 text-xs font-medium tracking-tight text-neutral-400 " +
+    "transition duration-200 hover:bg-white/5 hover:text-neutral-100 active:scale-90";
 
   return (
     <div className="absolute inset-0 z-30 flex flex-col bg-[#0a0a0a]">
-      <div className="flex shrink-0 items-center gap-1 border-b border-white/10 px-2 py-1.5">
-        <button
-          type="button"
-          onClick={onClose}
-          title="close (Esc)"
-          aria-label="close"
-          className="shrink-0 rounded-md px-2 py-0.5 text-sm leading-none text-neutral-400 transition hover:bg-white/5 hover:text-neutral-100"
-        >
-          ✕
+      {/* Same measurements and specular top edge as Panel's header, because it
+          is standing in for it — the viewer covers that header while open. */}
+      <header
+        onMouseDown={onBarDrag}
+        className="flex shrink-0 items-center gap-2 border-b border-white/[0.08] px-4 py-3 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)]"
+      >
+        <button type="button" onClick={onClose} title="back to the app (Esc)" className={chip}>
+          ‹ back
         </button>
-        <span className="min-w-0 flex-1 truncate text-xs text-neutral-400" title={url}>
+        {/* The host, not the full URL: it is the part that says where you are,
+            and the rest would truncate away anyway. Full URL on hover. */}
+        <span
+          className="min-w-0 flex-1 truncate text-xs tracking-tight text-neutral-500"
+          title={url}
+        >
           {host}
         </span>
-        <button type="button" onClick={() => setEpoch((e) => e + 1)} title="reload" className={iconButton}>
+        <button type="button" onClick={() => setEpoch((e) => e + 1)} title="reload" className={chip}>
           reload
         </button>
         <button
           type="button"
           onClick={() => onOpenExternally(url)}
           title="open in your browser"
-          className="shrink-0 rounded-md bg-[#4f8dff]/15 px-2 py-0.5 text-xs text-[#4f8dff] transition hover:bg-[#4f8dff]/25"
+          className="shrink-0 rounded-full bg-[#4f8dff]/20 px-2.5 py-1 text-xs font-medium tracking-tight text-[#4f8dff] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12)] transition duration-200 hover:bg-[#4f8dff]/30 active:scale-90"
         >
-          browser
+          open in browser
         </button>
-      </div>
+      </header>
 
       {/* Phrased as a question because it is one: a blank frame here means the
           site refused to be embedded, and that is indistinguishable from a
           page that simply looks empty. */}
       {offerBrowser && (
-        <p className="shrink-0 border-b border-white/10 bg-white/[0.03] px-3 py-1 text-[11px] text-neutral-500">
+        <p className="shrink-0 border-b border-white/[0.08] bg-white/[0.02] px-4 py-1.5 text-[11px] tracking-tight text-neutral-500">
           Nothing here? Some sites won't open inside an app —{" "}
           <button
             type="button"
