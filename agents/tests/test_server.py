@@ -852,8 +852,10 @@ async def test_idle_shutdown_disabled_when_zero() -> None:
 
 
 async def test_cleanup_removes_the_pidfile(settings, tmp_path) -> None:
+    # Our own pid, because that is what a real server writes and what cleanup
+    # now requires before it deletes anything — see the record tests below.
     pidfile = tmp_path / "daimon-agent.pid"
-    pidfile.write_text("123\n4711\n", encoding="utf-8")
+    pidfile.write_text(f"{os.getpid()}\n4711\n", encoding="utf-8")
     app = await create_app(settings, graph_builder=fake_graph_builder, pidfile=pidfile)
     async with TestClient(TestServer(app)):
         assert pidfile.exists()  # still there while the app is up
@@ -1140,3 +1142,42 @@ async def test_editing_rejects_a_non_string_body(client: TestClient) -> None:
     settings = client.app["settings"]
     _skill(settings.skills_dir, "changelog")
     assert (await client.put("/skills/changelog", json={"content": None})).status == 400
+
+
+# --- the discovery record ----------------------------------------------------
+#
+# The pidfile in a workspace's run dir is what `remote/discovery.py` enumerates
+# to answer "which agent servers are running on this machine" — the list a phone
+# sees. One slot per workspace, so two servers on the same workspace contend for
+# it, and only the one currently recorded there may remove it. Removal on exit
+# itself is covered by test_cleanup_removes_the_pidfile above.
+
+
+async def test_a_server_leaves_another_servers_record_alone(settings, tmp_path) -> None:
+    # The slot was taken over by a second server on the same workspace (another
+    # app instance, a CLI server on the same root). This one is on its way out
+    # and no longer owns the record — deleting it stranded the server that does,
+    # which stayed up and serving while `discover()` reported nothing at all.
+    other = os.getpid() + 1
+    pidfile = tmp_path / "daimon-agent.pid"
+    pidfile.write_text(f"{other}\n4712\n", encoding="utf-8")
+
+    app = await create_app(settings, graph_builder=fake_graph_builder, pidfile=pidfile)
+    async with TestClient(TestServer(app)):
+        pass
+
+    assert pidfile.exists(), "a departing server deleted a record it did not own"
+    assert pidfile.read_text(encoding="utf-8").splitlines()[0] == str(other)
+
+
+async def test_a_garbage_record_is_left_alone(settings, tmp_path) -> None:
+    # Unreadable means unowned. A stale record is health-probed away by
+    # discovery; a deleted one cannot be recovered, so this errs toward keeping.
+    pidfile = tmp_path / "daimon-agent.pid"
+    pidfile.write_text("not-a-pid\n", encoding="utf-8")
+
+    app = await create_app(settings, graph_builder=fake_graph_builder, pidfile=pidfile)
+    async with TestClient(TestServer(app)):
+        pass
+
+    assert pidfile.exists()
