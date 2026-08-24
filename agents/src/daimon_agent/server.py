@@ -34,7 +34,7 @@ from . import live_frames
 from .browser import aclose_browser, build_browser
 from .bus import EventBus
 from .busws import make_bus_ws_handler
-from .client import workspace_run_dir
+from .client import _read_pid, workspace_run_dir
 from .config import Settings
 from .envfile import patch_env_file
 from .eventlog import FLUSH_INTERVAL_S, EventLog
@@ -477,8 +477,21 @@ async def create_app(
         forget_reads()
         app["memory"].close()
         await _stop_pinchtab()
+        # Only if it still names *us*. The record is one slot per workspace
+        # (workspace_run_dir keys on the resolved path), so a second server on
+        # the same workspace — another app instance, a CLI server on the same
+        # root — takes the slot on startup. Deleting unconditionally meant the
+        # one leaving took the record of the one still serving with it, and
+        # `discover()` then reported the machine as having no servers at all
+        # while the app sat there running one.
+        #
+        # Same discipline stop_server already applies before it kills anything:
+        # act only on what you are recorded as owning. A garbage or absent file
+        # reads as None, which never equals a pid, so it is left alone — the
+        # safe direction, since a stale record is health-probed away by
+        # discovery._healthy while a deleted one cannot be recovered.
         pidfile = app.get("pidfile")
-        if pidfile is not None:
+        if pidfile is not None and _read_pid(pidfile) == os.getpid():
             with contextlib.suppress(OSError):
                 pidfile.unlink()
 
@@ -1730,10 +1743,14 @@ def main() -> None:
     # `daimon --stop` and concurrent spawns can find us. The app and manual
     # runs never set it, so they stay unmanaged (each owner kills only its
     # own). Writing it here (not in the spawner) kills the double-spawn race:
-    # the pidfile always names the live server, so a stale one is
+    # the pidfile always names *a* live server, so a stale one is
     # dead-by-definition and the next ensure/--stop just removes it.
     # Passed through to create_app so cleanup() removes it on any clean exit
-    # (idle timeout, --stop, SIGTERM) — not just when a spawner overwrites it.
+    # (idle timeout, --stop, SIGTERM) — not just when a spawner overwrites it,
+    # and only while it still names this process. The slot is per workspace and
+    # the last server to start owns it; one leaving must not delete a record it
+    # no longer holds, or the server still serving goes missing from
+    # `discover()` and the phone reports the machine as empty.
     pidfile_env = os.environ.get("DAIMON_PIDFILE")
     # Absent an explicit path, announce ourselves in this workspace's run dir
     # anyway. It used to be that only a CLI-spawned server got a pidfile, and
